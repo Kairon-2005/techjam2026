@@ -1,12 +1,23 @@
-"""Random search over rerank weights with honest k-fold cross-validation.
+"""Random search over rerank weights, with a fold-level stability check.
 
 One full evaluation yields per-session results, so fold metrics are computed
 post-hoc for free. We report:
-  * full  — score on all 200 sessions (optimistic, this is what we tuned on)
-  * cv    — 5-fold estimate of the *tuning procedure*: for each fold, pick the
-            config that maximises the other four folds, then score it on the
-            held-out fold. This is the number that estimates private-set
-            performance.
+  * full  — score on all 200 sessions. This is a DEVELOPMENT score: it is the
+            number we tuned on.
+  * cv    — 5-fold check on the weight-selection step only: for each fold, pick
+            the config that maximises the other four folds, then score it on the
+            held-out fold.
+
+WHAT cv IS NOT: an unbiased estimate of private-set performance. The folds
+isolate one late step -- choosing among weight vectors. Everything upstream of
+that (features, stopword lists, parse templates, the ask policy, the override
+policy, the decision to rerank at all) was designed while looking at all 200
+public sessions, so it leaks into every fold. A held-out fold here re-scores a
+pipeline that has already seen it.
+
+Report the full-set number as "public development score" and cv as evidence
+that the weight vector is not knife-edge. Do not write "0.928 +/- 0.005" and
+call it a private-set prediction.
 """
 from __future__ import annotations
 
@@ -101,7 +112,7 @@ def report(runs: list[dict], samples: list[dict]) -> None:
         train_pick = max(runs, key=lambda r: score_of([s for s in r["sessions"]
                                                        if s["sample_id"] not in test]))
         held.append(score_of([s for s in train_pick["sessions"] if s["sample_id"] in test]))
-    print(f"\n=== 5 折交叉验证（估计调参流程的泛化能力）===")
+    print(f"\n=== 5 折：仅权重选择步骤的稳定性检查（非私有集无偏估计）===")
     for i, h in enumerate(held):
         print(f"  fold {i}: held-out score = {h:.4f}")
     print(f"  均值 = {statistics.fmean(held):.4f}   标准差 = {statistics.pstdev(held):.4f}")

@@ -21,6 +21,9 @@ import evaluator.local_evaluator as E
 import starter.agent as A
 
 
+_IS_V2 = __import__('sys').argv[1:2] == ['v2']
+
+
 def make_styles():
     def s0_identity(kind, **kw):
         return None  # keep original
@@ -166,7 +169,7 @@ def main():
               f"{r['mrr']:>8.3f}{r['mttc']:>7.2f}", flush=True)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and not _IS_V2:
     main()
 
 
@@ -229,6 +232,7 @@ def main_v2(extra_cfg=None):
               f"{r['mrr']:>8.3f}{r['mttc']:>7.2f}", flush=True)
 
 
-if __name__ == "__main__" and __import__("sys").argv[1:2] == ["v2"]:
-    import json as _json, sys as _sys
+if __name__ == "__main__" and _IS_V2:
+    import json as _json
+    import sys as _sys
     main_v2(_json.loads(_sys.argv[2]) if len(_sys.argv) > 2 else None)

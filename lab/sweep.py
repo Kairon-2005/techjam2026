@@ -22,9 +22,20 @@ LOG = Path("lab/experiments.jsonl")
 
 
 def git_hash() -> str:
+    """Commit of the code that ran, with a +dirty marker when it is unstaged.
+
+    Without the marker every row claims a commit that may not contain the code
+    that produced it -- which is what happened to every row logged before
+    2f85538, all of which point at the untouched starter commit.
+    """
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                              capture_output=True, text=True, timeout=5).stdout.strip() or "nogit"
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        if not head:
+            return "nogit"
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "starter", "lab"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+        return f"{head}+dirty" if dirty else head
     except Exception:
         return "nogit"
 
@@ -57,19 +68,19 @@ def run(configs: dict[str, dict]) -> list[dict]:
 
 DEFAULT_SWEEP = {
     "control_probe":     {"ask_policy": "probe_cycle", "on_override": "erase",
-                          "chrome_stop": False, "route": False},
+                          "chrome_stop": False},
     "H1_ask_other":      {"ask_policy": "other", "on_override": "erase",
-                          "chrome_stop": False, "route": False},
+                          "chrome_stop": False},
     "H2_keep_override":  {"ask_policy": "probe_cycle", "on_override": "keep",
-                          "chrome_stop": False, "route": False},
+                          "chrome_stop": False},
     "H1+H2":             {"ask_policy": "other", "on_override": "keep",
-                          "chrome_stop": False, "route": False},
+                          "chrome_stop": False},
     "H1+H2+chrome":      {"ask_policy": "other", "on_override": "keep",
-                          "chrome_stop": True, "route": False},
+                          "chrome_stop": True},
     "other_then_cycle":  {"ask_policy": "other_then_cycle", "on_override": "keep",
-                          "chrome_stop": True, "route": False},
+                          "chrome_stop": True},
     "H1+decay":          {"ask_policy": "other", "on_override": "decay",
-                          "chrome_stop": True, "route": False},
+                          "chrome_stop": True},
 }
 
 if __name__ == "__main__":

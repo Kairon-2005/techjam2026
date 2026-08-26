@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -46,9 +47,10 @@ PROBE_ORDER = ["material", "color", "style", "feature", "use_case",
 
 DEFAULTS = {
     # --- dialogue policy ---
-    "ask_policy": "other",        # other | probe_cycle | other_then_cycle
+    "ask_policy": "other",        # other | probe_cycle | other_then_cycle | pool | other_then_pool
     "ask_fallback_after": 2,      # consecutive uninformative replies to "other" before cycling
-    "on_override": "keep",        # keep | erase | decay
+    "pool_depth": 30,             # candidates inspected by the pool-aware asker
+    "on_override": "keep",        # keep | erase | decay | slot
     "filter_noise": True,
     "chrome_stop": True,
     "term_cap": 60,
@@ -87,6 +89,9 @@ DEFAULTS = {
     "pop_mode": "log",           # log | pct | pct2 | pct4 | pct_rating
     # Per-route weight overrides, e.g. {"browsing": {"w_pop": 6.0}}.
     "route_overrides": {},
+    # Build order/card index structures only when their weights are non-zero.
+    # Both default to 0.0, so the submission default skips ~80 MB of dead index.
+    "build_extras": None,         # None = infer from w_pos / w_card
 }
 
 _CATALOG_CACHE: dict[str, "_Catalog"] = {}
@@ -120,7 +125,10 @@ class _Catalog:
 
     FIELDS = ("title", "categories", "features", "details", "store", "description")
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, extras: bool = True) -> None:
+        # `extras` controls the order/card structures, which are only read when
+        # w_pos / w_card are non-zero. Both are 0.0 by default.
+        self.extras = extras
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         cur = self.conn.cursor()
         cur.execute(
@@ -133,6 +141,7 @@ class _Catalog:
         self.order: dict[str, list[str]] = {}  # ordered flattened values (position signal)
         self.card: dict[str, list[str]] = {}   # simulator-replicated 4 constraint strings
         self.cats: dict[str, str] = {}
+        self.title: dict[str, str] = {}   # short display title for explanations
         self.pop: dict[str, float] = {}
         self.pop_pct: dict[str, float] = {}
         self.rating: dict[str, float] = {}
@@ -152,9 +161,11 @@ class _Catalog:
                 self.feat[asin] = _norm(" ".join(fd))
                 ordered = [_norm(v) for v in fd if v]
                 self.vals[asin] = set(ordered)
-                self.order[asin] = ordered[:12]
-                self.card[asin] = _card4(p, blob)
+                if extras:
+                    self.order[asin] = ordered[:12]
+                    self.card[asin] = _card4(p, blob)
                 self.cats[asin] = _norm(_text(p.get("categories")))
+                self.title[asin] = _clean(_text(p.get("title")), 90)
                 rating = p.get("average_rating") or 0.0
                 count = p.get("rating_number") or 0
                 raw_pop[asin] = (float(rating) / 5.0) * math.log1p(float(count))
@@ -191,25 +202,37 @@ class _Catalog:
         return math.log((self.n_docs + 1) / (self.df.get(term, 0) + 1))
 
 
-def _catalog(path: str | Path) -> _Catalog:
+def _catalog(path: str | Path, extras: bool = True) -> _Catalog:
     key = str(Path(path).resolve())
-    if key not in _CATALOG_CACHE:
-        _CATALOG_CACHE[key] = _Catalog(Path(path))
+    cached = _CATALOG_CACHE.get(key)
+    # A catalog built WITH extras is a superset: reuse it for lean requests too.
+    if cached is not None and (cached.extras or not extras):
+        return cached
+    _CATALOG_CACHE[key] = _Catalog(Path(path), extras=extras)
     return _CATALOG_CACHE[key]
 
 
 def _load_config(config: dict | None) -> dict:
     resolved = dict(DEFAULTS)
+    unknown: set[str] = set()
     raw = os.environ.get("TJ_CONFIG")
     if raw:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
+                unknown |= set(parsed) - set(DEFAULTS)
                 resolved.update(parsed)
         except ValueError:
             pass  # a stray env var on the judging host must never kill the run
     if config:
+        unknown |= set(config) - set(DEFAULTS)
         resolved.update(config)
+    if unknown:
+        # Loud in the lab, never fatal at judging time. An ablation that sets a
+        # key the agent does not read is a silently void experiment -- which is
+        # exactly what `"route": false` was in lab/sweep.py.
+        print(f"[agent] warning: ignoring unknown config keys: {sorted(unknown)}",
+              file=sys.stderr)
     return resolved
 
 
@@ -264,6 +287,40 @@ NOISE_RE = re.compile(
     r"(?:\bno\b|\bnot\b|don'?t|couldn'?t|could not)[^.]{0,50}\bpreference\b"
     r"|your judgment|do not mind|don'?t mind|i'?m easy|i am easy|you pick"
     r"|any \w+ is fine|up to you|not quite|wrong direction|not really working", re.I)
+# Slot taxonomy. The names come from the API contract's ALLOWED_ATTRIBUTES, not
+# from the simulator, so the same buckets apply to any customer phrasing.
+SLOT_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("budget", re.compile(r"budget|price|\$\s*\d|\bunder\s+\d|<=\s*\d|\bcheap|\bafford", re.I)),
+    ("material", MATERIAL_RE),
+    ("color", re.compile(r"\bcolou?r\b|" + COLOR_RE.pattern, re.I)),
+    ("size", re.compile(r"\bsize|sizing|width|\bwide\b|narrow|\bfits?\b|\blength\b", re.I)),
+    ("style", re.compile(r"department|\bstyle|\bfit\b|sleeve|\bneck|collar|pattern", re.I)),
+    ("use_case", re.compile(r"hiking|running|gym|winter|summer|outdoor|\bwork\b|travel|casual", re.I)),
+    ("brand", re.compile(r"\bbrand\b|\bmade by\b", re.I)),
+)
+
+
+# Catalog-readable attribute vocabularies. Used to measure how much a given
+# question would actually split the current candidate pool.
+ATTR_VOCAB: dict[str, "re.Pattern[str]"] = {
+    "material": MATERIAL_RE,
+    "color": COLOR_RE,
+    "style": re.compile(r"\b(slim|regular|relaxed|loose|oversized|crew neck|v-?neck|"
+                        r"long sleeve|short sleeve|sleeveless|hooded|zip|button)\b", re.I),
+    "use_case": re.compile(r"\b(hiking|running|gym|workout|yoga|winter|summer|outdoor|"
+                           r"work|travel|casual|formal|sleep|swim)\b", re.I),
+    "size": re.compile(r"\b(x-?small|small|medium|large|x-?large|xx-?large|petite|plus)\b", re.I),
+}
+
+
+def slot_of(phrase: str) -> str:
+    """Bucket a constraint phrase into one attribute slot ("feature" = default)."""
+    for name, pattern in SLOT_RES:
+        if pattern.search(phrase):
+            return name
+    return "feature"
+
+
 OVERRIDE_RE = re.compile(
     r"ignore my earlier|forget what i said|scratch that|disregard my earlier"
     r"|change of plans|start over", re.I)
@@ -318,7 +375,10 @@ class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl",
                  config: dict | None = None) -> None:
         self.cfg = _load_config(config)
-        self.cat = _catalog(_resolve_catalog(catalog_path))
+        extras = self.cfg.get("build_extras")
+        if extras is None:
+            extras = bool(self.cfg["w_pos"]) or bool(self.cfg["w_card"])
+        self.cat = _catalog(_resolve_catalog(catalog_path), extras=bool(extras))
         self.conn = self.cat.conn
         self.stop = set(BASE_STOP)
         if self.cfg["chrome_stop"]:
@@ -339,9 +399,45 @@ class Agent:
             return "browsing"
         return "override"
 
-    def _pick_attribute(self, state: dict) -> str:
+    def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]") -> float:
+        """Shannon entropy (bits) of one attribute's values across the pool.
+
+        A question is worth asking only if the surviving candidates actually
+        disagree on it: if every candidate is black, "what colour?" buys nothing.
+        """
+        counts: dict[str, int] = {}
+        for asin in asins:
+            match = pattern.search(self.cat.text.get(asin, ""))
+            value = match.group(1).lower() if match else ""
+            counts[value] = counts.get(value, 0) + 1
+        total = sum(counts.values())
+        if total < 2 or len(counts) < 2:
+            return 0.0
+        return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
+
+    def _pool_attribute(self, state: dict, pool: list[str]) -> tuple[str, float, int]:
+        """Ask about whichever attribute best splits the live candidate pool."""
+        depth = max(2, int(self.cfg["pool_depth"]))
+        window = pool[:depth]
+        best, best_bits = "other", 0.0
+        for attribute, pattern in ATTR_VOCAB.items():
+            if attribute in state["asked"]:
+                continue
+            bits = self._pool_entropy(window, pattern)
+            if bits > best_bits:
+                best, best_bits = attribute, bits
+        return best, best_bits, len(window)
+
+    def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
         policy = self.cfg["ask_policy"]
         limit = self.cfg["ask_fallback_after"]
+        if policy in ("pool", "other_then_pool"):
+            if policy == "other_then_pool" and state["asked"].count("other") < 2:
+                return "other"
+            attribute, bits, _ = self._pool_attribute(state, pool or [])
+            state["last_bits"] = bits
+            # No question discriminates the pool -> fall back to open-ended.
+            return attribute if bits >= 0.2 else "other"
         if policy == "other" and limit and state.get("dry_others", 0) >= limit:
             # The simulator is not answering "other": degrade to concrete attributes.
             return next((a for a in PROBE_ORDER[:-1] if a not in state["asked"]), "other")
@@ -352,6 +448,44 @@ class Agent:
                 return "other"
             return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
         return "other"
+
+    def _slot_override(self, state: dict, message: str) -> None:
+        """Selective rewrite: drop only the slots the customer just replaced.
+
+        "forget boots, I want running shoes" supersedes the use_case/category
+        slot and leaves an unrelated colour constraint standing. Phrases in a
+        superseded slot are removed along with the terms only they contributed;
+        every other slot survives.
+        """
+        new_category, new_phrases = parse_message(message)
+        superseded = {slot_of(p) for p in new_phrases if len(_norm(p)) >= 3}
+        if new_category:
+            superseded.add("category")
+            state["category"] = new_category
+        if not superseded:
+            return
+        incoming = {_norm(p) for p in new_phrases}
+        keep, drop = [], []
+        for phrase in state["phrases"]:
+            if _norm(phrase) in incoming:          # re-stated verbatim: not stale
+                keep.append(phrase)
+            elif slot_of(phrase) in superseded:
+                drop.append(phrase)
+            else:
+                keep.append(phrase)
+        if not drop:
+            return
+        state["phrases"] = keep
+        survivors: set[str] = set()
+        for phrase in keep:
+            survivors.update(state["provenance"].get(phrase, ()))
+        survivors.update(self._terms(state["category"] or ""))
+        doomed: set[str] = set()
+        for phrase in drop:
+            doomed.update(state["provenance"].pop(phrase, ()))
+        doomed -= survivors
+        if doomed:
+            state["terms"] = [t for t in state["terms"] if t not in doomed]
 
     def _retrieve(self, terms: list[str], limit: int) -> list[tuple[str, float]]:
         if not terms or self.cfg["term_cap"] < 1 or limit < 1:
@@ -458,17 +592,63 @@ class Agent:
         scored.sort()
         return [asin for _, _, asin in scored]
 
+    # ---- customer-facing copy ----------------------------------------
+    # The evaluator only requires `message` to be a string; it drives the
+    # simulator entirely from `ask_attribute`. So the wording is free, and
+    # there is no reason for it to read like a form field.
+    ASK_COPY = {
+        "material": "what it should be made of",
+        "color": "which colours work for you",
+        "size": "what size you take",
+        "style": "the cut or style you prefer",
+        "feature": "any feature you can't do without",
+        "use_case": "where you'll mostly be using it",
+        "brand": "whether you lean towards a particular brand",
+        "budget": "roughly what you'd like to spend",
+        "category": "what kind of item you have in mind",
+        "other": "anything else that matters to you",
+    }
+
+    def _compose(self, attribute: str, state: dict, ranked: list[str],
+                 shown: list[str]) -> str:
+        if not shown:
+            return ("I haven't got a good match yet — could you tell me a bit more "
+                    "about what you're after?")
+        lead = ""
+        top = self.cat.title.get(shown[0], "")
+        matched = [p for p in state["phrases"]
+                   if _norm(p) in self.cat.text.get(shown[0], "")][:2]
+        if top:
+            if matched:
+                lead = (f"Top of the list right now is {top} — it matches "
+                        f"{' and '.join(matched)}. ")
+            else:
+                lead = f"Top of the list right now is {top}. "
+        bits = state.get("last_bits", 0.0)
+        if attribute in ATTR_VOCAB and bits:
+            depth = min(len(ranked), max(2, int(self.cfg["pool_depth"])))
+            ask = (f"The {depth} closest options still disagree most on "
+                   f"{self.ASK_COPY.get(attribute, attribute)}, so that answer would "
+                   f"narrow things down fastest — any preference?")
+        else:
+            ask = f"To sharpen this, could you tell me {self.ASK_COPY.get(attribute, attribute)}?"
+        return lead + ask
+
     # ---- protocol ----------------------------------------------------
-    def reset(self, session_id: str, user_profile: dict) -> None:
-        self._sessions[session_id] = {
+    @staticmethod
+    def _blank_state(profile: dict | None = None) -> dict:
+        return {
             "terms": [], "asked": [], "phrases": [], "category": None,
-            "route": None, "profile": user_profile or {}, "dry_others": 0,
+            "route": None, "profile": profile or {}, "dry_others": 0,
+            # phrase -> terms it contributed, so slot erasure can drop them too
+            "provenance": {}, "overrides": 0,
         }
 
+    def reset(self, session_id: str, user_profile: dict) -> None:
+        self._sessions[session_id] = self._blank_state(user_profile)
+
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
-        state = self._sessions.setdefault(session_id, {
-            "terms": [], "asked": [], "phrases": [], "category": None,
-            "route": None, "profile": {}, "dry_others": 0})
+        state = self._sessions.setdefault(session_id, self._blank_state())
         message = user_message if isinstance(user_message, str) else str(user_message or "")
         low = message.lower()
 
@@ -477,12 +657,20 @@ class Agent:
 
         if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
             mode = self.cfg["on_override"]
+            state["overrides"] += 1
             if mode == "erase":
                 state["terms"] = []
                 state["phrases"] = []
+                state["provenance"] = {}
             elif mode == "decay":
+                # Keep the MOST RECENT evidence: the tail, not the head.
+                state["terms"] = state["terms"][-8:]
+                state["phrases"] = state["phrases"][-1:]
+            elif mode == "decay_head":   # original (oldest-first) behaviour, kept for ablation
                 state["terms"] = state["terms"][:8]
                 state["phrases"] = state["phrases"][:1]
+            elif mode == "slot":
+                self._slot_override(state, message)
 
         noisy = any(n in low for n in NOISE_REPLIES) or (
             NOISE_RE.search(low) is not None and not CUE_RE.search(low))
@@ -505,23 +693,27 @@ class Agent:
             for phrase in phrases:
                 if phrase not in state["phrases"]:
                     state["phrases"].append(phrase)
+                state["provenance"].setdefault(phrase, self._terms(phrase))
             for term in self._terms(message):
                 if term not in state["terms"]:
                     state["terms"].append(term)
-
-        attribute = self._pick_attribute(state)
-        state["asked"].append(attribute)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
         limit = max(top_k, self.cfg["candidates"]) if self.cfg["rerank"] else top_k
         cands = self._retrieve(state["terms"], limit)
         if self.cfg["rerank"] and cands:
-            ordered = self._rerank(cands, state)[:top_k]
+            ranked = self._rerank(cands, state)
         else:
-            ordered = [a for a, _ in cands][:top_k]
+            ranked = [a for a, _ in cands]
+        ordered = ranked[:top_k]
+
+        # The question is chosen AFTER retrieval so it can be conditioned on the
+        # candidates that actually survived.
+        attribute = self._pick_attribute(state, ranked)
+        state["asked"].append(attribute)
 
         return {
-            "message": f"Could you tell me more about your preferred {attribute.replace('_', ' ')}?",
+            "message": self._compose(attribute, state, ranked, ordered),
             "ask_attribute": attribute,
             "recommendations": [{"parent_asin": a} for a in ordered],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
