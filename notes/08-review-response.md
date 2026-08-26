@@ -530,3 +530,63 @@ UNCERTAIN 是兜底分支，任何无法解析且不匹配已知模式的消息�
 
 **证伪条件**：若 override_category 未显著高于 0.9150，或任一 payload 风格跌到
 blanket gate 的水平，则该假设被否决，回到二选一。
+
+## 预注册实验结果：假设成立，且严格优于两个旧选项
+
+| 指标 | 预测 | 实测 | |
+|---|---|---|---|
+| override_category | ≈0.923 | **0.924458 ± 0.0019** | ✅ 且高于 blanket gate（0.923708）与 slot_soft=0（0.923708） |
+| payload_soft | ≈0.8777 | **0.8777** | ✅ 与默认逐位相同 |
+| payload_shuffle | ≈0.8982 | **0.8982** | ✅ 逐位相同 |
+| payload_drop | ≈0.8842 | **0.8842** | ✅ 逐位相同 |
+| clean | 0.928508 | **0.928508** | ✅ |
+| override_genuine | ≈0.9220 | **0.921971** | ✅ 且高于 blanket gate（0.921461） |
+
+blanket gate 在三种 payload 风格上要付 0.0160 / 0.0053 / 0.0105；
+**span 抑制一分不付**。因为「哪一部分作废」是用户自己说的，不需要我们去猜。
+`suppress_abandoned=True` 已设为默认。
+
+---
+
+# Open-world 证据抽取（审查 item 5）
+
+原逻辑是**高 precision、低 recall** 的解析器：模板解析不出来 ⇒ 没有 category /
+phrase ⇒ UNCERTAIN ⇒ 完全丢弃。对未知的敷衍很安全，但**对未知的真实约束同样丢弃**。
+
+现在模板失败后再对原句跑 slot 正则 + 特征词表 + 否定检测；
+**抽到明确 attribute/value 才标 INFORMATIVE**，否则才落 UNCERTAIN。
+抽取到的证据是 `hardness="soft"`、`confidence=0.6`，**低于模板证据**，不等权。
+
+| 输入 | 抽取结果 |
+|---|---|
+| "Leather would be ideal." | material=leather (+) |
+| "I'd love something blue." | color=blue (+) |
+| "Mostly for hiking." | use_case=hiking (+) |
+| "Something waterproof would help." | feature=waterproof (+) |
+| "I need it machine washable." | feature=machine washable (+) |
+| **"Nothing too formal."** | **use_case=formal (−1)** 否定被识别 |
+
+9 条敷衍措辞（含 holdout 六句）**全部零抽取**，仍判 UNCERTAIN。
+clean 0.928508 与 compat 0.928708 均不变（clean 上模板永远解析成功，此路径不触发）。
+
+---
+
+# Holdout 状态：已消费（审查 item 4）
+
+seeds 12–31 + 那六句未见措辞**已经向开发提供了反馈**
+（暴露了 `MORE_RE` 只认字面 "more" 的缺口），因此：
+
+- 该组合**不再是 untouched holdout**，不得用于后续调参；
+- 六句措辞已并入 `tests/test_agent.py` 的开发回归（`OpenWorldEvidenceTest.UNINFORMATIVE`）；
+- **下一轮调参前必须新建 sealed phrasing set**，并在使用前只运行一次。
+
+已记录的 holdout 结论仍然有效——它验证的是**当时冻结的 Phase 1 配置**，
+那次验证本身没有被污染。
+
+## 对外表述口径（审查要求）
+
+> **Dual-route control plane 已完成；Buying/Browsing 的 route-specific
+> retrieval data planes 尚未实现。** Phase 2A 完成的是路由标签语义、
+> 证据驱动的路由转移、配置贯通与可观测性；两条路由的默认权重仍然相同，
+> 没有 facet/filter 路、没有 dense 路、没有 route fusion。
+> **不得把 Phase 2A 写成 Pillar I 已完成。**

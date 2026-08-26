@@ -88,6 +88,12 @@ DEFAULTS = {
     # Phase 1A: build the retrieval query from accepted evidence only, instead
     # of from every token of every message the noise filter let through.
     "evidence_query": True,
+    # Fall back to raw-message slot/feature extraction when no template matches,
+    # so natural phrasing ("Leather would be ideal") is not discarded like
+    # filler. Extracted evidence is soft and lower-confidence than template
+    # evidence, never equal to it.
+    "open_world": True,
+    "open_world_confidence": 0.6,
     "chrome_stop": True,
     "term_cap": 60,
     # --- retrieval ---
@@ -398,8 +404,45 @@ REFUSAL_RE = re.compile(
 CORRECTION_RE = re.compile(r"not quite|wrong direction|not really working|that'?s not", re.I)
 
 
+# Common product qualities that carry real intent but appear in no template.
+FEATURE_LEX = re.compile(
+    r"\b(waterproof|water[- ]resistant|breathable|lightweight|light\s?weight|insulated"
+    r"|adjustable|machine washable|non[- ]slip|slip[- ]resistant|padded|quick[- ]dry"
+    r"|wrinkle[- ]free|stretchy|durable|warm|cushioned|arch support)\b", re.I)
+NEGATION_RE = re.compile(
+    r"\b(?:not|no|nothing|never|avoid|without|don'?t want|rather not|too)\b", re.I)
+
+
+def open_world_evidence(message: str) -> list[tuple[str, str, int]]:
+    """Pull (attribute, value, polarity) out of free-form phrasing.
+
+    The template parser is high precision and low recall: anything it cannot
+    parse yields no evidence at all, so "Leather would be ideal" and "Mostly
+    for hiking" were discarded exactly like "Hmm, hard to say". That is safe
+    against filler but silently drops real constraints, which is the paraphrase
+    risk on the private set. This runs only after the templates find nothing.
+    """
+    raw = (message or "").strip()
+    if not raw:
+        return []
+    found: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for attribute, pattern in list(ATTR_VOCAB.items()) + [("feature", FEATURE_LEX)]:
+        for match in pattern.finditer(raw):
+            value = _norm(match.group(0))
+            if (attribute, value) in seen:
+                continue
+            seen.add((attribute, value))
+            # Negation within the ~28 characters before the value flips polarity:
+            # "nothing too formal" is a constraint, just an inverted one.
+            window = raw[max(0, match.start() - 28):match.start()]
+            found.append((attribute, value, -1 if NEGATION_RE.search(window) else 1))
+    return found
+
+
 def classify_reply(message: str, parsed_phrases: list[str],
-                   parsed_category: str | None = None) -> str:
+                   parsed_category: str | None = None,
+                   open_world: bool = True) -> str:
     """Label one customer turn. Evidence is merged only for INFORMATIVE/OVERRIDE.
 
     Order matters: an override is an override even though it also carries a new
@@ -425,6 +468,8 @@ def classify_reply(message: str, parsed_phrases: list[str],
         return Outcome.CORRECTION
     if REFUSAL_RE.search(low):
         return Outcome.REFUSAL
+    if open_world and open_world_evidence(message):
+        return Outcome.INFORMATIVE
     return Outcome.UNCERTAIN
 
 
@@ -1157,7 +1202,8 @@ class Agent:
             self._suppress_abandoned(state, message)
 
         category, phrases = parse_message(message)
-        outcome = classify_reply(message, phrases, category)
+        outcome = classify_reply(message, phrases, category,
+                                 open_world=turn_cfg_noise["open_world"])
         state["outcome"] = outcome
         if outcome == Outcome.REQUEST_MORE:
             state["wants_more"] += 1         # telemetry: how often they asked
@@ -1191,6 +1237,18 @@ class Agent:
                 category = head or None
             if category and not state["category"]:
                 state["category"] = category
+            if turn_cfg_noise["open_world"] and not phrases and not category:
+                for attribute, value, polarity in open_world_evidence(message):
+                    if any(sl.value == value for sl in state["slots"]):
+                        continue
+                    terms = tuple(self._terms(value))
+                    state["slots"].append(SlotValue(
+                        attribute=attribute, value=value, polarity=polarity,
+                        hardness="soft", confidence=turn_cfg_noise["open_world_confidence"],
+                        source_turn=turn, provenance=terms))
+                    if polarity > 0 and value not in state["phrases"]:
+                        state["phrases"].append(value)
+                        state["provenance"][value] = list(terms)
             for phrase in phrases:
                 if phrase in state["phrases"]:
                     continue

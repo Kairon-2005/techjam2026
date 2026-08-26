@@ -443,6 +443,127 @@ class Phase1StateTest(unittest.TestCase):
         state["uncertain_streak"] = 2
         self.assertEqual(ag._easiest_unasked(state), "use_case")
 
+class OverrideDetectionTest(unittest.TestCase):
+    """A bare "forget" is not an override; adding a requirement is not either."""
+
+    TRUE_POSITIVES = [
+        "Actually, ignore my earlier preference. What I need is: leather.",
+        "Actually, forget shoes slippers entirely - that was the wrong direction. "
+        "What I need is: Rubber sole.",
+        "forget boots, I want running shoes",
+        "Change of plans - forget what I said before. Now I want: X.",
+        "scratch that. new requirement: rubber sole",
+        "Instead of synthetic, I want leather.",
+    ]
+    FALSE_POSITIVES = [
+        "Don't forget that it needs pockets.",
+        "Don't forget the waterproof requirement.",
+        "I forgot to mention that I prefer black.",
+        "A forget-me-not floral pattern.",
+        "I always forget my size.",
+        "Made of leather instead of synthetic",
+    ]
+
+    def test_real_overrides_are_detected(self) -> None:
+        for message in self.TRUE_POSITIVES:
+            self.assertTrue(A.is_override(message), message)
+
+    def test_adding_a_requirement_is_not_an_override(self) -> None:
+        for message in self.FALSE_POSITIVES:
+            self.assertFalse(A.is_override(message), message)
+
+    def test_abandoned_span_is_extracted_cleanly(self) -> None:
+        span = A.abandoned_span(
+            "Actually, forget shoes slippers entirely - that was the wrong direction. "
+            "What I need is: Rubber sole.")
+        self.assertEqual(span, "shoes slippers")
+
+    def test_no_span_when_nothing_was_abandoned(self) -> None:
+        self.assertEqual(A.abandoned_span("Don't forget it needs pockets."), "")
+
+
+class OpenWorldEvidenceTest(unittest.TestCase):
+    """Template failure must not silently discard a real constraint."""
+
+    INFORMATIVE = [
+        ("Leather would be ideal.", "material", "leather", 1),
+        ("I'd love something blue.", "color", "blue", 1),
+        ("Mostly for hiking.", "use_case", "hiking", 1),
+        ("Something waterproof would help.", "feature", "waterproof", 1),
+        ("I need it machine washable.", "feature", "machine washable", 1),
+    ]
+    # Holdout stonewalling plus the development phrases: none may extract.
+    UNINFORMATIVE = [
+        "Honestly I could go either way on that.",
+        "That's a tough one, I've got no strong feelings.",
+        "Whatever you'd recommend is fine by me.",
+        "I haven't really thought about it that much.",
+        "Could I see a few different ones?",
+        "Ehh, nothing jumps out at me.",
+        "Hmm, hard to say really.",
+        "I'm not sure, what do you think?",
+        "Can you just show me more options?",
+    ]
+
+    def test_natural_phrasing_yields_evidence(self) -> None:
+        for message, attribute, value, polarity in self.INFORMATIVE:
+            found = A.open_world_evidence(message)
+            self.assertIn((attribute, value, polarity), found, message)
+            category, phrases = A.parse_message(message)
+            self.assertEqual(A.classify_reply(message, phrases, category),
+                             A.Outcome.INFORMATIVE, message)
+
+    def test_negation_inverts_polarity(self) -> None:
+        found = A.open_world_evidence("Nothing too formal.")
+        self.assertTrue(any(pol == -1 for _, _, pol in found),
+                        "an inverted constraint is still a constraint")
+
+    def test_filler_extracts_nothing(self) -> None:
+        for message in self.UNINFORMATIVE:
+            self.assertEqual(A.open_world_evidence(message), [], message)
+            category, phrases = A.parse_message(message)
+            self.assertNotEqual(A.classify_reply(message, phrases, category),
+                                A.Outcome.INFORMATIVE, message)
+
+    def test_open_world_evidence_is_soft_and_lower_confidence(self) -> None:
+        A.clear_catalog_cache()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            ag = A.Agent(_catalog_file(Path(tmp.name)))
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Accessories Belts, but I'm still exploring.", 1, 10)
+            ag.respond("s", "Leather would be ideal.", 2, 10)
+            slot = [sl for sl in ag._sessions["s"]["slots"] if sl.value == "leather"]
+            self.assertTrue(slot, "natural phrasing must reach the evidence state")
+            self.assertEqual(slot[0].hardness, "soft")
+            self.assertLess(slot[0].confidence, 1.0,
+                            "extracted evidence must not outrank template evidence")
+        finally:
+            A.clear_catalog_cache()
+            tmp.cleanup()
+
+
+class AbandonedSpanSuppressionTest(unittest.TestCase):
+    def test_only_the_abandoned_span_loses_soft_rescue(self) -> None:
+        A.clear_catalog_cache()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            ag = A.Agent(_catalog_file(Path(tmp.name)))
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Accessories Scarves. A key requirement is: silk.", 1, 10)
+            ag.respond("s", "For that, what matters is: color: blue.", 2, 10)
+            ag.respond("s", "Actually, forget silk. What I need is: genuine leather.", 3, 10)
+            by_value = {sl.value: sl for sl in ag._sessions["s"]["slots"]}
+            self.assertIn("silk", by_value)
+            self.assertFalse(by_value["silk"].soft_ok,
+                             "the named abandoned span must lose soft rescue")
+            self.assertTrue(by_value["color: blue"].soft_ok,
+                            "unrelated evidence must keep soft rescue")
+        finally:
+            A.clear_catalog_cache()
+            tmp.cleanup()
+
+
 
 def tearDownModule() -> None:
     """Close the shared SQLite handles so the run ends without ResourceWarnings."""
