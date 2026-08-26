@@ -55,6 +55,11 @@ DEFAULTS = {
     "ask_fallback_after": 2,      # consecutive uninformative replies to "other" before cycling
     "pool_depth": 30,             # candidates inspected by the pool-aware asker
     "pool_give_up_after": 1,      # dry targeted questions before reverting to "other"
+    # Over-generality guidance: when the surviving pool spans this many distinct
+    # coarse categories it is not a ranking problem, it is an under-specified
+    # request. Detecting it forces a pool-derived question and switches the
+    # prompt from open-ended to a structured choice. 0 disables.
+    "overgeneral_cats": 6,
     "on_override": "keep",        # keep | erase | decay | slot
     "filter_noise": True,
     "chrome_stop": True,
@@ -77,6 +82,9 @@ DEFAULTS = {
     # paraphrasing. Deliberately left OFF. See notes/04-results.md.
     "w_card": 0.0,
     "w_soft": 0.0,       # static soft-overlap weight (always on if > 0)
+    # Pillar III personalization: boost candidates matching the profile's
+    # preference_tags. Measured, not assumed -- see notes/08.
+    "w_profile": 0.0,
     # Adaptive soft matching (Pillar III runtime adaptation): before scoring,
     # probe whether ANY candidate contains ANY disclosed phrase verbatim. If
     # exact matching is alive, use w_soft_lo; if it is dead (constraints were
@@ -318,6 +326,23 @@ ATTR_VOCAB: dict[str, "re.Pattern[str]"] = {
 }
 
 
+def _distinguishing(labels: list[str]) -> list[str]:
+    """Drop the words every option shares -- those carry no choice for the user.
+
+    "women clothing dresses casual" / "women clothing dresses work" becomes
+    "casual" / "work".
+    """
+    split = [l.split() for l in labels]
+    if len(split) < 2:
+        return labels
+    common = set(split[0])
+    for words in split[1:]:
+        common &= set(words)
+    trimmed = [" ".join(w for w in words if w not in common) or " ".join(words[-2:])
+               for words in split]
+    return trimmed if len(set(trimmed)) == len(trimmed) else labels
+
+
 def slot_of(phrase: str) -> str:
     """Bucket a constraint phrase into one attribute slot ("feature" = default)."""
     for name, pattern in SLOT_RES:
@@ -420,6 +445,27 @@ class Agent:
             return 0.0
         return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
 
+    def _overgeneral(self, pool: list[str], cfg: dict) -> tuple[bool, list[str]]:
+        """Is the pool too broad to rank, rather than merely unranked?
+
+        Truncating recommendations would be pure loss under this metric, so the
+        cutoff drives the QUESTION, not the result list: we stop trying to rank
+        an under-specified request and ask a structured one instead.
+        """
+        limit = int(cfg["overgeneral_cats"])
+        if not limit or not pool:
+            return False, []
+        head = pool[: max(2, int(cfg["pool_depth"]))]
+        counts: dict[str, int] = {}
+        for asin in head:
+            leaf = (self.cat.cats.get(asin, "").split(",")[-1] or "").strip()
+            if leaf:
+                counts[leaf] = counts.get(leaf, 0) + 1
+        if len(counts) < limit:
+            return False, []
+        top = [name for name, _ in sorted(counts.items(), key=lambda kv: -kv[1])[:3]]
+        return True, _distinguishing(top)
+
     def _pool_attribute(self, state: dict, pool: list[str],
                         cfg: dict | None = None) -> tuple[str, float, int]:
         """Ask about whichever attribute best splits the live candidate pool."""
@@ -444,7 +490,11 @@ class Agent:
             # A targeted question that yields nothing means our attribute
             # taxonomy disagrees with the customer's. Stop guessing buckets and
             # go open-ended rather than walking the whole list dry.
-            if state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
+            broad, options = self._overgeneral(pool or [], cfg)
+            state["broad_options"] = options
+            # An over-general pool is exactly when a targeted question pays, so
+            # the give-up guard is suspended while the request is still vague.
+            if not broad and state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
                 return "other"
             attribute, bits, _ = self._pool_attribute(state, pool or [], cfg)
             state["last_bits"] = bits
@@ -537,6 +587,10 @@ class Agent:
                 kept = [(t, w) for t, w in pairs if w >= floor]
                 ptoks.append(kept or pairs)
         cat_tokens = set(self._terms(state["category"] or ""))
+        prof_tags: list[str] = []
+        if cfg["w_profile"]:
+            prof_tags = [_norm(t) for t in (state.get("profile") or {}).get("preference_tags") or []]
+            prof_tags = [t for t in prof_tags if t]
 
         w_soft_eff = cfg["w_soft"]
         if cfg["soft_adaptive"] and phrases:
@@ -600,13 +654,16 @@ class Agent:
             if cat_tokens:
                 prod_cats = self.cat.cats.get(asin, "")
                 f_cat = sum(1 for t in cat_tokens if t in prod_cats) / len(cat_tokens)
+            f_profile = 0.0
+            if prof_tags:
+                f_profile = sum(1 for t in prof_tags if t in blob) / len(prof_tags)
             f_pop = self.cat.popularity(asin, cfg["pop_mode"])
             total = (cfg["w_bm25"] * f_bm25 + cfg["w_phrase"] * f_phrase
                      + cfg["w_idf"] * f_idf + cfg["w_cat"] * f_cat
                      + cfg["w_pop"] * f_pop + cfg["w_exact"] * f_exact
                      + cfg["w_field"] * f_field + cfg["w_pos"] * f_pos
                      + cfg["w_card"] * f_card + w_soft_eff * f_soft
-                     + cfg["slot_soft"] * f_slot)
+                     + cfg["slot_soft"] * f_slot + cfg["w_profile"] * f_profile)
             scored.append((-total, order, asin))
         scored.sort()
         return [asin for _, _, asin in scored]
@@ -635,15 +692,23 @@ class Agent:
                     "about what you're after?")
         lead = ""
         top = self.cat.title.get(shown[0], "")
-        matched = [p for p in state["phrases"]
-                   if _norm(p) in self.cat.text.get(shown[0], "")][:2]
+        # Prefer short attribute-like constraints; marketing prose lifted from a
+        # description reads badly when quoted back at the customer.
+        hits = [p for p in state["phrases"] if _norm(p) in self.cat.text.get(shown[0], "")]
+        matched = [_clean(p, 44) for p in sorted(hits, key=len) if len(p) <= 50][:2]
+        matched = [m for m in matched if m]
         if top:
             if matched:
                 lead = (f"Top of the list right now is {top} — it matches "
                         f"{' and '.join(matched)}. ")
             else:
                 lead = f"Top of the list right now is {top}. "
+        options = state.get("broad_options") or []
         bits = state.get("last_bits", 0.0)
+        if options and len(options) >= 2:
+            listed = ", ".join(options[:-1]) + f" or {options[-1]}"
+            return (lead + f"That still spans quite a range — I'm seeing {listed}. "
+                    f"Which of those is closest to what you want?")
         if attribute in ATTR_VOCAB and bits:
             depth = min(len(ranked), max(2, int(self.cfg["pool_depth"])))
             ask = (f"The {depth} closest options still disagree most on "
@@ -660,7 +725,7 @@ class Agent:
             "terms": [], "asked": [], "phrases": [], "category": None,
             "route": None, "profile": profile or {}, "dry_others": 0,
             # phrase -> terms it contributed, so slot erasure can drop them too
-            "provenance": {}, "overrides": 0, "dry_streak": 0,
+            "provenance": {}, "overrides": 0, "dry_streak": 0, "broad_options": [],
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:

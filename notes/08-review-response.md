@@ -136,3 +136,90 @@ w_pop=6.0   2 个 session 变好，7 个变差；5 折里只有 2 折改善
   `stress v2` 此前会先把 v1 套件跑一遍。
 - **批评 6/7/8（支柱缺口、模拟器耦合、提交物缺失）** 属实，属于叙事与交付物层面，
   不是实验问题。批评 8 是当前最大缺口。
+
+---
+
+# 四支柱逐条核查（题面 4.2 vs 当前代码）
+
+审查后重新核查，全部以实测为准。**8 个子项：5 项达标、1 项部分、2 项经测量后
+主动放弃（负结果有数字）。**
+
+## I. Core Architecture
+
+**Dual-Track Routing —— 部分达标。**
+路由分类实测 **200/200 正确**（boundary 首轮消息与 browsing 逐字相同，
+信息上不可分，归入 browsing 是正确行为，非缺陷）。`route_overrides` 已改为
+**整轮生效**（可 patch 检索深度、提问策略、覆盖策略，不只是重排权重）。
+但**默认三条路由仍走同一管线**——因为差异化经测量是负收益（见批评 3 表）。
+题面说的 "high-precision filter track"：本方案**从不过滤，只打分**。
+这是刻意的——过滤会把召回率变成上限，而打分不会。
+
+**Multi-Route Retrieval → LLM Semantic Ranking —— 部分达标。**
+keyword ✅（FTS5/BM25）、category ✅（`w_cat`）、vector ✖、LLM ✖。
+
+放弃稠密路的依据是实测召回曲线：
+
+| k | recall@k | 未召回会话 |
+|---|---|---|
+| 10 | 0.545 | 91 |
+| 50 | 0.830 | 34 |
+| 100 | 0.995 | 1 |
+| **200** | **1.000** | **0** |
+
+**200 条会话没有一条是「检索不到」的**，目标商品 BM25 中位排名 8。
+稠密检索能改善的是召回，而召回**没有剩余空间**。加深候选池反而更差
+（100→200 时 MRR 0.839→0.766，热门度先验把更多热门错项抬到目标之上）。
+LLM 重排则被 `docs/submission_rules.md` 的断网条款排除。
+**这是与题面字面预期最大的偏离，报告必须写成有据的设计决策。**
+
+## II. Dialog Strategy
+
+**Information Accumulation —— 达标。** 增量槽位累积 + `provenance` 记录每条短语
+贡献了哪些词项（使选择性删除成为可能）。
+
+**Intent Override "slot erasure and rewriting" —— 已实现，但实测后不设为默认。**
+`on_override="slot"` 是题面语义的诚实实现。新建 `lab/override_stress.py` 构造
+**真实矛盾**的覆盖（silk → leather），5 种子平均下 `keep` 仍最优
+（0.9233 vs slot 0.9140 vs erase 0.8458）。原因同上：**只打分不过滤**，
+过时约束无法排除正确商品，而遗忘会真的丢证据。
+
+**Proactive Guidance / Over-Generality cutoff —— 达标（本轮新增）。**
+`_overgeneral()`：存活候选池的 leaf 类目数 ≥ 6 时判定为「不是排序问题，
+而是需求欠定」。**截断推荐在本指标下纯亏分，所以 cutoff 作用于「提问」而非「结果」**：
+命中时强制走池感知提问（暂停 dry-streak 保护），并把开放式提问换成**结构化选项**，
+选项标签自动去掉共同前缀只保留区分部分（"women slippers / men slippers / men sandals"）。
+实测在 **36/407 轮（9%）** 触发，集中在 intent_override（27 次，覆盖后候选池确实重新变宽）。
+**分数零代价**（0.9285，与关闭时逐位相同）。
+
+## III. Self-Evolution
+
+**Personalized Context Distillation —— 测量后放弃，负结果有数字。**
+`user_profile` 此前只存不用。本轮实现 `w_profile` 特征（preference_tags 命中率）
+并做权重扫描：
+
+| w_profile | 0.0 | 0.5 | 1.0 | 2.0 | −0.5 |
+|---|---|---|---|---|---|
+| score | **0.9285** | 0.9239 | 0.9176 | 0.9073 | 0.9272 |
+
+**单调变差。** 原因在数据本身：`purchase_frequency` 200 条会话**全部相同**，
+`preference_tags` 只有 9 个泛化词（fit / material / comfort / style…），
+命中率 50–80%——把它们加权等于给几乎所有商品同等加分，纯稀释真实约束信号。
+**诚实结论：这份 profile 不携带可用的个性化信号，不是我们没做。**
+
+**Adaptive Orchestration —— 达标。** 三处真实的运行时改道，均由观测触发而非配置写死：
+1. **死槽位软匹配**：逐条约束探测全池字面命中，零命中的槽位切换到 IDF 加权软匹配
+   （逐字模拟器上死集为空 ⇒ 保险费为零）。
+2. **`dry_others` 降级**：连续 2 次干回复后放弃 `other`，改轮询具体属性。
+3. **`dry_streak` 放弃 + 过载暂停**：定向提问落空即退回开放式，但需求欠定时暂停该保护。
+
+## IV. Evaluation Matrix —— 完全达标
+
+Coverage / Precision / Efficiency 三维全部对齐官方 harness，
+默认配置 `0.928508 / HR@10 0.995 / MRR 0.839361 / MTTC 2.04`，
+两个配置的分数都由 `tests/test_score_regression.py` 锁定。
+
+## 一句话总结
+
+**8 个子项：5 达标、1 部分（路由分类满分但不差异化）、2 主动放弃且附负结果数字。**
+唯一的真实能力缺口是 **vector + LLM 重排**，而召回曲线证明前者无空间可救、
+断网条款排除后者。其余「未做」项全部是**测量后否决**，不是遗漏。
