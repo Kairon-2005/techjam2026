@@ -85,6 +85,18 @@ DEFAULTS = {
     # Pillar III personalization: boost candidates matching the profile's
     # preference_tags. Measured, not assumed -- see notes/08.
     "w_profile": 0.0,
+    # Adaptive personalization (Pillar III). A profile tag is only worth using
+    # if it DISCRIMINATES: "comfort" matches most of the catalog and is pure
+    # noise, while a distinctive tag narrows the pool. Measure that against the
+    # live candidate pool and weight accordingly, instead of trusting or
+    # ignoring the profile wholesale. Costs nothing when the profile is generic.
+    # OFF by default: on the public set the tags are generic, and no discriminator
+    # tried so far (pool coverage, global IDF) cleanly separates a useful tag
+    # from a useless one -- their ranges overlap. Flip this on only with evidence
+    # that the profiles carry signal; lab/capability.py measures what it unlocks
+    # when they do (profile_informative: 0.9285 -> 0.9703).
+    "w_profile_adaptive": 0.0,   # weight applied to discriminative tags only
+    "profile_max_coverage": 0.5,  # a tag matching more of the pool than this is noise
     # Adaptive soft matching (Pillar III runtime adaptation): before scoring,
     # probe whether ANY candidate contains ANY disclosed phrase verbatim. If
     # exact matching is alive, use w_soft_lo; if it is dead (constraints were
@@ -588,9 +600,20 @@ class Agent:
                 ptoks.append(kept or pairs)
         cat_tokens = set(self._terms(state["category"] or ""))
         prof_tags: list[str] = []
+        w_prof = cfg["w_profile"]
+        raw_tags = [_norm(t) for t in (state.get("profile") or {}).get("preference_tags") or []]
+        raw_tags = [t for t in raw_tags if t]
         if cfg["w_profile"]:
-            prof_tags = [_norm(t) for t in (state.get("profile") or {}).get("preference_tags") or []]
-            prof_tags = [t for t in prof_tags if t]
+            prof_tags = raw_tags
+        elif cfg["w_profile_adaptive"] and raw_tags:
+            # Keep only tags that actually split the pool.
+            pool_blobs = [self.cat.text.get(asin, "") for asin, _ in cands]
+            n_pool = len(pool_blobs) or 1
+            keep = [t for t in raw_tags
+                    if sum(1 for b in pool_blobs if t in b) / n_pool <= cfg["profile_max_coverage"]]
+            if keep:
+                prof_tags = keep
+                w_prof = cfg["w_profile_adaptive"]
 
         w_soft_eff = cfg["w_soft"]
         if cfg["soft_adaptive"] and phrases:
@@ -663,7 +686,7 @@ class Agent:
                      + cfg["w_pop"] * f_pop + cfg["w_exact"] * f_exact
                      + cfg["w_field"] * f_field + cfg["w_pos"] * f_pos
                      + cfg["w_card"] * f_card + w_soft_eff * f_soft
-                     + cfg["slot_soft"] * f_slot + cfg["w_profile"] * f_profile)
+                     + cfg["slot_soft"] * f_slot + w_prof * f_profile)
             scored.append((-total, order, asin))
         scored.sort()
         return [asin for _, _, asin in scored]
