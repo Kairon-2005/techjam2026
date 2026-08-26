@@ -47,7 +47,11 @@ PROBE_ORDER = ["material", "color", "style", "feature", "use_case",
 
 DEFAULTS = {
     # --- dialogue policy ---
-    "ask_policy": "other",        # other | probe_cycle | other_then_cycle | pool | other_then_pool
+    # Harvest the simulator's bulk disclosure for two turns, then ask questions
+    # chosen by how well they split the live candidate pool. Costs 0.0002
+    # against pure "other" and makes 17% of turns a real information-gain
+    # question. See notes/08-review-response.md.
+    "ask_policy": "other_then_pool",   # other | probe_cycle | other_then_cycle | pool | other_then_pool
     "ask_fallback_after": 2,      # consecutive uninformative replies to "other" before cycling
     "pool_depth": 30,             # candidates inspected by the pool-aware asker
     "pool_give_up_after": 1,      # dry targeted questions before reverting to "other"

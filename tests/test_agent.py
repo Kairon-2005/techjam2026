@@ -93,9 +93,12 @@ class ConfigTest(unittest.TestCase):
         self.assertIn("route", buf.getvalue())
         self.assertEqual(cfg["w_pop"], 3.0)
 
-    def test_defaults_are_the_frozen_submission_config(self) -> None:
+    def test_defaults_are_the_submission_config(self) -> None:
         cfg = A._load_config(None)
-        self.assertEqual(cfg["ask_policy"], "other")
+        # Pool-aware asking adopted at 0.928508; slot override measured and
+        # rejected (keep wins even under genuine contradiction). notes/08.
+        self.assertEqual(cfg["ask_policy"], "other_then_pool")
+        self.assertEqual(cfg["pool_give_up_after"], 1)
         self.assertEqual(cfg["on_override"], "keep")
         self.assertEqual(cfg["w_card"], 0.0)   # simulator-inversion feature stays off
         self.assertEqual(cfg["route_overrides"], {})
@@ -156,7 +159,7 @@ class AgentContractTest(unittest.TestCase):
         self.assertEqual(ag._sessions["s"]["phrases"], before)
 
     def test_dry_other_replies_fall_back_to_concrete_attributes(self) -> None:
-        ag = self.agent(ask_fallback_after=2)
+        ag = self.agent(ask_policy="other", ask_fallback_after=2)
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: leather.", 1, 10)
         asked = []
