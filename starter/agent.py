@@ -50,6 +50,7 @@ DEFAULTS = {
     "ask_policy": "other",        # other | probe_cycle | other_then_cycle | pool | other_then_pool
     "ask_fallback_after": 2,      # consecutive uninformative replies to "other" before cycling
     "pool_depth": 30,             # candidates inspected by the pool-aware asker
+    "pool_give_up_after": 1,      # dry targeted questions before reverting to "other"
     "on_override": "keep",        # keep | erase | decay | slot
     "filter_noise": True,
     "chrome_stop": True,
@@ -415,9 +416,10 @@ class Agent:
             return 0.0
         return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
 
-    def _pool_attribute(self, state: dict, pool: list[str]) -> tuple[str, float, int]:
+    def _pool_attribute(self, state: dict, pool: list[str],
+                        cfg: dict | None = None) -> tuple[str, float, int]:
         """Ask about whichever attribute best splits the live candidate pool."""
-        depth = max(2, int(self.cfg["pool_depth"]))
+        depth = max(2, int((cfg or self.cfg)["pool_depth"]))
         window = pool[:depth]
         best, best_bits = "other", 0.0
         for attribute, pattern in ATTR_VOCAB.items():
@@ -429,12 +431,18 @@ class Agent:
         return best, best_bits, len(window)
 
     def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
-        policy = self.cfg["ask_policy"]
-        limit = self.cfg["ask_fallback_after"]
+        cfg = self._route_cfg(state)
+        policy = cfg["ask_policy"]
+        limit = cfg["ask_fallback_after"]
         if policy in ("pool", "other_then_pool"):
             if policy == "other_then_pool" and state["asked"].count("other") < 2:
                 return "other"
-            attribute, bits, _ = self._pool_attribute(state, pool or [])
+            # A targeted question that yields nothing means our attribute
+            # taxonomy disagrees with the customer's. Stop guessing buckets and
+            # go open-ended rather than walking the whole list dry.
+            if state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
+                return "other"
+            attribute, bits, _ = self._pool_attribute(state, pool or [], cfg)
             state["last_bits"] = bits
             # No question discriminates the pool -> fall back to open-ended.
             return attribute if bits >= 0.2 else "other"
@@ -498,11 +506,18 @@ class Agent:
         # FTS5 bm25() is negative and lower-is-better; flip so higher-is-better.
         return [(str(a), -float(s)) for a, s in rows]
 
+    def _route_cfg(self, state: dict) -> dict:
+        """Config for this turn, with the route's overrides folded in.
+
+        Applied turn-wide -- retrieval depth and question policy included, not
+        just rerank weights -- so a route can genuinely select a pipeline.
+        """
+        overrides = self.cfg.get("route_overrides") or {}
+        patch = overrides.get(state.get("route"))
+        return {**self.cfg, **patch} if patch else self.cfg
+
     def _rerank(self, cands: list[tuple[str, float]], state: dict) -> list[str]:
-        cfg = self.cfg
-        overrides = cfg.get("route_overrides") or {}
-        if state.get("route") in overrides:
-            cfg = {**cfg, **overrides[state["route"]]}
+        cfg = self._route_cfg(state)
         phrases = [_norm(p) for p in state["phrases"]]
         phrases = [p for p in phrases if len(p) >= 3]
         terms = state["terms"][: cfg["term_cap"]]
@@ -641,7 +656,7 @@ class Agent:
             "terms": [], "asked": [], "phrases": [], "category": None,
             "route": None, "profile": profile or {}, "dry_others": 0,
             # phrase -> terms it contributed, so slot erasure can drop them too
-            "provenance": {}, "overrides": 0,
+            "provenance": {}, "overrides": 0, "dry_streak": 0,
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -654,9 +669,10 @@ class Agent:
 
         if turn == 1:
             state["route"] = self._route(message)
+        turn_cfg_noise = self._route_cfg(state)
 
         if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
-            mode = self.cfg["on_override"]
+            mode = self._route_cfg(state)["on_override"]
             state["overrides"] += 1
             if mode == "erase":
                 state["terms"] = []
@@ -674,9 +690,11 @@ class Agent:
 
         noisy = any(n in low for n in NOISE_REPLIES) or (
             NOISE_RE.search(low) is not None and not CUE_RE.search(low))
-        informative = not (self.cfg["filter_noise"] and noisy)
+        informative = not (turn_cfg_noise["filter_noise"] and noisy)
         if state["asked"] and state["asked"][-1] == "other":
             state["dry_others"] = 0 if informative else state.get("dry_others", 0) + 1
+        if state["asked"]:
+            state["dry_streak"] = 0 if informative else state.get("dry_streak", 0) + 1
         if informative:
             category, phrases = parse_message(message)
             if turn == 1 and not category:
@@ -699,9 +717,10 @@ class Agent:
                     state["terms"].append(term)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
-        limit = max(top_k, self.cfg["candidates"]) if self.cfg["rerank"] else top_k
+        turn_cfg = self._route_cfg(state)
+        limit = max(top_k, turn_cfg["candidates"]) if turn_cfg["rerank"] else top_k
         cands = self._retrieve(state["terms"], limit)
-        if self.cfg["rerank"] and cands:
+        if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:
             ranked = [a for a, _ in cands]
