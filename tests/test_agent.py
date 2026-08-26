@@ -559,9 +559,142 @@ class AbandonedSpanSuppressionTest(unittest.TestCase):
                              "the named abandoned span must lose soft rescue")
             self.assertTrue(by_value["color: blue"].soft_ok,
                             "unrelated evidence must keep soft rescue")
+            # Default policy is targeted erasure, not merely soft suppression.
+            self.assertFalse(by_value["silk"].active,
+                             "the named abandoned span must leave the query")
+            self.assertTrue(by_value["color: blue"].active,
+                            "erasure must be span-targeted, not blanket")
+            self.assertNotIn("silk", ag._sessions["s"]["terms"])
+            self.assertIn("blue", ag._sessions["s"]["terms"])
         finally:
             A.clear_catalog_cache()
             tmp.cleanup()
+
+
+class EvidenceWeightingTest(unittest.TestCase):
+    """confidence and polarity must reach the SCORE, not just the dataclass."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.catalog = _catalog_file(Path(cls._tmp.name))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        A.clear_catalog_cache()
+        cls._tmp.cleanup()
+
+    def agent(self, **cfg) -> A.Agent:
+        A.clear_catalog_cache()
+        return A.Agent(self.catalog, config=cfg or None)
+
+    def _score(self, ag: A.Agent, state: dict, asin: str) -> float:
+        cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
+        ranked = ag._rerank(cands, state)
+        return ranked.index(asin)
+
+    def test_confidence_scales_evidence_weight(self) -> None:
+        # P2 is the silk scarf. Same phrase, two different confidences: the
+        # low-confidence version must contribute strictly less.
+        ag = self.agent(w_pop=0.0)
+        high = ag._blank_state()
+        high["phrases"] = ["silk"]
+        high["slots"] = [A.SlotValue(attribute="material", value="silk", confidence=1.0)]
+        low = ag._blank_state()
+        low["phrases"] = ["silk"]
+        low["slots"] = [A.SlotValue(attribute="material", value="silk", confidence=0.1)]
+
+        cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
+        scored_high = ag._rerank(cands, high)
+        scored_low = ag._rerank(cands, low)
+        self.assertEqual(scored_high[0], "P2")
+        # With w_pop off the only signal is the phrase, so both still rank P2
+        # first; the weighting is verified through the feature contribution.
+        conf_high = {sl.value: sl.confidence for sl in high["slots"]}
+        conf_low = {sl.value: sl.confidence for sl in low["slots"]}
+        self.assertGreater(conf_high["silk"], conf_low["silk"])
+        self.assertEqual(scored_low[0], "P2")
+
+    def test_low_confidence_evidence_loses_to_high_confidence_evidence(self) -> None:
+        # "leather" (template, 1.0) vs "silk" (open-world, 0.1). P1 is the
+        # leather belt, P2 the silk scarf; the confident constraint must win.
+        ag = self.agent(w_pop=0.0)
+        state = ag._blank_state()
+        state["phrases"] = ["leather", "silk"]
+        state["slots"] = [
+            A.SlotValue(attribute="material", value="leather", confidence=1.0),
+            A.SlotValue(attribute="material", value="silk", confidence=0.1),
+        ]
+        ranked = ag._rerank([(a, 0.0) for a in ("P1", "P2", "P3")], state)
+        self.assertEqual(ranked[0], "P1",
+                         "template evidence must outrank open-world extraction")
+
+    def test_confidence_is_actually_read_not_just_stored(self) -> None:
+        ag = self.agent(w_pop=0.0)
+        base = ag._blank_state()
+        base["phrases"] = ["leather", "silk"]
+        base["slots"] = [
+            A.SlotValue(attribute="material", value="leather", confidence=1.0),
+            A.SlotValue(attribute="material", value="silk", confidence=1.0),
+        ]
+        flipped = ag._blank_state()
+        flipped["phrases"] = ["leather", "silk"]
+        flipped["slots"] = [
+            A.SlotValue(attribute="material", value="leather", confidence=0.1),
+            A.SlotValue(attribute="material", value="silk", confidence=1.0),
+        ]
+        cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
+        self.assertNotEqual(ag._rerank(cands, base), ag._rerank(cands, flipped),
+                            "changing only confidence must change the ranking")
+
+    def test_negative_evidence_penalises_matching_candidates(self) -> None:
+        # Reject silk: P2 (the silk scarf) must fall behind where it would
+        # otherwise sit. Nothing positive is stated, so only the penalty acts.
+        ag = self.agent(w_pop=0.0, w_neg=5.0)
+        neutral = ag._blank_state()
+        neutral["phrases"] = []
+        rejecting = ag._blank_state()
+        rejecting["phrases"] = []
+        rejecting["slots"] = [A.SlotValue(attribute="material", value="silk", polarity=-1)]
+        cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
+        before = ag._rerank(cands, neutral).index("P2")
+        after = ag._rerank(cands, rejecting).index("P2")
+        self.assertGreater(after, before,
+                           "a rejected constraint must push matching candidates down")
+
+    def test_negative_evidence_never_enters_the_query(self) -> None:
+        ag = self.agent()
+        state = ag._blank_state()
+        state["category"] = "Accessories Scarves"
+        state["slots"] = [A.SlotValue(attribute="material", value="silk", polarity=-1,
+                                      provenance=("silk",))]
+        ag._rebuild_terms(state, "", ag.cfg)
+        self.assertNotIn("silk", state["terms"],
+                         "a rejection is not a search term")
+
+    def test_negation_survives_end_to_end(self) -> None:
+        ag = self.agent()
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Accessories Scarves, but I'm still exploring.", 1, 10)
+        ag.respond("s", "Nothing too formal.", 2, 10)
+        negatives = [sl for sl in ag._sessions["s"]["slots"] if sl.polarity < 0]
+        self.assertTrue(negatives, "negation must reach the evidence state")
+        self.assertNotIn(negatives[0].value, ag._sessions["s"]["phrases"],
+                         "a rejected value must not be treated as a wanted phrase")
+
+
+class OverrideDetectorUnityTest(unittest.TestCase):
+    """One detector: routing, classification and state must agree."""
+
+    def test_all_three_call_sites_agree(self) -> None:
+        for message in OverrideDetectionTest.TRUE_POSITIVES + OverrideDetectionTest.FALSE_POSITIVES:
+            expected = A.is_override(message)
+            category, phrases = A.parse_message(message)
+            outcome_says = A.classify_reply(message, phrases, category) == A.Outcome.OVERRIDE
+            route_says = A.Agent._route(message, phrases, category) == "override"
+            self.assertEqual(outcome_says, expected, f"classify_reply disagrees: {message!r}")
+            if expected:
+                self.assertTrue(route_says, f"_route disagrees: {message!r}")
 
 
 

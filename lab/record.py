@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 import platform
 import statistics
 import subprocess
@@ -26,6 +27,10 @@ from pathlib import Path
 from lab import scenarios as S
 
 LOG = Path("lab/results.jsonl")
+# 1: commit/dirty only -- records the working-tree HEAD, which is NOT
+#    necessarily the agent that ran, and mangles the first dirty path.
+# 2: harness_commit + agent_commit/agent_sha256 + split code/result dirtiness.
+SCHEMA_VERSION = 2
 METRICS = ("score", "hr10", "mrr", "mttc")
 
 
@@ -65,11 +70,18 @@ def _sha256(path: str | Path) -> str:
         return ""
 
 
-_HASH_CACHE: dict[str, str] = {}
+_HASH_CACHE: dict[tuple, str] = {}
 
 
 def _cached_sha256(path: str | Path) -> str:
-    key = str(path)
+    """Cache on (path, mtime, size) -- a path alone goes stale the moment the
+    file is edited inside a long-running process, which is exactly what a
+    multi-config sweep does."""
+    try:
+        st = os.stat(path)
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ""
     if key not in _HASH_CACHE:
         _HASH_CACHE[key] = _sha256(path)
     return _HASH_CACHE[key]
@@ -134,6 +146,7 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
     for sd in seeds:
         per_seed[sd] = _metrics(S.run(scenario, config, samples, ids, cats, prods, seed=sd))
     row = {
+        "schema_version": SCHEMA_VERSION,
         "tag": tag, "scenario": scenario_name, "config": config,
         "seeds": list(seeds),
         "per_seed": {str(k): v for k, v in per_seed.items()},

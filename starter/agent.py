@@ -116,6 +116,10 @@ DEFAULTS = {
     "w_soft": 0.0,       # static soft-overlap weight (always on if > 0)
     # Pillar III personalization: boost candidates matching the profile's
     # preference_tags. Measured, not assumed -- see notes/08.
+    # Penalty for a candidate that matches something the customer rejected
+    # ("nothing too formal"). Scored, not filtered: a mis-extracted negative
+    # must never be able to empty the candidate pool.
+    "w_neg": 2.0,
     "w_profile": 0.0,
     # Adaptive personalization (Pillar III). A profile tag is only worth using
     # if it DISCRIMINATES: "comfort" matches most of the catalog and is pure
@@ -157,6 +161,14 @@ DEFAULTS = {
     # the span the customer explicitly abandoned ("forget shoes slippers"),
     # leaving unrelated colour/material evidence soft-matchable.
     "suppress_abandoned": True,
+    # What happens to evidence the customer explicitly abandoned:
+    #   "soft_only"  -- keep it scoring, only bar soft-rescue
+    #   "deactivate" -- targeted slot erasure: drop it from query and scoring
+    # Measured: deactivate wins (override_category 0.928308 vs 0.924458) and is
+    # free on clean and on all three payload-rewording styles. Note this is
+    # SPAN-TARGETED erasure -- erasing everything on an override
+    # (on_override="slot") still loses at 0.9010.
+    "abandoned_policy": "deactivate",
     "pop_mode": "log",           # log | pct | pct2 | pct4 | pct_rating
     # Per-route weight overrides, e.g. {"browsing": {"w_pop": 6.0}}.
     "route_overrides": {},
@@ -451,7 +463,7 @@ def classify_reply(message: str, parsed_phrases: list[str],
     UNCERTAIN, so unknown phrasing can never silently become query terms.
     """
     low = (message or "").lower()
-    if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+    if is_override(message):
         return Outcome.OVERRIDE
     evidence = bool(parsed_phrases) or bool(parsed_category)
     if MORE_RE.search(low) and not evidence:
@@ -687,7 +699,7 @@ class Agent:
             return "buying"
         if "still exploring" in low:
             return "browsing"
-        if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+        if is_override(first_message):
             return "override"
         if phrases:
             return "buying"        # a requirement was stated, whatever the wording
@@ -736,7 +748,7 @@ class Agent:
                    if name not in asked and name in ATTR_VOCAB]
         return max(options)[1] if options else ""
 
-    def _suppress_abandoned(self, state: dict, message: str) -> None:
+    def _suppress_abandoned(self, state: dict, message: str, cfg: dict) -> None:
         """Bar soft-rescue for exactly what the customer named as abandoned.
 
         Blanket blocking of every pre-pivot slot fixes the category pivot but
@@ -756,6 +768,8 @@ class Agent:
             if tokens and len(tokens & span_tokens) / len(tokens) >= 0.5:
                 slot.soft_ok = False
                 slot.contradiction = "abandoned"
+                if cfg.get("abandoned_policy") == "deactivate":
+                    slot.active = False
 
     def _uncredible(self, state: dict) -> frozenset:
         """Constraint values that may still match exactly but must not be
@@ -983,6 +997,17 @@ class Agent:
         cfg = self._route_cfg(state)
         phrases = [_norm(p) for p in state["phrases"]]
         phrases = [p for p in phrases if len(p) >= 3]
+        # Evidence weight per phrase. Template evidence is 1.0; open-world
+        # extraction is lower, so a guess from free text cannot outweigh what
+        # the customer stated in a form the parser understood.
+        conf = {sl.value: sl.confidence for sl in state["slots"] if sl.usable}
+        pconf = [conf.get(p, 1.0) for p in phrases]
+        conf_total = sum(pconf) or 1.0
+        # Constraints the customer REJECTED. They never enter the query (a
+        # negative is not a search term) but a candidate that matches one is
+        # penalised here.
+        neg = [sl.value for sl in state["slots"]
+               if sl.active and sl.polarity < 0 and len(sl.value) >= 3]
         terms = state["terms"][: cfg["term_cap"]]
         idfs = {t: self.cat.idf(t) for t in terms}
         idf_total = sum(idfs.values()) or 1.0
@@ -1046,8 +1071,10 @@ class Agent:
                     hit = sum(pw[i] for i, p in enumerate(phrases) if p in blob)
                     f_phrase = hit / (sum(pw) or 1.0)
                 else:
-                    f_phrase = sum(1 for p in phrases if p in blob) / len(phrases)
-                f_exact = sum(1 for p in phrases if p in vals) / len(phrases)
+                    f_phrase = sum(pconf[i] for i, p in enumerate(phrases)
+                                   if p in blob) / conf_total
+                f_exact = sum(pconf[i] for i, p in enumerate(phrases)
+                              if p in vals) / conf_total
                 if (w_soft_eff or cfg["soft_adaptive"]) and ptoks:
                     acc = 0.0
                     for tok_w in ptoks:
@@ -1062,7 +1089,8 @@ class Agent:
                         tot = sum(w for _, w in tok_w) or 1.0
                         acc += sum(w for t, w in tok_w if t in blob) / tot
                     f_slot = acc / len(dead)
-                f_field = sum(1 for p in phrases if p in feat_blob) / len(phrases)
+                f_field = sum(pconf[i] for i, p in enumerate(phrases)
+                              if p in feat_blob) / conf_total
                 if cfg["w_pos"]:
                     ordered_vals = self.cat.order.get(asin, [])
                     got = [ordered_vals.index(p) for p in phrases if p in ordered_vals]
@@ -1081,13 +1109,17 @@ class Agent:
             f_profile = 0.0
             if prof_tags:
                 f_profile = sum(1 for t in prof_tags if t in blob) / len(prof_tags)
+            f_neg = 0.0
+            if neg:
+                f_neg = sum(1 for p in neg if p in blob) / len(neg)
             f_pop = self.cat.popularity(asin, cfg["pop_mode"])
             total = (cfg["w_bm25"] * f_bm25 + cfg["w_phrase"] * f_phrase
                      + cfg["w_idf"] * f_idf + cfg["w_cat"] * f_cat
                      + cfg["w_pop"] * f_pop + cfg["w_exact"] * f_exact
                      + cfg["w_field"] * f_field + cfg["w_pos"] * f_pos
                      + cfg["w_card"] * f_card + w_soft_eff * f_soft
-                     + cfg["slot_soft"] * f_slot + w_prof * f_profile)
+                     + cfg["slot_soft"] * f_slot + w_prof * f_profile
+                     - cfg["w_neg"] * f_neg)
             scored.append((-total, order, asin))
         scored.sort()
         return [asin for _, _, asin in scored]
@@ -1143,8 +1175,14 @@ class Agent:
         return lead + ask
 
     def close(self) -> None:
-        """Release shared catalog handles. Safe to call more than once."""
-        clear_catalog_cache()
+        """Drop this agent's session state.
+
+        Deliberately does NOT touch _CATALOG_CACHE: the catalog is shared
+        process-wide, so closing one agent must not invalidate the SQLite
+        connection another agent is still using. Process teardown calls
+        clear_catalog_cache() explicitly.
+        """
+        self._sessions.clear()
 
     def __enter__(self) -> "Agent":
         return self
@@ -1199,7 +1237,9 @@ class Agent:
             elif mode == "slot":
                 self._slot_override(state, message)
             state["last_override_turn"] = turn
-            self._suppress_abandoned(state, message)
+            self._suppress_abandoned(state, message, self._route_cfg(state))
+            if self._route_cfg(state).get("abandoned_policy") == "deactivate":
+                state["phrases"] = [sl.value for sl in state["slots"] if sl.usable]
 
         category, phrases = parse_message(message)
         outcome = classify_reply(message, phrases, category,

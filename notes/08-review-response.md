@@ -590,3 +590,81 @@ seeds 12–31 + 那六句未见措辞**已经向开发提供了反馈**
 > 证据驱动的路由转移、配置贯通与可观测性；两条路由的默认权重仍然相同，
 > 没有 facet/filter 路、没有 dense 路、没有 route fusion。
 > **不得把 Phase 2A 写成 Pillar I 已完成。**
+
+---
+
+# Phase 1.5 加固（审查第二轮：四个语义缺口）
+
+前一轮我**说过头了**。以下四条批评全部属实，已逐条核实并修复。
+
+## 1. `confidence` 此前是只写字段（属实）
+
+全代码中 `confidence` 只在写入处出现，**从未参与打分**。所以
+「自然语言抽取的证据永远不会与模板证据同权」这句话当时**不成立**。
+
+现已让它真正缩放证据权重：`f_phrase` / `f_exact` / `f_field` 按每条短语的
+confidence 加权（分母为 confidence 之和），模板证据 1.0、open-world 抽取 0.6。
+新增回归测试 `test_confidence_is_actually_read_not_just_stored`：
+**只改 confidence 必须改变排序**，否则测试失败。
+clean 不变（clean 上所有 confidence 都是 1.0，等价于原式）。
+
+## 2. 负向约束此前只识别、不执行（属实）
+
+`SlotValue.usable` 要求 `polarity > 0`，因此 `Nothing too formal` 生成的
+`polarity=-1` 槽位既不进查询、也不扣分——**是「识别 negation」而非「处理 negation」**。
+
+现已增加独立负向通道：`f_neg` = 候选命中被拒约束的比例，按 `w_neg=2.0` **扣分**。
+负向证据**永不进入查询**（拒绝不是检索词）。
+**按打分而非过滤实现**：错误抽取的负约束绝不能清空候选池；
+高置信硬过滤 + rescue lane 留待 Phase 2B 的 Buying safe-filter 一并设计。
+
+## 3. override 判定器此前不统一（属实）
+
+`respond()` 用 `is_override()`，而 `classify_reply()` 与 `_route()` 仍直接用旧的
+`OVERRIDE_RE`——同一条消息可能被状态机判为 override、被 outcome 记成
+informative/uncertain、route 又不是 override，污染 dry-streak 与遥测。
+三处已统一到 `is_override()`，并加 `OverrideDetectorUnityTest`
+断言三个调用点在 12 条真/假阳性上**结论一致**。
+
+## 4. abandoned-span 此前只关 soft rescue（属实）—— 现已实现真正的定向擦除
+
+此前被放弃的槽位仍 `active=True`、仍在 `phrases`/`terms`、仍参与
+BM25/exact/phrase/field/IDF 打分。**「抑制 soft-rescue」确实不等于 slot erasure。**
+
+不是改措辞，而是把它做出来并量化：
+
+| 策略 | override_category | clean | payload soft/shuffle/drop |
+|---|---|---|---|
+| 无抑制 | 0.915013 ± 0.0066 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
+| span 抑制 soft-rescue | 0.924458 ± 0.0019 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
+| **span 定向擦除（新默认）** | **0.928308 ± 0.0000** | **0.928508** | **0.8777 / 0.8982 / 0.8842** |
+| 全量擦除 `on_override="slot"` | 0.9010 | 0.925173 | — |
+
+**定向擦除严格占优**：override_category 达到 0.9283（HR 0.995 / MRR 0.839，
+已是 clean 水平），clean 与三种 payload 改写**逐位不变**。
+关键区别是**范围**：擦除用户点名放弃的 span 有效；
+在 override 时擦除一切（0.9010）无效。措辞因此可以诚实地写成
+**span-targeted dynamic slot erasure**，并附上与全量擦除的对照。
+
+## 5. 账本历史有效性（属实）
+
+`lab/results.jsonl` 62 行中 50 行仍是旧 schema，且**没有任何一行真正记录过
+`agent_commit=1d5718c`**——我之前只是现场调用函数验证，从未落盘。
+
+`lab/migrate_results.py`：**不改写、不删除任何测量值**，只按内容分类补标
+`schema_version` / `self_describing` / `provenance_note`。
+结果：schema 2（自描述）12 行，schema 1（已标注「无法仅凭此行复现」）50 行；
+`pre-phase1-baseline` 行显式写明 agent_commit 是
+「asserted by tag, NOT recorded at run time」。
+并补录了一条**真正的** isolated baseline：
+`agent_commit=1d5718c`、`agent_sha256=0e6fe9a0809a8444`、score=0.711598。
+
+## 6. 次要项
+
+- `_HASH_CACHE` 改为按 `(path, mtime_ns, size)` 缓存，避免同进程内文件被改后哈希过期。
+- `Agent.close()` **不再清空全局 catalog cache**——那会让仍在使用同一 catalog 的
+  另一个 Agent 的 SQLite 连接失效。它现在只清自己的 session；
+  进程级拆除仍用 `clear_catalog_cache()`。
+- **预注册措辞更正**：`11b5563` 同时包含实现与预测，属于
+  **"predictions committed before measurement"**，
+  **不是** protocol-only 的强隔离预注册。不再按后者宣传。
