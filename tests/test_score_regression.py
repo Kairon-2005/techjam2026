@@ -67,5 +67,14 @@ class ScoreRegressionTest(unittest.TestCase):
         self.assertEqual(usage["total_tokens"], 0)
 
 
+def tearDownModule() -> None:
+    """Close the shared SQLite handles so the run ends without ResourceWarnings."""
+    try:
+        import starter.agent as A
+        A.clear_catalog_cache()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     unittest.main()

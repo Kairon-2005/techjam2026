@@ -147,6 +147,10 @@ DEFAULTS = {
     # override_category -- so that harm has a different cause than this gate
     # models. Kept as an ablation; the mechanism is still open. See notes/08.
     "soft_needs_credible": False,
+    # Fine-grained alternative to the blanket gate: block soft-rescue only for
+    # the span the customer explicitly abandoned ("forget shoes slippers"),
+    # leaving unrelated colour/material evidence soft-matchable.
+    "suppress_abandoned": True,
     "pop_mode": "log",           # log | pct | pct2 | pct4 | pct_rating
     # Per-route weight overrides, e.g. {"browsing": {"w_pop": 6.0}}.
     "route_overrides": {},
@@ -248,6 +252,19 @@ class _Catalog:
         n = len(order) or 1
         self.pop_pct = {asin: i / n for i, (asin, _) in enumerate(order)}
 
+    def close(self) -> None:
+        """Release the in-memory SQLite handle.
+
+        Without this, every catalog build leaks its connection: the tests clear
+        _CATALOG_CACHE between cases and the old connections were only reclaimed
+        by the GC, emitting ResourceWarnings and holding memory across long
+        multi-config sweeps.
+        """
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
     def popularity(self, asin: str, mode: str) -> float:
         if mode == "pct":
             return self.pop_pct.get(asin, 0.0)
@@ -263,12 +280,21 @@ class _Catalog:
         return math.log((self.n_docs + 1) / (self.df.get(term, 0) + 1))
 
 
+def clear_catalog_cache() -> None:
+    """Drop cached catalogs, closing their connections first."""
+    for cat in list(_CATALOG_CACHE.values()):
+        cat.close()
+    _CATALOG_CACHE.clear()
+
+
 def _catalog(path: str | Path, extras: bool = True) -> _Catalog:
     key = str(Path(path).resolve())
     cached = _CATALOG_CACHE.get(key)
     # A catalog built WITH extras is a superset: reuse it for lean requests too.
     if cached is not None and (cached.extras or not extras):
         return cached
+    if cached is not None:
+        cached.close()          # superseded by the richer build; do not leak it
     _CATALOG_CACHE[key] = _Catalog(Path(path), extras=extras)
     return _CATALOG_CACHE[key]
 
@@ -413,6 +439,7 @@ class SlotValue:
     source_turn: int = 0
     provenance: tuple[str, ...] = ()  # query terms this slot contributed
     active: bool = True
+    soft_ok: bool = True              # may this slot be soft-rescued?
     catalog_support: int = -1         # -1 unknown; else verbatim matches in pool
     contradiction: str = ""           # "" | "contested" | "unsupported"
 
@@ -486,15 +513,53 @@ def slot_of(phrase: str) -> str:
     return "feature"
 
 
-# Broadened after lab/diag_slotsoft.py showed "Actually, forget shoes slippers
-# entirely..." was not detected as an override at all: the old pattern required
-# the exact words "forget what i said". A customer who says "forget boots, I
-# want running shoes" is the canonical intent override, so missing it left the
-# abandoned constraint fully active -- and slot_soft then rescued it.
+# An override needs a replacement, not just the word "forget". The first fix
+# for the missed "forget shoes slippers entirely" used a bare \bforget\b, which
+# also fires on "Don't forget it needs pockets" and "I forgot to mention black"
+# -- those ADD a requirement rather than replacing one.
 OVERRIDE_RE = re.compile(
-    r"ignore my earlier|disregard my earlier|scratch that|change of plans|start over"
-    r"|\bforget\b|changed my mind|no longer (?:want|need|looking)"
-    r"|instead of|rather than|not looking for\b[^.]{0,40}\banymore", re.I)
+    r"ignore my earlier|disregard my earlier|forget what i said"
+    r"|forget my (?:earlier|previous)|scratch that|change of plans"
+    r"|changed my mind|start over|no longer (?:want|need|looking)"
+    r"|not looking for\b[^.]{0,40}\banymore", re.I)
+# "forget X" / "instead of X": an override only when something replaces X.
+ABANDON_RE = re.compile(
+    r"\b(?:forget|drop|skip)\s+(?:about\s+)?(?P<span>[^.,;!?]{2,60})"
+    r"|\b(?:instead of|rather than)\s+(?P<span2>[^.,;!?]{2,60})", re.I)
+# Deliberately excludes a bare "instead": in "made of leather instead of
+# synthetic" the same word would satisfy both the abandon cue and the
+# replacement cue, turning a single constraint into a false override.
+REPLACEMENT_RE = re.compile(
+    r"what i (?:really |truly )?need is|i (?:now )?want|i'?d (?:like|prefer)"
+    r"|now i'?m|looking for|let'?s (?:go|try)|new requirement", re.I)
+# Phrases containing "forget" that are never an intent override.
+NOT_OVERRIDE_RE = re.compile(
+    r"don'?t forget|do not forget|forgot to mention|forget-?me-?not|always forget"
+    r"|never forget|didn'?t forget", re.I)
+
+
+def is_override(message: str) -> bool:
+    """Did this turn REPLACE an earlier intent (vs. add to it)?"""
+    low = (message or "").lower()
+    if NOT_OVERRIDE_RE.search(low):
+        return False
+    if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+        return True
+    return bool(ABANDON_RE.search(low) and REPLACEMENT_RE.search(low))
+
+
+def abandoned_span(message: str) -> str:
+    """The thing the customer explicitly told us to drop, if they named one."""
+    low = (message or "").lower()
+    if NOT_OVERRIDE_RE.search(low):
+        return ""
+    match = ABANDON_RE.search(low)
+    if not match:
+        return ""
+    span = (match.group("span") or match.group("span2") or "").strip()
+    span = re.split(r"\s+[-\u2013\u2014]\s+", span)[0]       # drop a trailing aside
+    span = re.sub(r"\b(entirely|completely|altogether|for now|please)\b", " ", span, flags=re.I)
+    return WS_RE.sub(" ", span).strip(" -")
 
 
 def _fallback_phrases(raw: str) -> list[str]:
@@ -625,6 +690,27 @@ class Agent:
         options = [(score, name) for name, score in ANSWERABILITY.items()
                    if name not in asked and name in ATTR_VOCAB]
         return max(options)[1] if options else ""
+
+    def _suppress_abandoned(self, state: dict, message: str) -> None:
+        """Bar soft-rescue for exactly what the customer named as abandoned.
+
+        Blanket blocking of every pre-pivot slot fixes the category pivot but
+        costs paraphrase robustness, because most old evidence is still valid.
+        The customer told us which part is dead -- suppress only that.
+        """
+        span = abandoned_span(message)
+        if not span:
+            return
+        span_tokens = set(self._terms(span))
+        if not span_tokens:
+            return
+        for slot in state["slots"]:
+            if not slot.usable or not slot.soft_ok:
+                continue
+            tokens = set(self._terms(slot.value))
+            if tokens and len(tokens & span_tokens) / len(tokens) >= 0.5:
+                slot.soft_ok = False
+                slot.contradiction = "abandoned"
 
     def _uncredible(self, state: dict) -> frozenset:
         """Constraint values that may still match exactly but must not be
@@ -890,7 +976,9 @@ class Agent:
         dead: list[int] = []
         if cfg["slot_soft"] and phrases:
             pool = [self.cat.text.get(asin, "") for asin, _ in cands]
-            blocked = self._uncredible(state) if cfg["soft_needs_credible"] else frozenset()
+            blocked = set(self._uncredible(state)) if cfg["soft_needs_credible"] else set()
+            if cfg["suppress_abandoned"]:
+                blocked |= {sl.value for sl in state["slots"] if not sl.soft_ok}
             dead = [i for i, ph in enumerate(phrases)
                     if ";" not in ph                       # skip our own concatenations
                     and len(ph) <= 80                      # skip truncated long tails
@@ -1009,6 +1097,16 @@ class Agent:
             ask = f"To sharpen this, could you tell me {self.ASK_COPY.get(attribute, attribute)}?"
         return lead + ask
 
+    def close(self) -> None:
+        """Release shared catalog handles. Safe to call more than once."""
+        clear_catalog_cache()
+
+    def __enter__(self) -> "Agent":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     # ---- protocol ----------------------------------------------------
     @staticmethod
     def _blank_state(profile: dict | None = None) -> dict:
@@ -1036,7 +1134,7 @@ class Agent:
             state["route_history"] = [state["route"]]
         turn_cfg_noise = self._route_cfg(state)
 
-        if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+        if is_override(message):
             mode = self._route_cfg(state)["on_override"]
             state["overrides"] += 1
             if mode == "erase":
@@ -1056,6 +1154,7 @@ class Agent:
             elif mode == "slot":
                 self._slot_override(state, message)
             state["last_override_turn"] = turn
+            self._suppress_abandoned(state, message)
 
         category, phrases = parse_message(message)
         outcome = classify_reply(message, phrases, category)

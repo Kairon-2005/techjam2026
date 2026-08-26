@@ -498,3 +498,35 @@ route 权重保持中性，因此行为不变：clean 0.928508、compat 0.928708
 
 UNCERTAIN 是兜底分支，任何无法解析且不匹配已知模式的消息都会落到它——
 所以未见措辞的检测是**设计上**泛化的，不是靠模式匹配开发集措辞。
+
+---
+
+# 预注册实验：仅抑制「被明确放弃的 span」
+
+**登记时间：结果观测之前。** 见 commit 历史中本节先于结果被提交。
+
+## 假设
+
+当前两个选项过于粗粒度：
+1. 保持 `slot_soft`：保住 payload paraphrase 鲁棒性，但品类 pivot 受损（0.9150）。
+2. `soft_needs_credible=True`：修好 pivot（0.9237），但**封锁所有 pivot 之前的软证据**，
+   payload 鲁棒性下降（0.8777→0.8617 / 0.8982→0.8929 / 0.8842→0.8737）。
+
+**假设**：用户已经告诉了我们哪一部分作废。只对**被明确点名放弃的 span**
+（"forget shoes slippers" → `shoes slippers`）关闭 soft-rescue，
+其余旧证据（color / material）仍可 soft-match，即可同时拿到两边。
+
+## 预测（观测前写定）
+
+| 指标 | 预测 |
+|---|---|
+| override_category | ≈ 0.923，与 `soft_needs_credible` / `slot_soft=0` 相当（基线 0.9150） |
+| payload_soft | ≈ 0.8777（保持默认水平，**不**掉到 0.8617） |
+| payload_shuffle | ≈ 0.8982 |
+| payload_drop | ≈ 0.8842 |
+| clean | 0.928508 不变 |
+| compat `ask_policy="other"` | 0.928708 逐位不变 |
+| override_genuine | ≈ 0.9220 不变 |
+
+**证伪条件**：若 override_category 未显著高于 0.9150，或任一 payload 风格跌到
+blanket gate 的水平，则该假设被否决，回到二选一。

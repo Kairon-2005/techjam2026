@@ -109,15 +109,15 @@ class AgentContractTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         cls.catalog = _catalog_file(Path(cls._tmp.name))
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
 
     @classmethod
     def tearDownClass(cls) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         cls._tmp.cleanup()
 
     def agent(self, **cfg) -> A.Agent:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         return A.Agent(self.catalog, config=cfg or None)
 
     def test_response_matches_the_api_contract(self) -> None:
@@ -230,11 +230,11 @@ class OverrideStateTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         cls._tmp.cleanup()
 
     def primed(self, **cfg) -> A.Agent:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config=cfg)
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Accessories Scarves. A key requirement is: 100% silk.", 1, 10)
@@ -278,17 +278,17 @@ class PoolAskerTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         cls._tmp.cleanup()
 
     def test_entropy_is_zero_when_the_pool_agrees(self) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config={"ask_policy": "pool"})
         self.assertEqual(ag._pool_entropy(["P1"], A.ATTR_VOCAB["color"]), 0.0)
         self.assertGreater(ag._pool_entropy(["P1", "P2", "P3"], A.ATTR_VOCAB["color"]), 0.0)
 
     def test_pool_policy_returns_a_legal_attribute(self) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config={"ask_policy": "pool"})
         ag.reset("s", {})
         out = ag.respond("s", "I'm looking for Accessories Belts, but I'm still exploring.", 1, 10)
@@ -330,11 +330,11 @@ class Phase1StateTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         cls._tmp.cleanup()
 
     def primed(self, **cfg) -> A.Agent:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config=cfg or None)
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
@@ -412,7 +412,7 @@ class Phase1StateTest(unittest.TestCase):
         self.assertTrue(ag._starved(state, ag.cfg))
 
     def test_starved_evidence_widens_the_candidate_pool(self) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
         limits: list[int] = []
         original = ag._retrieve
@@ -425,7 +425,7 @@ class Phase1StateTest(unittest.TestCase):
         self.assertEqual(limits[1], 500, "a starved query widens recall")
 
     def test_widening_does_not_trigger_while_the_customer_cooperates(self) -> None:
-        A._CATALOG_CACHE.clear()
+        A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
         limits: list[int] = []
         original = ag._retrieve
@@ -442,6 +442,11 @@ class Phase1StateTest(unittest.TestCase):
         state["asked"] = ["other", "other"]
         state["uncertain_streak"] = 2
         self.assertEqual(ag._easiest_unasked(state), "use_case")
+
+
+def tearDownModule() -> None:
+    """Close the shared SQLite handles so the run ends without ResourceWarnings."""
+    A.clear_catalog_cache()
 
 
 if __name__ == "__main__":
