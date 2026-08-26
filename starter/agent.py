@@ -562,13 +562,46 @@ class Agent:
                 if len(t) > 1 and t.lower() not in self.stop]
 
     @staticmethod
-    def _route(first_message: str) -> str:
+    def _route(first_message: str, phrases: list[str] | None = None,
+               category: str | None = None) -> str:
+        """Classify the opening turn.
+
+        Unknown phrasing used to fall through to "override", which is a claim
+        the message never made -- 100% of vague openings ("Show me something
+        good") were labelled as intent overrides. Unknown now degrades to
+        "mixed", and the label is inferred from what the message actually
+        carried rather than from which template it failed to match.
+        """
         low = (first_message or "").lower()
         if "a key requirement is" in low:
             return "buying"
         if "still exploring" in low:
             return "browsing"
-        return "override"
+        if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+            return "override"
+        if phrases:
+            return "buying"        # a requirement was stated, whatever the wording
+        if category:
+            return "browsing"      # a category but no requirement yet
+        return "mixed"             # under-specified: neither is known
+
+    @staticmethod
+    def _retarget(state: dict) -> str:
+        """Routes are not fixed at turn 1: browsing converges into buying.
+
+        Once a shopper has committed to real constraints they are no longer
+        browsing, so an exploratory route must be able to firm up.
+        """
+        route = state.get("route") or "mixed"
+        if route in ("mixed", "browsing"):
+            # Any constraint the shopper volunteers is a commitment signal.
+            # Gating on hardness=="hard" would only ever count turn-1 openings,
+            # so a browser who later states requirements could never firm up.
+            if any(slot.usable for slot in state["slots"]):
+                return "buying"
+            if route == "mixed" and state.get("category"):
+                return "browsing"
+        return route
 
     def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]") -> float:
         """Shannon entropy (bits) of one attribute's values across the pool.
@@ -790,11 +823,15 @@ class Agent:
                 survivors.update(slot.provenance)
         state["terms"] = [t for t in state["terms"] if t in survivors]
 
-    def _retrieve(self, terms: list[str], limit: int) -> list[tuple[str, float]]:
-        if not terms or self.cfg["term_cap"] < 1 or limit < 1:
+    def _retrieve(self, terms: list[str], limit: int,
+                  cfg: dict | None = None) -> list[tuple[str, float]]:
+        # cfg is the ROUTE's config for this turn: term_cap and the bm25 field
+        # weights are per-route retrieval topology, not global constants.
+        cfg = cfg or self.cfg
+        if not terms or cfg["term_cap"] < 1 or limit < 1:
             return []
-        expression = " OR ".join(f'"{t}"' for t in terms[: self.cfg["term_cap"]])
-        weights = ", ".join(str(w) for w in self.cfg["bm25"])
+        expression = " OR ".join(f'"{t}"' for t in terms[: cfg["term_cap"]])
+        weights = ", ".join(str(w) for w in cfg["bm25"])
         rows = self.conn.execute(
             f"SELECT parent_asin, bm25(products, {weights}) AS s FROM products "
             f"WHERE products MATCH ? ORDER BY s LIMIT ?", (expression, limit)).fetchall()
@@ -982,6 +1019,7 @@ class Agent:
             "provenance": {}, "overrides": 0, "dry_streak": 0, "broad_options": [],
             "slots": [], "outcome": "", "wants_more": 0, "shown": [],
             "uncertain_streak": 0, "last_override_turn": 0, "rotate_pending": False,
+            "route_history": [],
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -992,8 +1030,10 @@ class Agent:
         message = user_message if isinstance(user_message, str) else str(user_message or "")
         low = message.lower()
 
+        opening_cat, opening_phrases = (parse_message(message) if turn == 1 else (None, None))
         if turn == 1:
-            state["route"] = self._route(message)
+            state["route"] = self._route(message, opening_phrases, opening_cat)
+            state["route_history"] = [state["route"]]
         turn_cfg_noise = self._route_cfg(state)
 
         if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
@@ -1068,6 +1108,10 @@ class Agent:
                 state["shown"] = []
                 state["rotate_pending"] = False
             self._rebuild_terms(state, message, turn_cfg_noise)
+            moved = self._retarget(state)
+            if moved != state["route"]:
+                state["route"] = moved
+                state.setdefault("route_history", []).append(moved)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
         turn_cfg = self._route_cfg(state)
@@ -1077,7 +1121,7 @@ class Agent:
             depth = max(depth, int(turn_cfg["starved_candidates"]))
         state["starved"] = bool(starved)
         limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
-        cands = self._retrieve(state["terms"], limit)
+        cands = self._retrieve(state["terms"], limit, turn_cfg)
         if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:

@@ -173,9 +173,46 @@ class AgentContractTest(unittest.TestCase):
         for message, route in [
             ("I'm looking for x. A key requirement is: leather.", "buying"),
             ("I'm looking for x, but I'm still exploring.", "browsing"),
-            ("I'm looking for x. I prefer silk.", "override"),
+            ("Actually, ignore my earlier preference. What I need is: silk.", "override"),
         ]:
-            self.assertEqual(A.Agent._route(message), route)
+            category, phrases = A.parse_message(message)
+            self.assertEqual(A.Agent._route(message, phrases, category), route, message)
+
+    def test_unknown_opening_degrades_to_mixed_not_override(self) -> None:
+        # Previously 100% of vague openings were labelled "override", a claim
+        # the customer never made.
+        for message in ("Show me something good.",
+                        "Hi, I need to buy a gift but I'm not sure what.",
+                        "I'm just looking around, nothing specific in mind yet."):
+            category, phrases = A.parse_message(message)
+            self.assertEqual(A.Agent._route(message, phrases, category), "mixed", message)
+
+    def test_route_firms_up_from_browsing_to_buying(self) -> None:
+        state = A.Agent._blank_state()
+        state["route"] = "browsing"
+        self.assertEqual(A.Agent._retarget(state), "browsing")
+        state["slots"].append(A.SlotValue(attribute="material", value="leather"))
+        self.assertEqual(A.Agent._retarget(state), "buying",
+                         "a stated constraint means the shopper is no longer browsing")
+
+    def test_mixed_becomes_browsing_once_a_category_is_known(self) -> None:
+        state = A.Agent._blank_state()
+        state["route"] = "mixed"
+        self.assertEqual(A.Agent._retarget(state), "mixed")
+        state["category"] = "Shoes Athletic"
+        self.assertEqual(A.Agent._retarget(state), "browsing")
+
+    def test_retrieval_honours_the_route_config(self) -> None:
+        # term_cap and the bm25 field weights are per-route retrieval topology;
+        # reading them from self.cfg made any route patch silently void.
+        ag = self.agent(route_overrides={"browsing": {"term_cap": 1}})
+        ag.reset("s", {})
+        seen = {}
+        original = ag._retrieve
+        ag._retrieve = lambda terms, limit, cfg=None, _o=original: (
+            seen.update(cap=(cfg or ag.cfg)["term_cap"]) or _o(terms, limit, cfg))
+        ag.respond("s", "I'm looking for Shoes Athletic, but I'm still exploring.", 1, 10)
+        self.assertEqual(seen["cap"], 1, "a route patch on term_cap must reach _retrieve")
 
     def test_route_overrides_reach_every_stage_not_just_rerank(self) -> None:
         ag = self.agent(route_overrides={"browsing": {"ask_policy": "probe_cycle"}})
@@ -379,8 +416,8 @@ class Phase1StateTest(unittest.TestCase):
         ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
         limits: list[int] = []
         original = ag._retrieve
-        ag._retrieve = lambda terms, limit, _o=original: (
-            limits.append(limit) or _o(terms, limit))
+        ag._retrieve = lambda terms, limit, cfg=None, _o=original: (
+            limits.append(limit) or _o(terms, limit, cfg))
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
         ag.respond("s", "Hmm, hard to say really.", 2, 10)
@@ -392,8 +429,8 @@ class Phase1StateTest(unittest.TestCase):
         ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
         limits: list[int] = []
         original = ag._retrieve
-        ag._retrieve = lambda terms, limit, _o=original: (
-            limits.append(limit) or _o(terms, limit))
+        ag._retrieve = lambda terms, limit, cfg=None, _o=original: (
+            limits.append(limit) or _o(terms, limit, cfg))
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
         ag.respond("s", "For that, what matters is: black.", 2, 10)

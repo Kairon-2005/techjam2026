@@ -210,6 +210,26 @@ def _tf_profile_informative(sample, prods, rng):
     return {**sample, "user_profile": profile}
 
 
+# HOLDOUT phrasing. Deliberately shares no wording with _reply_uncooperative:
+# no "hard to say", no "not sure", no "show me more". If UNCERTAIN detection
+# was tuned to the development phrases, these leak into the query instead and
+# the holdout score collapses -- which is the point of keeping them separate.
+HOLDOUT_STONEWALLS = (
+    "Honestly I could go either way on that.",
+    "That's a tough one, I've got no strong feelings.",
+    "Whatever you'd recommend is fine by me.",
+    "I haven't really thought about it that much.",
+    "Could I see a few different ones?",
+    "Ehh, nothing jumps out at me.",
+)
+
+
+def _reply_uncooperative_holdout(sample, attribute, disclosed, bu, rng):
+    if rng.random() < 0.5:
+        return rng.choice(HOLDOUT_STONEWALLS), bu
+    return None
+
+
 LIBRARY: list[Scenario] = [
     Scenario("clean", "control -- the official public set, unmodified"),
     Scenario("override_genuine", "Pillar II: slot erasure when the old value is truly obsolete",
@@ -221,6 +241,10 @@ LIBRARY: list[Scenario] = [
              init=_init_vague),
     Scenario("uncooperative", "Pillar II: fallback when the customer will not answer",
              reply=_reply_uncooperative),
+    Scenario("uncooperative_holdout",
+             "HOLDOUT: stonewalling in phrasing never used during development",
+             reply=_reply_uncooperative_holdout,
+             notes="shares no wording with the tuning scenario; validates detection generalises"),
     Scenario("contradiction", "robustness: a stated constraint that is false of the target",
              sample_tf=_tf_contradiction),
     Scenario("profile_informative", "Pillar III: can personalization be exploited at all?",
