@@ -381,3 +381,116 @@ A 在文件中位于 B 之后，切出空串，`str.replace("", block)` 把代�
 **每两个字符之间**，文件膨胀到 73 MB。因插入是均匀的，可从重复间距反推出
 被插入的块并整体删除，**逐字节还原**（还原后 48,721 字节，AST 校验通过）。
 教训：字符串编辑一律用唯一锚点 + 计数断言，不要用 index 切片。
+
+---
+
+# 审查 items 1–8 处理结果
+
+## 1. 可复现性（根因已修）
+
+审查在 `bcfbca2`、seeds 7–11 上复跑得 `uncooperative=0.829795`，而报告写的是 `0.8372`。
+**代码没有任何差异——是 seed 集不一致。** `lab/capability.py` 文档写明默认
+`range(7,12)`，但我用来出数的是临时脚本里的 `(7,11,23,42,101)`，且临时脚本从不写日志，
+所以差异在别人复跑之前不可见。
+
+根因修复：**`lab/record.py` 是唯一被允许产出数字的入口**。每行记录携带
+commit / dirty / dirty 文件列表 / 完整 config / 完整 seed 列表 / 每个 seed 的
+四项指标 / mean / sd，追加写入 `lab/results.jsonl`。**不带 seed 列表的聚合值一律不得上报。**
+
+修正后的 Phase 1 结果（两侧都在 seeds 7–11 重测）：
+
+| 场景 | pre(1d5718c) | Phase 1 | Δ |
+|---|---|---|---|
+| clean | 0.928508 | 0.928508 | 0 |
+| uncooperative | 0.711598 | 0.833266 | **+0.1217** |
+| vague_start | 0.870627 | 0.917534 | **+0.0469** |
+| contradiction | 0.784395 | 0.809592 | **+0.0252** |
+| override_genuine | 0.921971 | 0.921971 | **0**（此前报的 +0.0059 是 seed 假象） |
+| override_category | 0.913515 | 0.915013 | +0.0015（sd 0.0066，噪声内） |
+
+## 2. depth=1000 的 CPU 成本
+
+| depth | suite 墙钟 | peak RSS | 常规轮 p50/p95 | 饥饿轮 p50/p95 | score |
+|---|---|---|---|---|---|
+| 关闭 | 12.9 s | 591 MB | 6.2 / 27.7 ms | — | 0.6787 |
+| 500 | 7.0 s | 593 MB | 9.9 / 20.3 ms | 9.9 / 20.3 ms | 0.8239 |
+| 1000 | 7.3 s | 594 MB | 10.4 / 34.3 ms | 12.8 / 23.7 ms | 0.8353 |
+
+**扩召回让整套评测更快**（12.9 s → 7.3 s），因为会话收敛更早、总轮数更少。
+1000 相对 500：饥饿轮 **+2.9 ms p50 / +3.4 ms p95**，RSS **+1 MB**。
+绝对值 12.8 ms p50 相对 60 s 预算可忽略。
+
+## 3. 饥饿信号不再等同于「连续无信息」
+
+实测：**clean 上的 stalled 轮中位数是 17 个查询词、7 条活跃约束**——正是绝不能
+被扩到 1000 的强查询。`_starved()` 现在要求「停滞（或显式 REQUEST_MORE）
+**且** 查询确实稀薄」：≤ 8 词 或 ≤ 1 条活跃约束。
+代价：vague_start 0.9267 → 0.9175。**保留这个保守门**。
+
+## 4. 轮换改为一次性事件
+
+`wants_more` 只增不减，导致此后每一轮都在旋转。现在 `REQUEST_MORE` 只装填
+一次 `rotate_pending`，`_rotate` 消费它；**新证据到达时清空 `shown` 与
+`rotate_pending`**，因为旧分页属于另一个结果集。
+
+## 5. contradiction +0.0252 的归因（因子化消融）
+
+| 关闭的因子 | contradiction | 贡献 |
+|---|---|---|
+| （全开） | 0.809592 | — |
+| −evidence_query | 0.809592 | **0.000** |
+| −outcome_filter | 0.809592 | **0.000** |
+| **−starved** | 0.784395 | **+0.0252（全部）** |
+| −rotation | 0.809592 | **0.000** |
+| −slot_soft | 0.812014 | −0.0024（slot_soft 在此有害） |
+
+关掉饥饿扩召回后**逐位复现 pre-Phase-1 的 0.784395**。结论：全部收益来自扩召回。
+
+## 6. slot_soft 机制已查明（`lab/diag_slotsoft.py`）
+
+override_category 上唯一的死短语是**被抛弃的品类**本身（`'i want shoes slippers'`）。
+slot_soft 把它救活：仍是拖鞋的候选拿到 f_slot=1.0 → **+4.000**，
+而 pivot 之后真正的目标拿 **+0.000**——单这一项就决定了排序
+（竞争者 8.55 vs 目标 7.21）。
+
+**根因**：`last_override_turn=0`，**这次覆盖根本没被检测到**。
+旧 `OVERRIDE_RE` 要求字面的 "forget what i said"，而消息是
+"forget shoes slippers entirely"。已扩展为
+forget / changed my mind / no longer / instead of / not … anymore。
+「forget boots, I want running shoes」是最典型的意图覆盖，此前完全不可见——
+这是真实鲁棒性缺陷，不是场景造出来的。
+
+检测修好后 `soft_needs_credible` 能把 override_category 从 0.9150 拉到 **0.9237**，
+与 `slot_soft=0` 完全相同。**但仍不设为默认**：它要付 payload 改写鲁棒性
+（payload_soft 0.8777→0.8617，shuffle 0.8982→0.8929，drop 0.8842→0.8737）
+与 clean 0.0008。payload 改写是私有集的合理风险，而品类 pivot 是我们自造的场景，
+这笔交易不划算。`on_override="slot"` 即使在检测修好后仍然更差
+（0.9010 vs keep 0.9150）——**打分仍然胜过过滤**。
+
+## 7. Phase 2A（见 commit 07c191a）
+
+未知开场 100% 从 `override` 改为 `mixed`；路由按每轮证据从 mixed/browsing
+firm up 到 buying（clean 上产生 75 次 `browsing → buying`）；
+`_retrieve()` 改为使用本轮 route config（此前 `term_cap` / `bm25` 直接读
+`self.cfg`，任何 route patch 都是静默无效——与 `"route": false` 同类）。
+route 权重保持中性，因此行为不变：clean 0.928508、compat 0.928708 逐位一致。
+
+## 8. Holdout 验证（seeds 12–31，配置冻结）
+
+| 场景 | pre-Phase-1 | Phase 1+2A | Δ |
+|---|---|---|---|
+| uncooperative（开发用措辞） | 0.714024 ± 0.0197 | **0.833022 ± 0.0102** | **+0.1190** |
+| uncooperative_holdout（**未见过的措辞**） | 0.705402 ± 0.0249 | **0.817144 ± 0.0147** | **+0.1117** |
+
+- **选择用 seeds 7–11 得 0.833266，holdout seeds 12–31 得 0.833022** ——
+  `starved_after` / `depth` 的选择跨 seed 泛化，不是调出来的。
+- 未见措辞下仍保住 +0.112，仅比开发措辞低 0.016。
+  （旧 agent 的同一差距是 0.009，即新 agent 对措辞略敏感一些，但收益压倒性保留。）
+
+**holdout 暴露的一个真实缺陷（已记录、未修）**：
+`'Could I see a few different ones?'` 应判为 REQUEST_MORE，实际落到 UNCERTAIN——
+`MORE_RE` 要求字面的 "more"。**不在 holdout 上修**，否则 holdout 就作废了。
+留待下一轮用新的开发集处理。
+
+UNCERTAIN 是兜底分支，任何无法解析且不匹配已知模式的消息都会落到它——
+所以未见措辞的检测是**设计上**泛化的，不是靠模式匹配开发集措辞。
