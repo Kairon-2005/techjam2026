@@ -335,11 +335,44 @@ class Phase1StateTest(unittest.TestCase):
     def test_rotation_protects_the_confident_head(self) -> None:
         ag = self.primed(rotate_keep_top=2)
         state = ag._sessions["s"]
-        state["wants_more"] = 1
+        state["rotate_pending"] = True
         state["shown"] = ["P1", "P2", "P3"]
         rotated = ag._rotate(["P1", "P2", "P3", "P4"], state, ag.cfg)
         self.assertEqual(rotated[:2], ["P1", "P2"], "top of the list must be pinned")
         self.assertEqual(rotated[2], "P4", "unseen candidates come before seen ones")
+
+    def test_rotation_is_one_shot(self) -> None:
+        ag = self.primed(rotate_keep_top=2)
+        state = ag._sessions["s"]
+        state["rotate_pending"] = True
+        state["shown"] = ["P1", "P2", "P3"]
+        first = ag._rotate(["P1", "P2", "P3", "P4"], state, ag.cfg)
+        self.assertFalse(state["rotate_pending"], "one request must arm exactly one rotation")
+        again = ag._rotate(["P1", "P2", "P3", "P4"], state, ag.cfg)
+        self.assertEqual(again, ["P1", "P2", "P3", "P4"], "must not keep rotating forever")
+        self.assertNotEqual(first, again)
+
+    def test_new_evidence_resets_pagination(self) -> None:
+        ag = self.primed()
+        ag.respond("s", "Can you just show me more options?", 2, 10)
+        self.assertTrue(ag._sessions["s"]["shown"])
+        ag.respond("s", "For that, what matters is: black.", 3, 10)
+        state = ag._sessions["s"]
+        self.assertFalse(state["rotate_pending"])
+        # "shown" is repopulated for the NEW result set, not carried over
+        self.assertLessEqual(len(state["shown"]), 10)
+
+    def test_a_rich_but_stalled_query_is_not_widened(self) -> None:
+        # Clean-set stalls carry ~17 terms and ~7 constraints; widening those
+        # trades away MRR for recall that is not the binding constraint.
+        ag = self.primed()
+        state = ag._sessions["s"]
+        state["dry_streak"] = 5
+        state["terms"] = [f"t{i}" for i in range(20)]
+        state["slots"] = [A.SlotValue(attribute="feature", value=f"v{i}") for i in range(7)]
+        self.assertFalse(ag._starved(state, ag.cfg))
+        state["terms"] = ["belt", "leather"]
+        self.assertTrue(ag._starved(state, ag.cfg))
 
     def test_starved_evidence_widens_the_candidate_pool(self) -> None:
         A._CATALOG_CACHE.clear()

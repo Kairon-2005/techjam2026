@@ -74,7 +74,14 @@ DEFAULTS = {
     # as popular near-misses crowd in) but recall is the binding constraint when
     # it is not, so widen only while starved. This replaces, deliberately, the
     # query expansion that filler tokens used to provide by accident.
+    # "No new information for N turns" is NOT the same as "the query is thin".
+    # Measured on the clean set, stalled turns there carry a median of 17 query
+    # terms and 7 active constraints -- widening those is exactly the risk of
+    # blowing a strong query up to depth 1000. Starvation therefore requires a
+    # stall AND genuine thinness (or an explicit request for more options).
     "starved_after": 2,           # consecutive uninformative turns before widening
+    "starved_max_terms": 8,       # query is thin at or below this many terms
+    "starved_max_slots": 1,       # ...or this many active constraints
     "starved_candidates": 1000,   # candidate depth while starved (0 = never widen)
     "on_override": "keep",        # keep | erase | decay | slot
     "filter_noise": True,
@@ -479,9 +486,15 @@ def slot_of(phrase: str) -> str:
     return "feature"
 
 
+# Broadened after lab/diag_slotsoft.py showed "Actually, forget shoes slippers
+# entirely..." was not detected as an override at all: the old pattern required
+# the exact words "forget what i said". A customer who says "forget boots, I
+# want running shoes" is the canonical intent override, so missing it left the
+# abandoned constraint fully active -- and slot_soft then rescued it.
 OVERRIDE_RE = re.compile(
-    r"ignore my earlier|forget what i said|scratch that|disregard my earlier"
-    r"|change of plans|start over", re.I)
+    r"ignore my earlier|disregard my earlier|scratch that|change of plans|start over"
+    r"|\bforget\b|changed my mind|no longer (?:want|need|looking)"
+    r"|instead of|rather than|not looking for\b[^.]{0,40}\banymore", re.I)
 
 
 def _fallback_phrases(raw: str) -> list[str]:
@@ -603,6 +616,22 @@ class Agent:
                     blocked.add(slot.value)
         return frozenset(blocked)
 
+    def _starved(self, state: dict, cfg: dict) -> bool:
+        """Thin evidence, not merely a quiet turn.
+
+        Widening trades MRR for recall, so it must fire only when recall is
+        actually the binding constraint: the customer has stalled AND the query
+        we would run is thin, or they explicitly asked to see more.
+        """
+        if not cfg["starved_candidates"]:
+            return False
+        stalled = state.get("dry_streak", 0) >= int(cfg["starved_after"])
+        if not (stalled or state.get("rotate_pending")):
+            return False
+        active = sum(1 for slot in state["slots"] if slot.usable)
+        return (len(state["terms"]) <= int(cfg["starved_max_terms"])
+                or active <= int(cfg["starved_max_slots"]))
+
     def _rotate(self, ranked: list[str], state: dict, cfg: dict) -> list[str]:
         """Honour "show me something else" without throwing away the good head.
 
@@ -610,8 +639,9 @@ class Agent:
         burns a turn. Rotating everything would wreck MRR, so the confident head
         is pinned and only the tail is refreshed with unseen candidates.
         """
-        if not (cfg["rotate_on_request"] and state.get("wants_more")):
+        if not (cfg["rotate_on_request"] and state.get("rotate_pending")):
             return ranked
+        state["rotate_pending"] = False      # one request, one rotation
         keep = max(0, int(cfg["rotate_keep_top"]))
         head, tail = ranked[:keep], ranked[keep:]
         seen = set(state.get("shown") or ())
@@ -951,7 +981,7 @@ class Agent:
             # phrase -> terms it contributed, so slot erasure can drop them too
             "provenance": {}, "overrides": 0, "dry_streak": 0, "broad_options": [],
             "slots": [], "outcome": "", "wants_more": 0, "shown": [],
-            "uncertain_streak": 0, "last_override_turn": 0,
+            "uncertain_streak": 0, "last_override_turn": 0, "rotate_pending": False,
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -991,7 +1021,8 @@ class Agent:
         outcome = classify_reply(message, phrases, category)
         state["outcome"] = outcome
         if outcome == Outcome.REQUEST_MORE:
-            state["wants_more"] += 1
+            state["wants_more"] += 1         # telemetry: how often they asked
+            state["rotate_pending"] = True   # consumed by the next _rotate
         informative = outcome in (Outcome.INFORMATIVE, Outcome.OVERRIDE)
         if not turn_cfg_noise["filter_noise"]:
             # Ablation path: treat everything except an explicit no-preference
@@ -1009,6 +1040,7 @@ class Agent:
             elif informative:
                 state["uncertain_streak"] = 0
         if informative:
+            had_category = bool(state["category"])
             if turn == 1 and not category:
                 head = re.split(r"[.!?]", message)[0]
                 head = re.sub(r"^(hi|hello|hey)\b[,!.\s]*", "", head, flags=re.I)
@@ -1030,13 +1062,17 @@ class Agent:
                     attribute=slot_of(phrase), value=_norm(phrase),
                     hardness="hard" if turn == 1 else "soft",
                     source_turn=turn, provenance=terms))
+            if phrases or (category and not had_category):
+                # The query changed, so the old page is stale: restart paging
+                # rather than carry "already shown" across a different result set.
+                state["shown"] = []
+                state["rotate_pending"] = False
             self._rebuild_terms(state, message, turn_cfg_noise)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
         turn_cfg = self._route_cfg(state)
         depth = turn_cfg["candidates"]
-        starved = (turn_cfg["starved_candidates"]
-                   and state.get("dry_streak", 0) >= int(turn_cfg["starved_after"]))
+        starved = self._starved(state, turn_cfg)
         if starved:
             depth = max(depth, int(turn_cfg["starved_candidates"]))
         state["starved"] = bool(starved)
