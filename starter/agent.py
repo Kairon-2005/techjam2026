@@ -11,6 +11,7 @@ Config resolution: explicit arg > TJ_CONFIG env var (JSON) > DEFAULTS.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -60,8 +61,26 @@ DEFAULTS = {
     # request. Detecting it forces a pool-derived question and switches the
     # prompt from open-ended to a structured choice. 0 disables.
     "overgeneral_cats": 6,
+    # Phase 1C: recovery when the customer stops supplying information.
+    # Pool entropy says which question SPLITS the pool; answerability says
+    # which question a person can actually answer. After a dry turn, weight by
+    # both instead of chasing the most discriminative-but-unanswerable facet.
+    "answerability_after": 1,     # dry turns before answerability is weighted in
+    "rotate_on_request": True,    # "show me more" rotates unseen candidates up
+    "rotate_keep_top": 3,         # protect the confident head so MRR survives
+    # Starved-evidence broadening. A customer who will not answer leaves a thin
+    # query, and a thin query has thin RECALL -- the target stops reaching the
+    # candidate pool at all. Deeper pools hurt when evidence is good (MRR falls
+    # as popular near-misses crowd in) but recall is the binding constraint when
+    # it is not, so widen only while starved. This replaces, deliberately, the
+    # query expansion that filler tokens used to provide by accident.
+    "starved_after": 2,           # consecutive uninformative turns before widening
+    "starved_candidates": 1000,   # candidate depth while starved (0 = never widen)
     "on_override": "keep",        # keep | erase | decay | slot
     "filter_noise": True,
+    # Phase 1A: build the retrieval query from accepted evidence only, instead
+    # of from every token of every message the noise filter let through.
+    "evidence_query": True,
     "chrome_stop": True,
     "term_cap": 60,
     # --- retrieval ---
@@ -111,6 +130,16 @@ DEFAULTS = {
     "w_soft_hi": 2.5,
     "slot_soft": 4.0,         # weight for dead-phrase soft overlap
     "soft_min_idf": 1.5,      # ignore near-ubiquitous tokens in soft overlap
+    # Phase 1D: soft matching is EXTRAPOLATION from a constraint, so it is only
+    # safe on evidence we still trust. An exact match is the customer's own
+    # words and always counts; a fuzzy match invented for a stale or contested
+    # constraint is how a superseded category climbs back up the ranking.
+    # Measured and left OFF: gating soft rescue on "stated before the pivot, or
+    # contested by a newer single-valued answer" costs ~0.0007 everywhere and
+    # recovers only 0.0008 of the 0.0100 that slot_soft=0 recovers on
+    # override_category -- so that harm has a different cause than this gate
+    # models. Kept as an ablation; the mechanism is still open. See notes/08.
+    "soft_needs_credible": False,
     "pop_mode": "log",           # log | pct | pct2 | pct4 | pct_rating
     # Per-route weight overrides, e.g. {"browsing": {"w_pop": 6.0}}.
     "route_overrides": {},
@@ -312,6 +341,79 @@ NOISE_RE = re.compile(
     r"(?:\bno\b|\bnot\b|don'?t|couldn'?t|could not)[^.]{0,50}\bpreference\b"
     r"|your judgment|do not mind|don'?t mind|i'?m easy|i am easy|you pick"
     r"|any \w+ is fine|up to you|not quite|wrong direction|not really working", re.I)
+# What a customer turn actually did. Distinguishing these is what stops an
+# uninformative reply from being treated as product evidence: "Hmm, hard to say"
+# used to contribute hmm/hard/say to the BM25 query.
+class Outcome:
+    INFORMATIVE = "informative"
+    OVERRIDE = "override"
+    NO_PREFERENCE = "no_preference"
+    UNCERTAIN = "uncertain"
+    REFUSAL = "refusal"
+    REQUEST_MORE = "request_more_options"
+    CORRECTION = "correction"
+
+
+MORE_RE = re.compile(
+    r"(?:show|give|see|got)\b[^.?!]{0,20}\bmore\b|more options|other options|anything else"
+    r"|something else|different options|next\s+(?:few|batch|set)", re.I)
+UNCERTAIN_RE = re.compile(
+    r"not sure|hard to say|no idea|don'?t know|do not know|can'?t say|cannot say"
+    r"|what do you think|you tell me|hmm+\b|maybe\?*$", re.I)
+REFUSAL_RE = re.compile(
+    r"rather not say|prefer not to|won'?t say|none of your|skip (?:that|this)", re.I)
+CORRECTION_RE = re.compile(r"not quite|wrong direction|not really working|that'?s not", re.I)
+
+
+def classify_reply(message: str, parsed_phrases: list[str],
+                   parsed_category: str | None = None) -> str:
+    """Label one customer turn. Evidence is merged only for INFORMATIVE/OVERRIDE.
+
+    Order matters: an override is an override even though it also carries a new
+    constraint, and a request for more options is not a preference statement.
+    Anything unrecognised with no parsable constraint falls through to
+    UNCERTAIN, so unknown phrasing can never silently become query terms.
+    """
+    low = (message or "").lower()
+    if OVERRIDE_MARK in low or OVERRIDE_RE.search(low):
+        return Outcome.OVERRIDE
+    evidence = bool(parsed_phrases) or bool(parsed_category)
+    if MORE_RE.search(low) and not evidence:
+        return Outcome.REQUEST_MORE
+    if any(n in low for n in NOISE_REPLIES):
+        return Outcome.NO_PREFERENCE
+    if evidence:
+        # A stated category is evidence even with no constraint attached:
+        # "I'm looking for running shoes, but I'm still exploring."
+        return Outcome.INFORMATIVE
+    if NOISE_RE.search(low) and not CUE_RE.search(low):
+        return Outcome.NO_PREFERENCE
+    if CORRECTION_RE.search(low):
+        return Outcome.CORRECTION
+    if REFUSAL_RE.search(low):
+        return Outcome.REFUSAL
+    return Outcome.UNCERTAIN
+
+
+@dataclasses.dataclass
+class SlotValue:
+    """One piece of stated evidence, with everything needed to judge it later."""
+    attribute: str
+    value: str
+    polarity: int = 1                 # +1 wants it, -1 rejects it
+    hardness: str = "hard"            # hard | soft
+    confidence: float = 1.0
+    source_turn: int = 0
+    provenance: tuple[str, ...] = ()  # query terms this slot contributed
+    active: bool = True
+    catalog_support: int = -1         # -1 unknown; else verbatim matches in pool
+    contradiction: str = ""           # "" | "contested" | "unsupported"
+
+    @property
+    def usable(self) -> bool:
+        return self.active and self.polarity > 0
+
+
 # Slot taxonomy. The names come from the API contract's ALLOWED_ATTRIBUTES, not
 # from the simulator, so the same buckets apply to any customer phrasing.
 SLOT_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
@@ -327,6 +429,14 @@ SLOT_RES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 
 # Catalog-readable attribute vocabularies. Used to measure how much a given
 # question would actually split the current candidate pool.
+# How likely a shopper can answer a question about this attribute at all.
+# Someone who just said "I don't know" can still say what they'll use it for;
+# they probably still cannot tell you a fabric composition.
+ANSWERABILITY: dict[str, float] = {
+    "use_case": 1.00, "category": 0.90, "style": 0.80, "color": 0.75,
+    "budget": 0.55, "brand": 0.50, "feature": 0.45, "material": 0.40, "size": 0.35,
+}
+
 ATTR_VOCAB: dict[str, "re.Pattern[str]"] = {
     "material": MATERIAL_RE,
     "color": COLOR_RE,
@@ -353,6 +463,12 @@ def _distinguishing(labels: list[str]) -> list[str]:
     trimmed = [" ".join(w for w in words if w not in common) or " ".join(words[-2:])
                for words in split]
     return trimmed if len(set(trimmed)) == len(trimmed) else labels
+
+
+# Attributes a shopper can only hold one value of at a time. Two "feature"
+# constraints coexist happily ("rubber sole" AND "imported"); two materials
+# usually mean the later one replaced the earlier.
+SINGLE_VALUED = frozenset({"material", "color", "size", "budget", "brand", "category"})
 
 
 def slot_of(phrase: str) -> str:
@@ -457,6 +573,52 @@ class Agent:
             return 0.0
         return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
 
+    def _easiest_unasked(self, state: dict) -> str:
+        """The most answerable facet not yet asked, ignoring pool entropy."""
+        asked = set(state["asked"])
+        options = [(score, name) for name, score in ANSWERABILITY.items()
+                   if name not in asked and name in ATTR_VOCAB]
+        return max(options)[1] if options else ""
+
+    def _uncredible(self, state: dict) -> frozenset:
+        """Constraint values that may still match exactly but must not be
+        soft-matched: stated before an override, or contested by a newer value
+        of a single-valued attribute.
+        """
+        pivot = state.get("last_override_turn", 0)
+        blocked: set[str] = set()
+        latest: dict[str, tuple[int, str]] = {}
+        for slot in state["slots"]:
+            if not slot.usable:
+                continue
+            if pivot and slot.source_turn <= pivot:
+                blocked.add(slot.value)          # predates the customer's pivot
+            if slot.attribute in SINGLE_VALUED:
+                seen = latest.get(slot.attribute)
+                if seen is None or slot.source_turn >= seen[0]:
+                    if seen is not None and seen[1] != slot.value:
+                        blocked.add(seen[1])     # superseded by a newer value
+                    latest[slot.attribute] = (slot.source_turn, slot.value)
+                elif seen[1] != slot.value:
+                    blocked.add(slot.value)
+        return frozenset(blocked)
+
+    def _rotate(self, ranked: list[str], state: dict, cfg: dict) -> list[str]:
+        """Honour "show me something else" without throwing away the good head.
+
+        Repeating an identical top-10 after the customer asked for alternatives
+        burns a turn. Rotating everything would wreck MRR, so the confident head
+        is pinned and only the tail is refreshed with unseen candidates.
+        """
+        if not (cfg["rotate_on_request"] and state.get("wants_more")):
+            return ranked
+        keep = max(0, int(cfg["rotate_keep_top"]))
+        head, tail = ranked[:keep], ranked[keep:]
+        seen = set(state.get("shown") or ())
+        fresh = [a for a in tail if a not in seen]
+        stale = [a for a in tail if a in seen]
+        return head + fresh + stale
+
     def _overgeneral(self, pool: list[str], cfg: dict) -> tuple[bool, list[str]]:
         """Is the pool too broad to rank, rather than merely unranked?
 
@@ -481,15 +643,20 @@ class Agent:
     def _pool_attribute(self, state: dict, pool: list[str],
                         cfg: dict | None = None) -> tuple[str, float, int]:
         """Ask about whichever attribute best splits the live candidate pool."""
-        depth = max(2, int((cfg or self.cfg)["pool_depth"]))
+        cfg = cfg or self.cfg
+        depth = max(2, int(cfg["pool_depth"]))
         window = pool[:depth]
-        best, best_bits = "other", 0.0
+        # Once the customer has gone quiet, a question they cannot answer costs
+        # a whole turn for nothing, so discount by how answerable it is.
+        weigh = state.get("dry_streak", 0) >= int(cfg["answerability_after"])
+        best, best_bits, best_util = "other", 0.0, 0.0
         for attribute, pattern in ATTR_VOCAB.items():
             if attribute in state["asked"]:
                 continue
             bits = self._pool_entropy(window, pattern)
-            if bits > best_bits:
-                best, best_bits = attribute, bits
+            util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
+            if util > best_util:
+                best, best_bits, best_util = attribute, bits, util
         return best, best_bits, len(window)
 
     def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
@@ -504,6 +671,14 @@ class Agent:
             # go open-ended rather than walking the whole list dry.
             broad, options = self._overgeneral(pool or [], cfg)
             state["broad_options"] = options
+            # A customer who cannot answer is not a customer with no preference:
+            # keep asking, but ask something easier, instead of falling back to
+            # the open-ended question they already failed to answer.
+            if state.get("uncertain_streak", 0) >= int(cfg["answerability_after"]):
+                easy = self._easiest_unasked(state)
+                if easy:
+                    state["last_bits"] = 0.0
+                    return easy
             # An over-general pool is exactly when a targeted question pays, so
             # the give-up guard is suspended while the request is still vague.
             if not broad and state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
@@ -523,13 +698,40 @@ class Agent:
             return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
         return "other"
 
+    def _rebuild_terms(self, state: dict, message: str, cfg: dict) -> None:
+        """Query terms come from accepted evidence, not from raw message tokens.
+
+        The legacy path appended every non-stopword token of any message the
+        noise filter let through, so "Hmm, hard to say really" contributed
+        hmm/hard/say/really to the BM25 query. On the clean simulator the two
+        paths agree exactly -- every message there is either a parsable template
+        or already filtered -- so this is free on the public set and only bites
+        when the customer says something the templates do not cover.
+        """
+        if not cfg["evidence_query"]:
+            for term in self._terms(message):
+                if term not in state["terms"]:
+                    state["terms"].append(term)
+            return
+        terms: list[str] = []
+        for term in self._terms(state["category"] or ""):
+            if term not in terms:
+                terms.append(term)
+        for slot in state["slots"]:
+            if not slot.usable:
+                continue
+            for term in slot.provenance:
+                if term not in terms:
+                    terms.append(term)
+        state["terms"] = terms
+
     def _slot_override(self, state: dict, message: str) -> None:
         """Selective rewrite: drop only the slots the customer just replaced.
 
         "forget boots, I want running shoes" supersedes the use_case/category
-        slot and leaves an unrelated colour constraint standing. Phrases in a
-        superseded slot are removed along with the terms only they contributed;
-        every other slot survives.
+        slot and leaves an unrelated colour constraint standing. Slots in a
+        superseded attribute are deactivated along with the terms they
+        contributed; every other slot survives.
         """
         new_category, new_phrases = parse_message(message)
         superseded = {slot_of(p) for p in new_phrases if len(_norm(p)) >= 3}
@@ -539,27 +741,24 @@ class Agent:
         if not superseded:
             return
         incoming = {_norm(p) for p in new_phrases}
-        keep, drop = [], []
-        for phrase in state["phrases"]:
-            if _norm(phrase) in incoming:          # re-stated verbatim: not stale
-                keep.append(phrase)
-            elif slot_of(phrase) in superseded:
-                drop.append(phrase)
-            else:
-                keep.append(phrase)
-        if not drop:
+        dropped = False
+        for slot in state["slots"]:
+            if not slot.usable or slot.value in incoming:
+                continue                            # re-stated verbatim: not stale
+            if slot.attribute in superseded:
+                slot.active = False
+                slot.contradiction = "superseded"
+                dropped = True
+        if not dropped:
             return
-        state["phrases"] = keep
-        survivors: set[str] = set()
-        for phrase in keep:
-            survivors.update(state["provenance"].get(phrase, ()))
-        survivors.update(self._terms(state["category"] or ""))
-        doomed: set[str] = set()
-        for phrase in drop:
-            doomed.update(state["provenance"].pop(phrase, ()))
-        doomed -= survivors
-        if doomed:
-            state["terms"] = [t for t in state["terms"] if t not in doomed]
+        # Slots are the source of truth: deactivating one removes the terms it
+        # contributed, because the query is rebuilt from active evidence.
+        state["phrases"] = [sl.value for sl in state["slots"] if sl.usable]
+        survivors: set[str] = set(self._terms(state["category"] or ""))
+        for slot in state["slots"]:
+            if slot.usable:
+                survivors.update(slot.provenance)
+        state["terms"] = [t for t in state["terms"] if t in survivors]
 
     def _retrieve(self, terms: list[str], limit: int) -> list[tuple[str, float]]:
         if not terms or self.cfg["term_cap"] < 1 or limit < 1:
@@ -624,9 +823,11 @@ class Agent:
         dead: list[int] = []
         if cfg["slot_soft"] and phrases:
             pool = [self.cat.text.get(asin, "") for asin, _ in cands]
+            blocked = self._uncredible(state) if cfg["soft_needs_credible"] else frozenset()
             dead = [i for i, ph in enumerate(phrases)
                     if ";" not in ph                       # skip our own concatenations
                     and len(ph) <= 80                      # skip truncated long tails
+                    and ph not in blocked
                     and not any(ph in blob for blob in pool)]
 
         raw_bm25 = [s for _, s in cands]
@@ -749,6 +950,8 @@ class Agent:
             "route": None, "profile": profile or {}, "dry_others": 0,
             # phrase -> terms it contributed, so slot erasure can drop them too
             "provenance": {}, "overrides": 0, "dry_streak": 0, "broad_options": [],
+            "slots": [], "outcome": "", "wants_more": 0, "shown": [],
+            "uncertain_streak": 0, "last_override_turn": 0,
         }
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -770,25 +973,42 @@ class Agent:
                 state["terms"] = []
                 state["phrases"] = []
                 state["provenance"] = {}
+                state["slots"] = []
             elif mode == "decay":
                 # Keep the MOST RECENT evidence: the tail, not the head.
                 state["terms"] = state["terms"][-8:]
                 state["phrases"] = state["phrases"][-1:]
+                state["slots"] = state["slots"][-1:]
             elif mode == "decay_head":   # original (oldest-first) behaviour, kept for ablation
                 state["terms"] = state["terms"][:8]
                 state["phrases"] = state["phrases"][:1]
+                state["slots"] = state["slots"][:1]
             elif mode == "slot":
                 self._slot_override(state, message)
+            state["last_override_turn"] = turn
 
-        noisy = any(n in low for n in NOISE_REPLIES) or (
-            NOISE_RE.search(low) is not None and not CUE_RE.search(low))
-        informative = not (turn_cfg_noise["filter_noise"] and noisy)
+        category, phrases = parse_message(message)
+        outcome = classify_reply(message, phrases, category)
+        state["outcome"] = outcome
+        if outcome == Outcome.REQUEST_MORE:
+            state["wants_more"] += 1
+        informative = outcome in (Outcome.INFORMATIVE, Outcome.OVERRIDE)
+        if not turn_cfg_noise["filter_noise"]:
+            # Ablation path: treat everything except an explicit no-preference
+            # as evidence, which is what the agent did before Phase 1B.
+            informative = outcome != Outcome.NO_PREFERENCE
         if state["asked"] and state["asked"][-1] == "other":
             state["dry_others"] = 0 if informative else state.get("dry_others", 0) + 1
         if state["asked"]:
             state["dry_streak"] = 0 if informative else state.get("dry_streak", 0) + 1
+            # NO_PREFERENCE means "that facet does not matter to me" -> the facet
+            # was wrong, so go open-ended. UNCERTAIN/REFUSAL means "I cannot
+            # answer that" -> the facet was too hard, so ask an easier one.
+            if outcome in (Outcome.UNCERTAIN, Outcome.REFUSAL):
+                state["uncertain_streak"] = state.get("uncertain_streak", 0) + 1
+            elif informative:
+                state["uncertain_streak"] = 0
         if informative:
-            category, phrases = parse_message(message)
             if turn == 1 and not category:
                 head = re.split(r"[.!?]", message)[0]
                 head = re.sub(r"^(hi|hello|hey)\b[,!.\s]*", "", head, flags=re.I)
@@ -801,22 +1021,36 @@ class Agent:
             if category and not state["category"]:
                 state["category"] = category
             for phrase in phrases:
-                if phrase not in state["phrases"]:
-                    state["phrases"].append(phrase)
-                state["provenance"].setdefault(phrase, self._terms(phrase))
-            for term in self._terms(message):
-                if term not in state["terms"]:
-                    state["terms"].append(term)
+                if phrase in state["phrases"]:
+                    continue
+                state["phrases"].append(phrase)
+                terms = tuple(self._terms(phrase))
+                state["provenance"][phrase] = list(terms)
+                state["slots"].append(SlotValue(
+                    attribute=slot_of(phrase), value=_norm(phrase),
+                    hardness="hard" if turn == 1 else "soft",
+                    source_turn=turn, provenance=terms))
+            self._rebuild_terms(state, message, turn_cfg_noise)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
         turn_cfg = self._route_cfg(state)
-        limit = max(top_k, turn_cfg["candidates"]) if turn_cfg["rerank"] else top_k
+        depth = turn_cfg["candidates"]
+        starved = (turn_cfg["starved_candidates"]
+                   and state.get("dry_streak", 0) >= int(turn_cfg["starved_after"]))
+        if starved:
+            depth = max(depth, int(turn_cfg["starved_candidates"]))
+        state["starved"] = bool(starved)
+        limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
         cands = self._retrieve(state["terms"], limit)
         if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:
             ranked = [a for a, _ in cands]
+        ranked = self._rotate(ranked, state, turn_cfg)
         ordered = ranked[:top_k]
+        for asin in ordered:
+            if asin not in state["shown"]:
+                state["shown"].append(asin)
 
         # The question is chosen AFTER retrieval so it can be conditioned on the
         # candidates that actually survived.

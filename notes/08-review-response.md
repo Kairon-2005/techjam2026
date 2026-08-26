@@ -292,3 +292,92 @@ Coverage / Precision / Efficiency 三维全部对齐官方 harness，
 2. **矛盾约束下的约束可信度**（0.799；同时修 slot_soft 的反向作用）
 3. **个性化判别器**（有信号时 +0.042，需要真正的判别器）
 4. vector / LLM 路（召回曲线证明无空间，留作有据的设计决策）
+
+---
+
+# Phase 1：Typed Evidence State + Uncooperative Recovery
+
+按外部反馈扩大后的范围执行（不只是 SlotValue 数据结构）。
+
+## 结果（5 seeds，与各自 clean 基线配对）
+
+| 场景 | Phase 1 前 | Phase 1 后 | Δ |
+|---|---|---|---|
+| clean（默认） | 0.928508 | **0.928508** | 0（不变） |
+| compat `ask_policy="other"` | 0.928708 | **0.928708** | 0（逐位精确） |
+| **uncooperative** | 0.7219 | **0.8372** | **+0.1153** |
+| **vague_start** | 0.8724 | **0.9267** | **+0.0543** |
+| **contradiction** | 0.7990 | **0.8427** | **+0.0437** |
+| override_genuine | 0.9196 | 0.9255 | +0.0059 |
+| override_category | 0.9190 | 0.9172 | −0.0018（sd 0.0038，噪声内） |
+
+## 关键发现：噪声污染是在做「意外的查询扩展」
+
+反馈预测的污染确认存在：`hmm / hard / say / really / sure / think / can / just / show / more`
+全部进入 BM25 查询。**但把它修掉之后，uncooperative 反而更差**
+（0.7219 → 0.6973）。分解后原因是两条：
+
+1. **检测本身没有收益**：Phase 1B 让 agent 正确识别出用户在敷衍，
+   但它原有的应对（退回 `other`、轮询具体属性）本身就是坏策略。
+2. **污染词在意外地扩大召回**：单独验证 `filter_noise=0, evidence_query=0`
+   得 HR **0.785**，而干净版只有 **0.758**。用户不给信息时查询极窄，
+   窄查询 = 窄召回，目标商品根本进不了候选池。垃圾词把 OR 查询撑开了。
+
+所以正确的修法不是恢复污染，而是**在证据稀薄时刻意扩召回**：
+
+| starved_candidates | uncooperative | HR | MRR | MTTC |
+|---|---|---|---|---|
+| 关闭 | 0.7036 | 0.758 | 0.622 | 4.10 |
+| 200 | 0.7684 | 0.836 | 0.668 | 3.50 |
+| 500 | 0.8292 | 0.914 | 0.701 | 2.90 |
+| **1000（默认）** | **0.8372** | **0.925** | **0.706** | **2.85** |
+| 2000 | 0.8363 | 0.924 | 0.704 | 2.85 |
+
+`starved_after=2`：`after=1` 会让 clean 掉到 0.9251，`after=3` 略差。
+**证据充足时深池有害（MRR 被热门近似项挤垮），证据稀薄时召回才是约束条件**——
+这正是 Pillar III 的 runtime adaptation，且 clean 分文不动。
+
+同一机制顺带修好了 `vague_start`（+0.0543 → 0.9267，HR 0.995）。
+注意：**我们一行路由标签都没改**。反馈判断正确——那个分数的主因是
+「首轮没有 category ⇒ BM25 缺少有效查询词」，是召回问题，不是路由标签问题。
+
+## 已实现
+
+- **1A 类型化证据**：`SlotValue`（attribute / value / polarity / hardness /
+  confidence / source_turn / provenance / active / catalog_support /
+  contradiction）。检索查询**只由 active evidence 重建**，不再吞掉每条消息的
+  每个 token。clean 上两条路径逐位相同（那里的消息要么可解析、要么已被过滤），
+  所以是零代价。
+- **1B 回复结果分类**：`Outcome` = INFORMATIVE / OVERRIDE / NO_PREFERENCE /
+  UNCERTAIN / REFUSAL / REQUEST_MORE / CORRECTION。只有 INFORMATIVE 与
+  OVERRIDE 会合入证据。**踩过的坑**：最初把「只有 category 没有 constraint」
+  的浏览开场判成 UNCERTAIN，90 条会话在第一轮丢掉品类，分数掉到 0.8865。
+  已加回归测试锁死。
+- **1C 无信息恢复**：稀薄证据扩召回（上表）；`REQUEST_MORE` 触发候选轮换
+  （保护前 3 名以免伤 MRR，仅刷新尾部为未展示候选）；区分
+  「没有偏好」（该维度问错了 ⇒ 转开放式）与「答不上来」（该维度太难 ⇒ 问更易回答的）。
+- **1D 可信度门控 —— 负结果**：`slot_soft` 在 `override_category` 上确实值
+  −0.0100（关掉得 0.9272 vs 开着 0.9172）。但按「早于 pivot / 被更新的单值属性
+  取代」实现的门控**没修好它**：只找回 0.0008，且在每个场景上都要付 ~0.0007。
+  **默认关闭，机制仍未查明。** 我原先的伤害假设是错的。
+
+## 未获收益的想法（照实记录）
+
+- **answerability 加权提问**：完全无收益（0.7036 开/关同分）。原因是模拟器的
+  「可回答性」由 `classify_constraint` 的桶匹配决定，不是人类难易度——
+  问 use_case 只会披露被归类为 use_case 的约束。产品设计上合理，
+  但**这个模拟器无法奖励它**，与 pool-aware 提问是同一类结论。
+
+## 方法学升级（按反馈要求）
+
+`lab/capability.py` 现在：每个随机场景跑 5 seeds、报告 mean ± sd、
+输出 **penalty = 场景分 − 该配置自己的 clean 分**（而非跨行比绝对分），
+并同时报告 HR / MRR / MTTC。
+
+## 事故记录
+
+本轮把 `starter/agent.py` 写坏过一次：用 `s.index(A):s.index(B)` 切片时
+A 在文件中位于 B 之后，切出空串，`str.replace("", block)` 把代码块插进了
+**每两个字符之间**，文件膨胀到 73 MB。因插入是均匀的，可从重复间距反推出
+被插入的块并整体删除，**逐字节还原**（还原后 48,721 字节，AST 校验通过）。
+教训：字符串编辑一律用唯一锚点 + 计数断言，不要用 index 切片。

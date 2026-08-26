@@ -258,5 +258,121 @@ class PoolAskerTest(unittest.TestCase):
         self.assertIn(out["ask_attribute"], ALLOWED_ATTRIBUTES)
 
 
+class ReplyOutcomeTest(unittest.TestCase):
+    """Phase 1B: an uninformative turn must not become product evidence."""
+
+    def test_each_outcome_is_recognised(self) -> None:
+        cases = [
+            ("For that, what matters is: rubber sole.", A.Outcome.INFORMATIVE),
+            ("I'm looking for boots, but I'm still exploring.", A.Outcome.INFORMATIVE),
+            ("Actually, ignore my earlier preference. What I need is: leather.", A.Outcome.OVERRIDE),
+            ("I don't have an additional preference for color.", A.Outcome.NO_PREFERENCE),
+            ("Can you just show me more options?", A.Outcome.REQUEST_MORE),
+            ("Hmm, hard to say really.", A.Outcome.UNCERTAIN),
+            ("I'm not sure, what do you think?", A.Outcome.UNCERTAIN),
+            ("I'd rather not say.", A.Outcome.REFUSAL),
+        ]
+        for message, expected in cases:
+            category, phrases = A.parse_message(message)
+            self.assertEqual(A.classify_reply(message, phrases, category), expected, message)
+
+    def test_a_stated_category_alone_counts_as_evidence(self) -> None:
+        # Regression: browsing openings carry a category but no constraint. If
+        # those are not evidence, 90 sessions silently lose their category.
+        message = "I'm looking for Shoes Athletic, but I'm still exploring."
+        category, phrases = A.parse_message(message)
+        self.assertEqual(phrases, [])
+        self.assertEqual(A.classify_reply(message, phrases, category), A.Outcome.INFORMATIVE)
+
+
+class Phase1StateTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.catalog = _catalog_file(Path(cls._tmp.name))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        A._CATALOG_CACHE.clear()
+        cls._tmp.cleanup()
+
+    def primed(self, **cfg) -> A.Agent:
+        A._CATALOG_CACHE.clear()
+        ag = A.Agent(self.catalog, config=cfg or None)
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
+        return ag
+
+    def test_evidence_becomes_a_typed_slot(self) -> None:
+        ag = self.primed()
+        slot = ag._sessions["s"]["slots"][0]
+        self.assertEqual(slot.attribute, "material")
+        self.assertEqual(slot.polarity, 1)
+        self.assertEqual(slot.source_turn, 1)
+        self.assertTrue(slot.usable)
+        self.assertIn("leather", slot.provenance)
+
+    def test_uncooperative_reply_contributes_no_query_terms(self) -> None:
+        ag = self.primed()
+        before = list(ag._sessions["s"]["terms"])
+        ag.respond("s", "Hmm, hard to say really.", 2, 10)
+        after = ag._sessions["s"]["terms"]
+        self.assertEqual(after, before)
+        for junk in ("hmm", "hard", "say", "really"):
+            self.assertNotIn(junk, after)
+
+    def test_query_is_rebuilt_from_active_evidence_only(self) -> None:
+        ag = self.primed()
+        terms = ag._sessions["s"]["terms"]
+        self.assertIn("leather", terms)
+        self.assertIn("belts", terms)          # from the stated category
+
+    def test_request_for_more_options_is_recorded(self) -> None:
+        ag = self.primed()
+        ag.respond("s", "Can you just show me more options?", 2, 10)
+        self.assertEqual(ag._sessions["s"]["wants_more"], 1)
+
+    def test_rotation_protects_the_confident_head(self) -> None:
+        ag = self.primed(rotate_keep_top=2)
+        state = ag._sessions["s"]
+        state["wants_more"] = 1
+        state["shown"] = ["P1", "P2", "P3"]
+        rotated = ag._rotate(["P1", "P2", "P3", "P4"], state, ag.cfg)
+        self.assertEqual(rotated[:2], ["P1", "P2"], "top of the list must be pinned")
+        self.assertEqual(rotated[2], "P4", "unseen candidates come before seen ones")
+
+    def test_starved_evidence_widens_the_candidate_pool(self) -> None:
+        A._CATALOG_CACHE.clear()
+        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
+        limits: list[int] = []
+        original = ag._retrieve
+        ag._retrieve = lambda terms, limit, _o=original: (
+            limits.append(limit) or _o(terms, limit))
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
+        ag.respond("s", "Hmm, hard to say really.", 2, 10)
+        self.assertEqual(limits[0], 100, "a well-fed query keeps the tight pool")
+        self.assertEqual(limits[1], 500, "a starved query widens recall")
+
+    def test_widening_does_not_trigger_while_the_customer_cooperates(self) -> None:
+        A._CATALOG_CACHE.clear()
+        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
+        limits: list[int] = []
+        original = ag._retrieve
+        ag._retrieve = lambda terms, limit, _o=original: (
+            limits.append(limit) or _o(terms, limit))
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Accessories Belts. A key requirement is: genuine leather.", 1, 10)
+        ag.respond("s", "For that, what matters is: black.", 2, 10)
+        self.assertEqual(limits, [100, 100])
+
+    def test_uncertainty_asks_an_easier_question_than_no_preference(self) -> None:
+        ag = self.primed(ask_policy="other_then_pool")
+        state = ag._sessions["s"]
+        state["asked"] = ["other", "other"]
+        state["uncertain_streak"] = 2
+        self.assertEqual(ag._easiest_unasked(state), "use_case")
+
+
 if __name__ == "__main__":
     unittest.main()
