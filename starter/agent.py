@@ -1,4 +1,25 @@
-"""Conversational product-search agent.
+"""Conversational product-search agent -- the public coordination layer.
+
+The package is split for readability, not for isolation:
+
+    evidence.py   what the customer said, and how much of it to believe
+    catalog.py    the corpus and every index built over it
+    dialogue.py   session state, override, starvation, question utility
+    retrieval.py  safe pool, route planes, dense/RRF, funnel, rerank
+    agent.py      DEFAULTS, PROFILES, and the Agent that composes them
+
+DialogueMixin and RetrievalMixin do not import each other; they call across
+through `self`, and each module's header lists exactly which host capabilities
+it relies on. That keeps the IMPORT graph acyclic. It does NOT make the DOMAIN
+graph acyclic -- retrieval still asks dialogue what is credible, and dialogue
+still asks retrieval for route configuration. This split makes those edges
+visible and cheap to audit; it does not remove them. Strict interfaces,
+dependency inversion, and actually eliminating the bidirectional calls are a
+separate phase with its own budget. See notes/25-phase5b-design.md.
+
+Original notes follow.
+
+Pipeline:  constraint-state tracking -> FTS5/BM25 retrieval of N candidates
 
 Pipeline:  constraint-state tracking -> FTS5/BM25 retrieval of N candidates
            -> feature-based reranking -> top-10.
@@ -272,6 +293,22 @@ DEFAULTS = {
 }
 
 
+
+
+# Named snapshots of the two supported configurations. These are LABELS over
+# DEFAULTS, nothing more: no key here changes DEFAULTS, config resolution, the
+# score default, or the fact that the dense route ships off. See
+# notes/22-final-configurations.md.
+PROFILES: dict[str, dict] = {
+    # The submission configuration, and the only one whose score is claimed.
+    "score_default": {},
+    # Architecture demonstration only -- pre-registered Phase 4 arm B. It
+    # improves clean and Browsing MRR but drops Boundary MRR 1.000 -> 0.870
+    # and fails the contradiction guard, so it is never the robust default.
+    "showcase_dense": {"dense_browsing": True,
+                       "dense_mixed": True,
+                       "dense_fusion": "dense_only"},
+}
 
 
 def _load_config(config: dict | None) -> dict:
