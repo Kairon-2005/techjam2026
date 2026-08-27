@@ -18,6 +18,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -161,6 +162,35 @@ DEFAULTS = {
     # the span the customer explicitly abandoned ("forget shoes slippers"),
     # leaving unrelated colour/material evidence soft-matchable.
     "suppress_abandoned": True,
+    # ---- Phase 2B: route-specific retrieval data planes -----------------
+    # OFF until measured. With this false the retrieval path is exactly the
+    # Phase 2A one, which is what keeps the compatibility score bit-exact.
+    "dual_plane": False,
+    # Pins the route regardless of evidence. Used ONLY for the controlled
+    # same-query Buying/Browsing/Mixed comparison, where the point is to hold
+    # the query fixed and vary nothing but the plane.
+    "force_route": "",
+    "trace": True,                # telemetry; must never change a ranking
+    # A facet may narrow the pool only if the catalog describes it often
+    # enough for silence to be informative. Below this it can still score.
+    "facet_min_coverage": 0.30,
+    "filter_min_confidence": 0.9,  # only near-certain evidence may filter
+    "filter_negative": False,      # hard-negative filter: off until coverage
+                                   # in the DEEP pool has been measured
+    "buying_depth": 1200,          # BM25 depth before safe filtering
+    "buying_min_candidates": 60,   # relax rather than starve below this
+    # Unfiltered candidates carried alongside the filtered ones on EVERY turn,
+    # not only when the filter starves. Without a standing budget a filter
+    # that wrongly excluded the target removed it permanently whenever the
+    # surviving pool alone was large enough to fill the page.
+    "buying_rescue_budget": 200,
+    "browsing_depth": 1200,
+    "browsing_expand_up": 1,       # one level up reaches sibling shelves
+    "browsing_expand_down": 2,
+    "browsing_category_cap": 15,   # per-shelf cap, exploration only
+    "browsing_neighbour_budget": 120,
+    "mixed_depth": 900,
+    "mixed_category_budget": 60,
     # Off until measured: hardness has never had a live consumer, so switching
     # this on by default would be a claim without an experiment behind it.
     "rescue_relax": False,        # surrender unsatisfiable constraints in order
@@ -385,8 +415,11 @@ class _CategoryIndex:
                 self.node.setdefault(prefix, set()).add(i)
                 if depth > 1:
                     self.children.setdefault(prefix[:-1], set()).add(prefix)
+        self.tokens: dict[tuple, frozenset] = {}
         for prefix in self.node:
-            for token in TOKEN_RE.findall(" ".join(prefix[-2:])):
+            toks = frozenset(TOKEN_RE.findall(" ".join(prefix)))
+            self.tokens[prefix] = toks
+            for token in toks:
                 self.by_token.setdefault(token, set()).add(prefix)
         self.universe = frozenset(range(len(self.asins)))
 
@@ -410,10 +443,47 @@ class _CategoryIndex:
         best = max(scores.values())
         if best < min_overlap:
             return None
-        # Deepest node among the best-matching, then largest: prefer the most
-        # specific shelf, but do not pick a 3-product corner over a real one.
         winners = [p for p, v in scores.items() if v == best]
-        return max(winners, key=lambda p: (len(p), len(self.node[p])))
+        # Rank by how completely the query accounts for the NODE's own name,
+        # then by size. Ranking by DEPTH instead -- the first attempt -- picked
+        # "clothing > women > clothing > dresses" over "clothing > women >
+        # dresses" for the same query and handed back a five-product corner,
+        # which then starved every filter downstream.
+        return max(winners, key=lambda p: self._rank(p, tokens))
+
+    def _rank(self, prefix: tuple, tokens: list[str]) -> tuple:
+        toks = self.tokens.get(prefix) or frozenset()
+        precision = len(toks & set(tokens)) / (len(toks) or 1)
+        return (round(precision, 6), len(self.node[prefix]))
+
+    def shelves(self, text: str) -> list[tuple]:
+        """Every shelf that fits the phrase equally well, not just one.
+
+        "Accessories Belts" names a shelf under Men AND one under Women, and
+        picking whichever happens to rank first would exclude half the belts
+        in the catalog before the ranker ever sees them. A category constraint
+        is only safe if it keeps every equally good reading of it.
+        """
+        tokens = [t for t in TOKEN_RE.findall(_norm(text or "")) if len(t) > 2]
+        if not tokens:
+            return []
+        scores: dict[tuple, int] = {}
+        for token in tokens:
+            for prefix in self.by_token.get(token, ()):  # noqa: B007
+                scores[prefix] = scores.get(prefix, 0) + 1
+        if not scores:
+            return []
+        best = max(scores.values())
+        winners = [p for p, v in scores.items() if v == best]
+        top = max(self._rank(p, tokens)[0] for p in winners)
+        return sorted(p for p in winners if self._rank(p, tokens)[0] >= top)
+
+    def members_of(self, text: str) -> frozenset[int]:
+        """Union of every equally good shelf for `text`. Empty when unknown."""
+        out: set[int] = set()
+        for prefix in self.shelves(text):
+            out |= self.node.get(prefix, set())
+        return frozenset(out)
 
     def members(self, path: tuple | None) -> frozenset[int]:
         return frozenset(self.node.get(path, ())) if path else frozenset()
@@ -1107,6 +1177,41 @@ class Agent:
                 if cfg.get("abandoned_policy") == "deactivate":
                     slot.active = False
 
+    def _release_abandoned_category(self, state: dict, message: str, cfg: dict) -> None:
+        """Stop pinning the shelf the customer just walked away from.
+
+        Before Phase 2B a stale category contributed a handful of weak query
+        terms and the ranker could out-vote it. With a category data plane it
+        selects the candidate pool, so "forget dresses" while state["category"]
+        still says dresses holds the customer on the shelf they just left --
+        and the rescue lane would be carrying the entire rest of the catalog.
+
+        Dropping to None is deliberate: no category constraint is a weaker
+        claim than the wrong one, and the next turn can re-establish it. Gated
+        on dual_plane because on the legacy path the category still feeds
+        query TERMS, and removing them there would move the frozen baseline.
+        """
+        if not cfg.get("dual_plane") or not state.get("category"):
+            return
+        span = abandoned_span(message)
+        if not span:
+            return
+        span_tokens = set(self._terms(span))
+        current = set(self._terms(state["category"]))
+        if not span_tokens or not current:
+            return
+        # Measured against the SPAN, not the category: "forget dresses" names
+        # one word of a three-word category and still abandons it, whereas
+        # requiring a third of the category to be named let that through.
+        if len(current & span_tokens) / len(span_tokens) < 0.5:
+            return                      # they abandoned something else
+        _, phrases = parse_message(message)
+        for phrase in phrases:          # did they name a shelf to move to?
+            if self.cat.category_index.shelves(phrase):
+                state["category"] = phrase
+                return
+        state["category"] = None
+
     def _uncredible(self, state: dict) -> frozenset:
         """Constraint values that may still match exactly but must not be
         soft-matched: stated before an override, or contested by a newer value
@@ -1318,6 +1423,205 @@ class Agent:
             f"WHERE products MATCH ? ORDER BY s LIMIT ?", (expression, limit)).fetchall()
         # FTS5 bm25() is negative and lower-is-better; flip so higher-is-better.
         return [(str(a), -float(s)) for a, s in rows]
+
+    # ---- Phase 2B: route-specific retrieval data planes ----------------
+
+    def _eligible_filters(self, state: dict, cfg: dict) -> tuple[list, list]:
+        """Which constraints may narrow the pool, and why each other may not.
+
+        Every rejection is recorded rather than merely happening, because the
+        interesting failure of a filter is not that it fired but that it fired
+        on something it should not have. Six gates, all of which have to pass:
+        positive, live, not abandoned, stated as a requirement, near-certain,
+        and backed by a facet the catalog describes often enough to be read.
+        """
+        facets = self.cat.facet_index
+        contested = self._uncredible(state)
+        eligible, skipped = [], []
+        for slot in state["slots"]:
+            reason = ""
+            if slot.polarity < 0:
+                # A rejection is penalised in the ranker, never filtered on,
+                # until its coverage in the deep pool has been measured.
+                reason = "negative polarity: scored, not filtered"
+            elif not slot.active:
+                reason = f"inactive ({slot.contradiction or 'superseded'})"
+            elif not slot.soft_ok:
+                reason = "named as abandoned"
+            elif slot.value in contested:
+                reason = "contested by newer evidence for the same attribute"
+            elif slot.hardness != "hard":
+                reason = "soft: a preference, not a requirement"
+            elif slot.confidence < cfg["filter_min_confidence"]:
+                reason = f"confidence {slot.confidence:.2f} < {cfg['filter_min_confidence']}"
+            elif slot.attribute not in facets.coverage:
+                reason = f"no facet index for {slot.attribute!r}"
+            elif not facets.hard_ok(slot.attribute, cfg["facet_min_coverage"]):
+                reason = (f"{slot.attribute} coverage "
+                          f"{facets.coverage[slot.attribute]:.2f} < {cfg['facet_min_coverage']}")
+            elif not facets.match(slot.attribute, slot.value):
+                reason = f"no catalog support for {slot.attribute}={slot.value!r}"
+            (skipped if reason else eligible).append(
+                (slot.value, reason) if reason else slot)
+        return eligible, skipped
+
+    def _safe_pool(self, state: dict, cfg: dict, trace: dict) -> frozenset:
+        """Category shelf intersected with every filter that survives relaxation.
+
+        When the intersection starves, constraints are surrendered in
+        relaxation_order -- soft, then low-confidence hard, then older hard --
+        so the last thing given up is the most recent stated requirement.
+        """
+        cats, facets = self.cat.category_index, self.cat.facet_index
+        universe = cats.universe
+        shelves = cats.shelves(state["category"] or "")
+        base = cats.members_of(state["category"] or "") or universe
+        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        trace["category_shelves"] = len(shelves)
+        trace["category_pool"] = len(base)
+        eligible, skipped = self._eligible_filters(state, cfg)
+        trace["eligible_filters"] = [sl.value for sl in eligible]
+        trace["skipped_filters"] = [{"value": v, "reason": r} for v, r in skipped]
+
+        def narrow(slots) -> frozenset:
+            pool = base
+            for slot in slots:
+                pool = pool & facets.safe_keep(slot.attribute, slot.value, universe)
+            return pool
+
+        applied = list(eligible)
+        pool = narrow(applied)
+        order = relaxation_order(applied)
+        surrendered = []
+        while len(pool) < cfg["buying_min_candidates"] and order:
+            give_up = order.pop(0)
+            applied = [sl for sl in applied if sl is not give_up]
+            surrendered.append(give_up.value)
+            pool = narrow(applied)
+        trace["applied_filters"] = [sl.value for sl in applied]
+        trace["surrendered_filters"] = surrendered
+        trace["pool_before_filter"] = len(base)
+        trace["pool_after_filter"] = len(pool)
+        return pool if pool else base
+
+    def _plane_buying(self, state: dict, cfg: dict, limit: int,
+                      trace: dict) -> list[tuple[str, float]]:
+        """verified hard slots -> safe intersection -> BM25 -> rescue lane."""
+        cats = self.cat.category_index
+        pool = self._safe_pool(state, cfg, trace)
+        depth = max(limit, int(cfg["buying_depth"]))
+        raw = self._retrieve(state["terms"], depth, cfg)
+        trace["route_candidates"] = {"bm25": len(raw)}
+        inside = [(a, sc) for a, sc in raw if cats.ids.get(a, -1) in pool]
+        # THE RESCUE LANE IS NOT OPTIONAL. A parser slip, a missing attribute
+        # or a wrong facet reading must never be able to remove the target
+        # permanently, so whatever the filter rejected stays reachable behind
+        # what it kept. The ranker decides; the filter only orders.
+        kept = {a for a, _ in inside}
+        rescue = [(a, sc) for a, sc in raw if a not in kept]
+        trace["filtered_out"] = len(rescue)
+        trace["exclusion_rate"] = round(len(rescue) / (len(raw) or 1), 4)
+        # The rescue budget is unconditional. A filter is a hypothesis about
+        # what the customer meant, and a wrong hypothesis must cost ranking
+        # position, never reachability.
+        budget = max(int(cfg["buying_rescue_budget"]), limit - len(inside))
+        carried = rescue[:budget]
+        trace["rescue_candidates"] = len(rescue)
+        trace["rescue_carried"] = len(carried)
+        trace["rescue_needed"] = max(0, limit - len(inside))
+        return (inside + carried) or raw
+
+    def _plane_browsing(self, state: dict, cfg: dict, limit: int,
+                        trace: dict) -> list[tuple[str, float]]:
+        """category expansion + BM25, capped per shelf so one aisle cannot
+        fill the page. No facet intersection: browsing is for finding out what
+        exists, and a filter can only remove things."""
+        cats = self.cat.category_index
+        shelves = cats.shelves(state["category"] or "")
+        near: set[int] = set()
+        for shelf in shelves:
+            near |= cats.expand(shelf, int(cfg["browsing_expand_up"]),
+                                int(cfg["browsing_expand_down"]))
+        near = frozenset(near)
+        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        trace["category_shelves"] = len(shelves)
+        trace["category_pool"] = len(near)
+        depth = max(limit, int(cfg["browsing_depth"]))
+        raw = self._retrieve(state["terms"], depth, cfg)
+        cap, counts = int(cfg["browsing_category_cap"]), {}
+        primary, overflow = [], []
+        for asin, score in raw:
+            leaf = cats.leaf[cats.ids[asin]] if asin in cats.ids else ()
+            if counts.get(leaf, 0) < cap:
+                counts[leaf] = counts.get(leaf, 0) + 1
+                primary.append((asin, score))
+            else:
+                overflow.append((asin, score))
+        seen = {a for a, _ in raw}
+        # Neighbouring shelves BM25 never surfaced, ordered by a BOUNDED
+        # popularity prior -- enough to prefer a real product over a dead one,
+        # never enough to decide the ranking, which the reranker still does.
+        budget = int(cfg["browsing_neighbour_budget"])
+        neighbours = sorted((i for i in near if cats.asins[i] not in seen),
+                            key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
+        extra = [(cats.asins[i], 0.0) for i in neighbours[:budget]]
+        trace["route_candidates"] = {"bm25": len(raw), "category_expansion": len(extra)}
+        trace["diversity_deferred"] = len(overflow)
+        return primary + extra + overflow
+
+    def _plane_mixed(self, state: dict, cfg: dict, limit: int,
+                     trace: dict) -> list[tuple[str, float]]:
+        """Balanced union, no strict filtering. Where the route is uncertain
+        the only safe move is to keep recall and let the next turn decide."""
+        cats = self.cat.category_index
+        shelves = cats.shelves(state["category"] or "")
+        members = cats.members_of(state["category"] or "")
+        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        trace["category_shelves"] = len(shelves)
+        trace["category_pool"] = len(members)
+        depth = max(limit, int(cfg["mixed_depth"]))
+        raw = self._retrieve(state["terms"], depth, cfg)
+        seen = {a for a, _ in raw}
+        budget = int(cfg["mixed_category_budget"])
+        extra_ids = sorted((i for i in members if cats.asins[i] not in seen),
+                           key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
+        extra = [(cats.asins[i], 0.0) for i in extra_ids[:budget]]
+        trace["route_candidates"] = {"bm25": len(raw), "category": len(extra)}
+        return raw + extra
+
+    def _candidates(self, state: dict, cfg: dict,
+                    limit: int) -> tuple[list[tuple[str, float]], dict]:
+        """Candidate generation for this turn, and the trace describing it.
+
+        The trace is built here and never read by the ranker: telemetry that
+        can change a result is not telemetry.
+        """
+        route = cfg.get("force_route") or state.get("route") or "mixed"
+        trace: dict = {"route": route, "plane": "legacy",
+                       "hard_slots": sum(1 for sl in state["slots"]
+                                         if sl.usable and sl.hardness == "hard"),
+                       "soft_slots": sum(1 for sl in state["slots"]
+                                         if sl.usable and sl.hardness != "hard"),
+                       "negative_slots": sum(1 for sl in state["slots"]
+                                             if sl.active and sl.polarity < 0)}
+        started = time.perf_counter()
+        if not cfg["dual_plane"]:
+            cands = self._retrieve(state["terms"], limit, cfg)
+            trace["route_candidates"] = {"bm25": len(cands)}
+        else:
+            plane = {"buying": self._plane_buying,
+                     "browsing": self._plane_browsing}.get(route, self._plane_mixed)
+            trace["plane"] = route if route in ("buying", "browsing") else "mixed"
+            cands = plane(state, cfg, limit, trace)
+        seen: set[str] = set()
+        deduped = [(a, sc) for a, sc in cands if not (a in seen or seen.add(a))]
+        trace["fused_unique"] = len(deduped)
+        trace["retrieval_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        if cfg["dual_plane"]:
+            ids = self.cat.category_index.ids
+            trace["category_coverage"] = self.cat.category_index.coverage(
+                [ids[a] for a, _ in deduped[:100] if a in ids])
+        return deduped, trace
 
     def _route_cfg(self, state: dict) -> dict:
         """Config for this turn, with the route's overrides folded in.
@@ -1601,6 +1905,7 @@ class Agent:
                 self._slot_override(state, message)
             state["last_override_turn"] = turn
             self._suppress_abandoned(state, message, self._route_cfg(state))
+            self._release_abandoned_category(state, message, self._route_cfg(state))
             if self._route_cfg(state).get("abandoned_policy") == "deactivate":
                 state["phrases"] = [sl.value for sl in state["slots"] if sl.usable]
 
@@ -1669,7 +1974,7 @@ class Agent:
                 state["shown"] = []
                 state["rotate_pending"] = False
             self._rebuild_terms(state, message, turn_cfg_noise)
-            moved = self._retarget(state)
+            moved = self._route_cfg(state).get("force_route") or self._retarget(state)
             if moved != state["route"]:
                 state["route"] = moved
                 state.setdefault("route_history", []).append(moved)
@@ -1682,13 +1987,21 @@ class Agent:
             depth = max(depth, int(turn_cfg["starved_candidates"]))
         state["starved"] = bool(starved)
         limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
-        cands = self._retrieve(state["terms"], limit, turn_cfg)
+        cands, trace = self._candidates(state, turn_cfg, limit)
         if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:
             ranked = [a for a, _ in cands]
         ranked = self._rotate(ranked, state, turn_cfg)
         ordered = ranked[:top_k]
+        if turn_cfg["trace"]:
+            # Recorded AFTER ranking and read by nobody upstream of it. The
+            # decision trace has to be able to explain a turn without being
+            # able to change one.
+            trace.update({"turn": turn, "starved": bool(starved),
+                          "route_history": list(state.get("route_history") or []),
+                          "shown": len(ordered)})
+            state.setdefault("trace_log", []).append(trace)
         for asin in ordered:
             if asin not in state["shown"]:
                 state["shown"].append(asin)
