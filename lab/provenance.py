@@ -54,23 +54,63 @@ def invalidations(path: Path = INVALIDATIONS) -> dict[str, dict]:
     return out
 
 
+# The inputs whose hashes must be present for a row to describe a rerunnable
+# measurement. A row missing any of them cannot say what it measured.
+FINGERPRINTS = ("agent_sha256", "scenario_sha256", "dataset_sha256", "catalog_sha256")
+
+
+def _why(row: dict, marks: dict[str, dict]) -> str:
+    """The first reason this row cannot be quoted, or "" if it can.
+
+    Ordered from the cheapest and most damning to the most specific, so the
+    reason a reader is shown is the one that matters most. Every clause here
+    corresponds to a way a row has actually reached this ledger looking
+    trustworthy while being nothing of the kind.
+    """
+    if row.get("schema_version", 0) < 2:
+        return "schema_version < 2 (provenance fields absent or wrong)"
+    if row.get("code_dirty"):
+        return "code_dirty: measured a tree carrying uncommitted edits"
+    if row.get("invalid"):
+        return f"invalid: {row['invalid'].get('reason', 'unspecified')}"
+    if row_key(row) in marks:
+        return f"invalid: {marks[row_key(row)].get('reason', 'unspecified')}"
+
+    lease = row.get("lease")
+    if not isinstance(lease, dict) or not lease:
+        # Pre-lease rows land here. They were recorded by a process that could
+        # not tell whether anything moved underneath it, which is exactly how
+        # a matrix came to carry three different agent_commit values.
+        return "no lease: the run was not exclusive, isolated or verified"
+    if lease.get("verdict") != "valid":
+        return f"lease verdict is {lease.get('verdict')!r}, not 'valid'"
+    if lease.get("matrix_complete") is not True:
+        return "matrix_complete is not true: the run did not finish"
+    expected, completed = lease.get("expected_cells"), lease.get("completed_cells")
+    if not isinstance(expected, int) or not isinstance(completed, int):
+        return "cell counts missing: completeness cannot be checked"
+    if expected <= 0 or expected != completed:
+        return f"cell count mismatch: {completed} completed of {expected} expected"
+
+    # Isolation has to be evidenced per row, not just claimed by the lease:
+    # the first version of the lease chdir'd without moving the import path,
+    # so rows recorded an isolation the run never had.
+    if row.get("agent_in_worktree") is not True:
+        return "agent_in_worktree is not true: the agent measured was outside the isolated tree"
+    if row.get("agent_commit") != lease.get("isolated"):
+        return (f"agent_commit {row.get('agent_commit')!r} does not match the isolated "
+                f"commit {lease.get('isolated')!r}")
+
+    missing = [f for f in FINGERPRINTS if not row.get(f)]
+    if missing:
+        return "missing input fingerprints: " + ", ".join(missing)
+    return ""
+
+
 def reasons(rows: list[dict], marks: dict[str, dict] | None = None) -> dict[str, str]:
     """Why each non-citable row cannot be quoted. Empty string means it can."""
     marks = invalidations() if marks is None else marks
-    out: dict[str, str] = {}
-    for row in rows:
-        key = row_key(row)
-        if row.get("schema_version", 0) < 2:
-            out[key] = "schema_version < 2 (provenance fields absent or wrong)"
-        elif row.get("code_dirty"):
-            out[key] = "code_dirty: measured a tree with uncommitted edits"
-        elif row.get("invalid"):
-            out[key] = f"invalid: {row['invalid'].get('reason', 'unspecified')}"
-        elif key in marks:
-            out[key] = f"invalid: {marks[key].get('reason', 'unspecified')}"
-        else:
-            out[key] = ""
-    return out
+    return {row_key(row): _why(row, marks) for row in rows}
 
 
 def citable(rows: list[dict], marks: dict[str, dict] | None = None) -> list[dict]:

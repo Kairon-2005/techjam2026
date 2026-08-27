@@ -159,23 +159,35 @@ forbids:
   w_neg=2 would score BELOW w_neg=0;
 * a **missed** negation creates no slot at all, so the two are identical.
 
-They are identical to the last digit. Every unrecognised v2 phrasing
-(`barring`, `save for`, `hard pass`, `off the table`) degraded to *no
-evidence*. **Missed evidence only, zero inversions** — the failure mode the
-fixes were built to eliminate is gone.
+They are identical to the last digit, so on this set the negative channel had
+**no observable ranking effect**.
 
-Per the standing rule: missed evidence is recorded and carried forward; only
-inversion would justify further work here. v2 is now consumed and will not be
-run again.
+That is consistent with missed evidence — an unrecognised phrasing creates no
+slot, so the two configs coincide. But it does not *prove* parser-level zero
+inversions. Aggregate bit-identical scores are a much weaker instrument than
+they look: an inversion on a phrasing whose value never appears in any
+top-ranked candidate is invisible here, and so is an inversion that cancels
+against another. The honest claim is the observable one, and it stops there.
+
+Establishing zero inversions would need per-phrase inspection, which the v2
+contract forbids and which would consume the set for nothing. Per the standing
+rule, an absence of observable ranking effect is recorded and carried forward;
+only a demonstrated inversion would justify further work. **v2 is consumed and
+will not be reopened.**
 
 ## What this does NOT establish
 
 * That the negative channel is worth its weight. Three scenarios and a
   challenge set all say it is not measurable. `w_neg=2.0` is retained as
   saturated and harmless, never as a measured gain.
-* That a Phase 2B hard-negative FILTER will pay. It faces the same scarcity:
-  candidates reaching the top 10 rarely carry a rejected attribute. Build the
-  category/facet planes first and re-measure before committing to it.
+* That a Phase 2B hard-negative FILTER will pay — or that it will not. What
+  was measured is that **rejected attributes are scarce among the top 10 of
+  the CURRENT retrieval**. That says nothing about their density in the deeper
+  candidate pools a category/facet plane will produce: a filter operating over
+  1000 candidates may find plenty to remove where a reranker over 10 found
+  nothing. The scarcity finding must not be carried across as though it
+  generalised. Measure rejected-facet coverage in the deep pool first, and
+  keep the hard-negative filter off until that measurement exists.
 * Anything about `override_genuine`, where suppression on and off are
   bit-identical (0.922134). Targeted erasure pays on `override_category`
   (+0.0137 over no suppression) because a category pivot NAMES what is being
