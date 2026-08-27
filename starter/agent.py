@@ -161,6 +161,10 @@ DEFAULTS = {
     # the span the customer explicitly abandoned ("forget shoes slippers"),
     # leaving unrelated colour/material evidence soft-matchable.
     "suppress_abandoned": True,
+    # Off until measured: hardness has never had a live consumer, so switching
+    # this on by default would be a claim without an experiment behind it.
+    "rescue_relax": False,        # surrender unsatisfiable constraints in order
+    "rescue_keep": 1,             # ...and keep rescuing this many at the tail
     # What happens to evidence the customer explicitly abandoned:
     #   "soft_only"  -- keep it scoring, only bar soft-rescue
     #   "deactivate" -- targeted slot erasure: drop it from query and scoring
@@ -422,13 +426,30 @@ FEATURE_LEX = re.compile(
     r"|adjustable|machine washable|non[- ]slip|slip[- ]resistant|padded|quick[- ]dry"
     r"|wrinkle[- ]free|stretchy|durable|warm|cushioned|arch support)\b", re.I)
 NEGATION_RE = re.compile(
-    r"\b(?:not|no|nothing|never|avoid|without|don'?t want|rather not|too)\b", re.I)
+    r"\b(?:not|no|nothing|never|avoid|without|don'?t want|rather not|too"
+    r"|steer clear of|stay away from|skip|pass on|rule out|allergic to"
+    r"|can'?t stand|dislike|not a fan of)\b", re.I)
 # Restrictive positives that LOOK like negations. "Nothing but leather" means
 # only leather -- reading it as a rejection inverts the constraint and actively
 # demotes the right product.
 RESTRICTIVE_RE = re.compile(
-    r"\b(?:nothing|none|no|anything)\s+(?:but|other than|except|besides)\b"
-    r"|\bnot only\b|\bonly\b", re.I)
+    r"\b(?:nothing|none)\s+(?:but|other than|except|besides)\b"
+    r"|\band nothing else\b|\bnot only\b|\bonly\b", re.I)
+# Exceptives, which share every word after the first with the restrictives:
+# "ANYTHING but leather" rejects leather, "NOTHING but leather" requires it.
+# One pattern covering both read "anything except polyester" as a positive --
+# an inversion, and the worse of the two failures, because it turns a
+# rejection into a requirement for the very thing the customer refused.
+EXCEPTIVE_RE = re.compile(
+    r"\b(?:anything|everything|something|any)\s+(?:but|other than|except|besides)\b"
+    r"|\bother than\b|\bexcept\b|\bapart from\b|\baside from\b", re.I)
+# Hedges. "I'm not sure whether leather matters" contains a negation but
+# states no constraint: reading it as a rejection manufactures evidence out of
+# an admission of ignorance, and does so with the polarity inverted.
+HEDGE_RE = re.compile(
+    r"\b(?:not sure|unsure|don'?t know|do not know|no idea|hard to say"
+    r"|can'?t say|cannot say|not certain|either way|no strong feelings"
+    r"|no preference|whatever)\b", re.I)
 # Materials/qualities worth catching as rejections even though they are not in
 # the positive vocabularies.
 NEGATIVE_LEX = re.compile(r"\b(synthetic|plastic|itchy|scratchy|bulky|sheer|see[- ]through)\b", re.I)
@@ -455,13 +476,68 @@ def open_world_evidence(message: str) -> list[tuple[str, str, int]]:
             if (attribute, value) in seen:
                 continue
             seen.add((attribute, value))
-            # Negation within the ~28 characters before the value flips polarity:
-            # "nothing too formal" is a constraint, just an inverted one. But
-            # "nothing BUT leather" is restrictive, not negative.
+            # Negation within the ~28 characters before the value flips
+            # polarity: "nothing too formal" is a constraint, just an inverted
+            # one. Three families have to be told apart, and they overlap:
+            #   "nothing BUT leather"   -> restrictive positive (only leather)
+            #   "anything BUT leather"  -> exceptive negative   (not leather)
+            #   "not sure about leather"-> hedge, no constraint at all
             window = raw[max(0, match.start() - 28):match.start()]
-            negated = bool(NEGATION_RE.search(window)) and not RESTRICTIVE_RE.search(window)
+            if HEDGE_RE.search(window):
+                continue
+            if RESTRICTIVE_RE.search(window):       # checked first: "nothing
+                negated = False                     # other than X" is both
+            elif EXCEPTIVE_RE.search(window):
+                negated = True
+            else:
+                negated = bool(NEGATION_RE.search(window))
             found.append((attribute, value, -1 if negated else 1))
     return found
+
+
+# Requirement language versus preference language. hardness was previously
+# assigned from the TURN INDEX -- turn 1 hard, everything later soft -- which
+# says nothing about what the customer actually asked for, and made the field
+# unusable as a filter gate (a requirement stated on turn 3 was "soft", an
+# idle turn-1 aside was "hard").
+HARD_RE = re.compile(
+    r"\b(?:must|needs? to be|has to be|have to be|requirement|required|require"
+    r"|essential|non-?negotiable|deal-?breaker|can'?t do without|cannot do without"
+    r"|strictly|definitely|absolutely|it has to|i need)\b", re.I)
+SOFT_RE = re.compile(
+    r"\b(?:prefer|preferably|ideal|ideally|would like|would love|would be nice"
+    r"|would help|leaning|lean towards|maybe|perhaps|nice to have|if possible"
+    r"|open to|sort of|kind of|rather|might|probably|somewhat|i guess"
+    r"|something like|on the fence)\b", re.I)
+
+
+def hardness_of(message: str, default: str = "soft") -> str:
+    """Requirement or preference, read from the wording rather than the turn.
+
+    `default` is the verdict when the message commits to neither: evidence the
+    template parser understood is a stated constraint and defaults hard, while
+    open-world extraction from free text defaults soft.
+    """
+    low = message or ""
+    if HARD_RE.search(low):
+        return "hard"
+    if SOFT_RE.search(low):
+        return "soft"
+    return default
+
+
+def relaxation_order(slots) -> list:
+    """Constraints in give-up-first order, per the Phase 2B rescue contract:
+
+        soft  ->  low-confidence hard  ->  older hard  ->  latest explicit hard
+
+    The last thing surrendered is the most recent thing the customer stated as
+    a requirement, which is also the thing they would notice being ignored.
+    This is the single ordering both the rescue lane and (in Phase 2B) the
+    safe hard-filter relaxation read, so the two cannot disagree.
+    """
+    return sorted([sl for sl in slots if sl.active],
+                  key=lambda sl: (sl.hardness == "hard", sl.confidence, sl.source_turn))
 
 
 def classify_reply(message: str, parsed_phrases: list[str],
@@ -1082,6 +1158,17 @@ class Agent:
                     and len(ph) <= 80                      # skip truncated long tails
                     and ph not in blocked
                     and not any(ph in blob for blob in pool)]
+            if cfg["rescue_relax"] and len(dead) > 1:
+                # Several constraints are unsatisfiable at once. Surrender them
+                # in relaxation_order and keep rescuing only the tail -- the
+                # requirements, rather than the preferences that happen to be
+                # equally unmatched. This is the one live consumer of hardness;
+                # the hard-filter relaxation in Phase 2B reads the same order.
+                by_value = {sl.value: sl for sl in state["slots"] if sl.usable}
+                ordered = relaxation_order([by_value[phrases[i]] for i in dead
+                                            if phrases[i] in by_value])
+                kept = {sl.value for sl in ordered[-int(cfg["rescue_keep"]):]}
+                dead = [i for i in dead if phrases[i] in kept] or dead
 
         raw_bm25 = [s for _, s in cands]
         lo, hi = (min(raw_bm25), max(raw_bm25)) if raw_bm25 else (0.0, 1.0)
@@ -1316,7 +1403,8 @@ class Agent:
                     terms = tuple(self._terms(value))
                     state["slots"].append(SlotValue(
                         attribute=attribute, value=value, polarity=polarity,
-                        hardness="soft", confidence=turn_cfg_noise["open_world_confidence"],
+                        hardness=hardness_of(message, "soft"),
+                        confidence=turn_cfg_noise["open_world_confidence"],
                         source_turn=turn, provenance=terms))
                     if polarity > 0 and value not in state["phrases"]:
                         state["phrases"].append(value)
@@ -1329,7 +1417,7 @@ class Agent:
                 state["provenance"][phrase] = list(terms)
                 state["slots"].append(SlotValue(
                     attribute=slot_of(phrase), value=_norm(phrase),
-                    hardness="hard" if turn == 1 else "soft",
+                    hardness=hardness_of(message, "hard"),
                     source_turn=turn, provenance=terms))
             if phrases or (category and not had_category):
                 # The query changed, so the old page is stale: restart paging

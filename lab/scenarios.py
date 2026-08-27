@@ -148,9 +148,16 @@ def _reply_negative_preference(sample, attribute, disclosed, bu, rng):
     ]), bu
 
 
-# SEALED holdout for negation SCOPE. Never used to tune anything; mixes true
-# rejections with restrictive positives ("nothing besides cotton" means ONLY
-# cotton). A mis-scoped negation inverts a real constraint into a penalty.
+# CONSUMED. This was the sealed scope holdout. It is no longer one, and it
+# cannot become one again:
+#   * it was used to measure w_neg 0 vs 2 (fb46755);
+#   * it surfaced the "steer clear" defect, which has now been fixed;
+#   * its wording was read and analysed by two sessions working in parallel.
+# A holdout answers "does this generalise" exactly once. Kept here because
+# negation_scope_holdout's historical rows must remain reproducible, and
+# because these phrasings are still useful as regression material -- but no
+# result from it may be quoted as evidence of generalisation again.
+# The live sealed set is SEALED_NEGATION_V2.
 SCOPE_PHRASINGS = (
     ("Anything except polyester works.", "negative", "polyester"),
     ("I'd rather steer clear of wool.", "negative", "wool"),
@@ -165,6 +172,121 @@ def _reply_negation_scope(sample, attribute, disclosed, bu, rng):
     if rng.random() >= 0.5:
         return None
     return rng.choice([text for text, _, _ in SCOPE_PHRASINGS]), bu
+
+
+# ---- negative-evidence development sets ---------------------------------
+# DEVELOPMENT wording. Free to tune against; deliberately disjoint from both
+# sealed sets. Each entry is (text, expected polarity for the named value).
+DEV_SCOPE = (
+    # restrictive positives -- "nothing but X" means ONLY x
+    ("Nothing but leather.", 1, "leather"),
+    ("Only cotton please.", 1, "cotton"),
+    ("Not only leather.", 1, "leather"),
+    ("Leather and nothing else.", 1, "leather"),
+    # exceptives -- "anything but X" means EVERYTHING EXCEPT x
+    ("Anything but polyester.", -1, "polyester"),
+    ("Anything other than nylon.", -1, "nylon"),
+    ("Everything except plastic works.", -1, "plastic"),
+    # plain rejections
+    ("No polyester, please.", -1, "polyester"),
+    ("Avoid anything synthetic.", -1, "synthetic"),
+    ("Please steer clear of wool.", -1, "wool"),
+    ("Allergic to wool.", -1, "wool"),
+    ("Stay away from plastic.", -1, "plastic"),
+)
+# Hedges: a negation token with no constraint behind it. Must extract NOTHING.
+DEV_HEDGES = (
+    "I'm not sure whether leather matters.",
+    "No idea if cotton is better.",
+    "I don't know about the wool, honestly.",
+    "Hard to say whether polyester bothers me.",
+)
+
+
+def _reply_negative_paraphrase(sample, attribute, disclosed, bu, rng):
+    """A rejection in wording the original negative scenario never used."""
+    if rng.random() >= 0.5:
+        return None
+    target = _PRODS.get(str(sample["ground_truth"]["parent_asin"])) or {}
+    blob = " ".join(str(target.get(f) or "") for f in
+                    ("title", "features", "details", "description")).lower()
+    options = [v for v in _REJECTABLE if v not in blob]
+    if not options:
+        return None
+    value = rng.choice(options)
+    return rng.choice([
+        f"Anything but {value}.",
+        f"Please steer clear of {value}.",
+        f"Stay away from {value}.",
+        f"Everything except {value} works.",
+        f"{value.capitalize()} is one thing I'd rule out.",
+    ]), bu
+
+
+def _reply_negation_scope_dev(sample, attribute, disclosed, bu, rng):
+    """Development scope set: restrictive positives mixed with exceptives."""
+    if rng.random() >= 0.5:
+        return None
+    return rng.choice([text for text, _, _ in DEV_SCOPE]), bu
+
+
+def _reply_false_negation(sample, attribute, disclosed, bu, rng):
+    """A hedge carrying a negation token but no constraint.
+
+    A parser that reads "I'm not sure whether leather matters" as a rejection
+    of leather invents evidence, with the polarity inverted, out of an
+    admission of ignorance. The cost lands on whichever candidates happen to
+    be leather -- including, half the time, the right one.
+    """
+    if rng.random() >= 0.5:
+        return None
+    return rng.choice(DEV_HEDGES), bu
+
+
+def _reply_mixed_polarity(sample, attribute, disclosed, bu, rng):
+    """One message carrying a requirement and a rejection at once."""
+    if rng.random() >= 0.5:
+        return None
+    target = _PRODS.get(str(sample["ground_truth"]["parent_asin"])) or {}
+    blob = " ".join(str(target.get(f) or "") for f in
+                    ("title", "features", "details", "description")).lower()
+    wanted = next((v for v in _REJECTABLE if v in blob), None)
+    rejected = [v for v in _REJECTABLE if v not in blob]
+    if not wanted or not rejected:
+        return None
+    return f"{wanted.capitalize()}, but no {rng.choice(rejected)}.", bu
+
+
+# SEALED v2, written after every known defect was fixed. Shares no wording
+# family with SCOPE_PHRASINGS or DEV_SCOPE.
+#
+# The honest description of its status: these phrasings were AUTHORED for this
+# purpose and have never been evaluated, per-phrase or end-to-end. Several
+# were chosen precisely because they were expected to fail -- "barring",
+# "save for", "hard pass", "off the table" are families the fixed patterns do
+# not cover. Predicting a gap is not tuning against it, but it does mean the
+# prediction must be written down BEFORE the set is run; see
+# notes/09-phase15b-prereg.md.
+#
+# THE CONTRACT: one end-to-end evaluation, at the end of Phase 1.5B. No
+# per-phrase diagnostics, ever -- that is what burned the first set.
+# Expected polarity 0 means "extract nothing".
+SEALED_NEGATION_V2 = (
+    ("Barring nylon, I'm flexible.", -1, "nylon"),
+    ("Save for polyester, anything goes.", -1, "polyester"),
+    ("Wool is a hard pass for me.", -1, "wool"),
+    ("Plastic is off the table.", -1, "plastic"),
+    ("Cotton, full stop.", 1, "cotton"),
+    ("Strictly leather, please.", 1, "leather"),
+    ("Purely cotton.", 1, "cotton"),
+    ("I'm indifferent about the wool.", 0, "wool"),
+)
+
+
+def _reply_sealed_negation_v2(sample, attribute, disclosed, bu, rng):
+    if rng.random() >= 0.5:
+        return None
+    return rng.choice([text for text, _, _ in SEALED_NEGATION_V2]), bu
 
 
 def _mut_override_genuine(sample, card, beh, prods, rng):
@@ -297,9 +419,29 @@ LIBRARY: list[Scenario] = [
              reply=_reply_negative_preference,
              notes="rejects a value the target does not have, so it is pure signal"),
     Scenario("negation_scope_holdout",
-             "SEALED: negation scope -- restrictive positives must not invert",
+             "CONSUMED (was sealed): negation scope -- kept for reproducibility",
              reply=_reply_negation_scope,
-             notes="never used for tuning; mixes true rejections with 'nothing besides X'"),
+             notes="consumed by fb46755 and by the 'steer clear' fix; "
+                   "no longer evidence of generalisation -- see SEALED_NEGATION_V2"),
+    Scenario("negative_preference_paraphrase",
+             "Pillar II: rejections worded outside the tuning scenario's vocabulary",
+             reply=_reply_negative_paraphrase,
+             notes="same signal as negative_preference, different surface form"),
+    Scenario("negative_scope",
+             "Pillar II: development scope set -- restrictive positives vs exceptives",
+             reply=_reply_negation_scope_dev,
+             notes="DEV set, free to tune against; disjoint from both sealed sets"),
+    Scenario("false_negation",
+             "Pillar II: a negation token inside a hedge must not become evidence",
+             reply=_reply_false_negation,
+             notes="'not sure whether leather matters' states no constraint"),
+    Scenario("multiple_positive_and_negative",
+             "Pillar II: one message carrying a requirement and a rejection",
+             reply=_reply_mixed_polarity),
+    Scenario("negation_holdout_v2",
+             "SEALED v2: negation wording unused anywhere in development",
+             reply=_reply_sealed_negation_v2,
+             notes="SCOPE_PHRASINGS is consumed; this replaces it as the generalisation test"),
     Scenario("contradiction", "robustness: a stated constraint that is false of the target",
              sample_tf=_tf_contradiction),
     Scenario("profile_informative", "Pillar III: can personalization be exploited at all?",

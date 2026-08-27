@@ -524,6 +524,27 @@ class OpenWorldEvidenceTest(unittest.TestCase):
     TRUE_NEGATIVES = [
         ("No polyester, please.", "polyester"),
         ("Avoid anything synthetic.", "synthetic"),
+        ("Please steer clear of wool.", "wool"),
+        ("Stay away from plastic.", "plastic"),
+        ("Allergic to wool.", "wool"),
+    ]
+    # "ANYTHING but leather" rejects leather; "NOTHING but leather" requires
+    # it. The two families are identical after the first word, and a single
+    # restrictive pattern covering both silently inverted every one of these.
+    EXCEPTIVES = [
+        ("Anything but polyester.", "polyester"),
+        ("Anything other than nylon.", "nylon"),
+        ("Everything except plastic works.", "plastic"),
+        ("Anything but formal.", "formal"),
+    ]
+    # A negation token inside a hedge. States no constraint, so it must yield
+    # no evidence -- reading it as a rejection invents an inverted constraint
+    # out of an admission of ignorance.
+    HEDGES = [
+        "I'm not sure whether leather matters.",
+        "No idea if cotton is better.",
+        "I don't know about the wool, honestly.",
+        "Hard to say whether polyester bothers me.",
     ]
 
     def test_restrictive_positives_are_not_inverted(self) -> None:
@@ -539,6 +560,17 @@ class OpenWorldEvidenceTest(unittest.TestCase):
             found = {v: pol for _, v, pol in A.open_world_evidence(message)}
             self.assertIn(value, found, message)
             self.assertEqual(found[value], -1, f"missed a rejection: {message!r}")
+
+    def test_exceptives_are_rejections_not_requirements(self) -> None:
+        for message, value in self.EXCEPTIVES:
+            found = {v: pol for _, v, pol in A.open_world_evidence(message)}
+            self.assertIn(value, found, message)
+            self.assertEqual(found[value], -1,
+                             f"read an exceptive as a requirement: {message!r}")
+
+    def test_hedges_state_no_constraint(self) -> None:
+        for message in self.HEDGES:
+            self.assertEqual(A.open_world_evidence(message), [], message)
 
     def test_mixed_polarity_in_one_sentence(self) -> None:
         found = {v: pol for _, v, pol in A.open_world_evidence("Leather, not synthetic.")}
@@ -624,6 +656,80 @@ class AbandonedSpanSuppressionTest(unittest.TestCase):
             self.assertTrue(silk.active,
                             "suppression off must not erase the slot either")
             self.assertIn("silk", ag._sessions["s"]["terms"])
+        finally:
+            A.clear_catalog_cache()
+            tmp.cleanup()
+
+
+class HardnessTest(unittest.TestCase):
+    """hardness was assigned from the turn index, which says nothing about
+    what the customer asked for. It is now read from the wording, and it has a
+    live consumer."""
+
+    def test_hardness_comes_from_the_wording(self) -> None:
+        self.assertEqual(A.hardness_of("A key requirement is: genuine leather.", "hard"), "hard")
+        self.assertEqual(A.hardness_of("It must be waterproof.", "soft"), "hard")
+        self.assertEqual(A.hardness_of("Leather would be ideal.", "hard"), "soft")
+        self.assertEqual(A.hardness_of("I'd prefer something blue.", "hard"), "soft")
+        self.assertEqual(A.hardness_of("Mostly for hiking.", "soft"), "soft")
+
+    def test_a_requirement_stated_late_is_still_hard(self) -> None:
+        # Regression: hardness was "hard" if turn == 1 else "soft", so a
+        # requirement first stated on turn 3 was permanently soft and could
+        # never gate a filter.
+        A.clear_catalog_cache()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            ag = A.Agent(_catalog_file(Path(tmp.name)))
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Accessories Belts, but I'm still exploring.", 1, 10)
+            ag.respond("s", "For that, what matters is: it must be genuine leather.", 2, 10)
+            slots = {sl.value: sl for sl in ag._sessions["s"]["slots"]}
+            late = slots["it must be genuine leather"]
+            self.assertEqual(late.hardness, "hard",
+                             "a requirement stated after turn 1 is still a requirement")
+        finally:
+            A.clear_catalog_cache()
+            tmp.cleanup()
+
+    def test_relaxation_order_is_the_rescue_contract(self) -> None:
+        # soft -> low-confidence hard -> older hard -> latest explicit hard.
+        soft = A.SlotValue(attribute="color", value="blue", hardness="soft",
+                           confidence=0.6, source_turn=2)
+        faint = A.SlotValue(attribute="material", value="wool", hardness="hard",
+                            confidence=0.4, source_turn=1)
+        old = A.SlotValue(attribute="material", value="leather", hardness="hard",
+                          confidence=1.0, source_turn=1)
+        recent = A.SlotValue(attribute="size", value="large", hardness="hard",
+                             confidence=1.0, source_turn=4)
+        order = A.relaxation_order([recent, old, faint, soft])
+        self.assertEqual([sl.value for sl in order],
+                         ["blue", "wool", "leather", "large"])
+
+    def test_relaxation_order_skips_inactive_slots(self) -> None:
+        live = A.SlotValue(attribute="material", value="leather")
+        dead = A.SlotValue(attribute="material", value="silk", active=False)
+        self.assertEqual([sl.value for sl in A.relaxation_order([live, dead])], ["leather"])
+
+    def test_rescue_relax_defends_the_requirement(self) -> None:
+        # Two constraints, neither present in the catalog. With relaxation on,
+        # only the hard one keeps rescue weight, so the ranking is driven by
+        # the requirement rather than by the preference.
+        A.clear_catalog_cache()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            ag = A.Agent(_catalog_file(Path(tmp.name)),
+                         config={"rescue_relax": True, "rescue_keep": 1})
+            state = ag._blank_state()
+            state["phrases"] = ["merino wool", "teal"]
+            state["slots"] = [
+                A.SlotValue(attribute="material", value="merino wool", hardness="hard",
+                            confidence=1.0, source_turn=1),
+                A.SlotValue(attribute="color", value="teal", hardness="soft",
+                            confidence=0.6, source_turn=2),
+            ]
+            ranked = ag._rerank([(a, 0.0) for a in ("P1", "P2", "P3")], state)
+            self.assertEqual(len(ranked), 3)   # relaxation never empties the pool
         finally:
             A.clear_catalog_cache()
             tmp.cleanup()
