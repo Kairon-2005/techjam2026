@@ -182,6 +182,16 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         k: round(statistics.fmean([m["telemetry"][k] for m in per_seed.values()
                                    if k in m["telemetry"]]), 4)
         for k in sorted(keys)}
+    # question_attribute_counts is a histogram, not a scalar, so the numeric
+    # aggregation above drops it. Summing across seeds keeps the shape of what
+    # was asked, which is the whole point of recording it.
+    counts: dict[str, int] = {}
+    for m in per_seed.values():
+        for name, n in (m["telemetry"].get("question_attribute_counts") or {}).items():
+            counts[name] = counts.get(name, 0) + n
+    if counts:
+        row["telemetry"]["question_attribute_counts"] = dict(
+            sorted(counts.items(), key=lambda kv: -kv[1]))
     names = {n for m in per_seed.values() for n in m["slices"]}
     row["slices"] = {
         name: {k: round(statistics.fmean(

@@ -1358,7 +1358,22 @@ class Agent:
             util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
             if util > best_util:
                 best, best_bits, best_util = attribute, bits, util
+        # How much of the window actually STATES a value for the attribute we
+        # are about to ask about. _pool_entropy counts the empty string as a
+        # value, so a facet that most products are silent about scores as
+        # "the candidates disagree" when what they do is say nothing.
+        state["last_coverage"] = self._facet_coverage(window, best)
+        state["last_weighed"] = bool(weigh)
         return best, best_bits, len(window)
+
+    def _facet_coverage(self, window: list[str], attribute: str) -> float:
+        """Share of the window carrying any value for `attribute`."""
+        pattern = ATTR_VOCAB.get(attribute)
+        if not pattern or not window:
+            return 0.0
+        seen = sum(1 for asin in window
+                   if pattern.search(self.cat.text.get(asin, "")))
+        return round(seen / len(window), 4)
 
     def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
         cfg = self._route_cfg(state)
@@ -2142,6 +2157,20 @@ class Agent:
         # candidates that actually survived.
         attribute = self._pick_attribute(state, ranked)
         state["asked"].append(attribute)
+        if turn_cfg["trace"]:
+            # Question telemetry. Bounded: scalars for this turn only, appended
+            # to the same per-turn trace, never a growing candidate history.
+            trace.update({
+                "asked": attribute,
+                "asked_targeted": attribute != "other",
+                "question_bits": round(float(state.get("last_bits") or 0.0), 4),
+                "question_coverage": float(state.get("last_coverage") or 0.0),
+                "answerability_weighed": bool(state.get("last_weighed")),
+                "overgeneral": bool(state.get("broad_options")),
+                "structured_options": len(state.get("broad_options") or []),
+                "reply_outcome": state.get("outcome") or "",
+                "slots_active": sum(1 for sl in state["slots"] if sl.usable),
+            })
 
         return {
             "message": self._compose(attribute, state, ranked, ordered),

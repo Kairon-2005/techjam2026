@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import random
 import re
+import statistics
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -224,6 +225,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
     if non:
         out["unstarved_latency_p95"] = _percentile(
             [t.get("retrieval_ms", 0.0) for t in non], 0.95)
+    out.update(_question_telemetry(agent))
     if starved_scored:
         out["starved_recall_pool"] = round(starved_pool_hits / starved_scored, 4)
     if scored:
@@ -232,6 +234,76 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
                     "recall_pool": round(hits["pool"] / scored, 4),
                     "recall_turns": scored})
     return out
+
+
+def _question_telemetry(agent) -> dict:
+    """What the clarification policy asked, and whether it was worth asking.
+
+    Everything here is derived by walking each session's turn traces IN ORDER:
+    a question's value is only visible in the turn after it, so "did that
+    question pay" cannot be answered turn-locally.
+    """
+    asked_total = targeted = overgeneral = structured = 0
+    bits: list[float] = [];  coverage: list[float] = []
+    reductions: list[float] = []
+    pool_before: list[int] = [];  pool_after: list[int] = []
+    dry = answered = 0
+    attributes: dict[str, int] = {}
+    first_constraint: list[int] = []
+    INFORMATIVE = {"informative", "override"}
+    for state in (getattr(agent, "_sessions", {}) or {}).values():
+        log = state.get("trace_log") or []
+        seen_constraint = None
+        for i, trace in enumerate(log):
+            if "asked" not in trace:
+                continue
+            asked_total += 1
+            attributes[trace["asked"]] = attributes.get(trace["asked"], 0) + 1
+            if trace.get("asked_targeted"):
+                targeted += 1
+                bits.append(trace.get("question_bits", 0.0))
+                coverage.append(trace.get("question_coverage", 0.0))
+            overgeneral += bool(trace.get("overgeneral"))
+            structured += bool(trace.get("structured_options"))
+            nxt = log[i + 1] if i + 1 < len(log) else None
+            if nxt is None:
+                continue
+            # The NEXT turn carries the outcome of the reply to THIS question.
+            if str(nxt.get("reply_outcome", "")).lower() in INFORMATIVE:
+                answered += 1
+                before, after = trace.get("fused_unique", 0), nxt.get("fused_unique", 0)
+                pool_before.append(before)
+                pool_after.append(after)
+                if before:
+                    reductions.append((before - after) / before)
+            else:
+                dry += 1
+            if seen_constraint is None and nxt.get("slots_active", 0) > trace.get("slots_active", 0):
+                seen_constraint = i + 1
+        if seen_constraint is not None:
+            first_constraint.append(seen_constraint)
+    if not asked_total:
+        return {}
+    mean = lambda xs: round(sum(xs) / len(xs), 4) if xs else 0.0   # noqa: E731
+    graded = dry + answered
+    return {
+        "questions": asked_total,
+        "targeted_question_rate": round(targeted / asked_total, 4),
+        "fallback_to_other_rate": round((asked_total - targeted) / asked_total, 4),
+        "overgeneral_trigger_rate": round(overgeneral / asked_total, 4),
+        "structured_option_rate": round(structured / asked_total, 4),
+        "estimated_information_gain": mean(bits),
+        "question_facet_coverage": mean(coverage),
+        "dry_question_rate": round(dry / graded, 4) if graded else 0.0,
+        "answerable_reply_rate": round(answered / graded, 4) if graded else 0.0,
+        "pool_size_before_question": mean(pool_before),
+        "pool_size_next_turn": mean(pool_after),
+        "median_pool_reduction_after_answer": round(statistics.median(reductions), 4)
+                                              if reductions else 0.0,
+        "turns_to_first_new_constraint": mean(first_constraint),
+        "question_attribute_counts": dict(sorted(attributes.items(),
+                                                 key=lambda kv: -kv[1])),
+    }
 
 
 def _foreign_constraint(sample, prods, rng, donors, card) -> str:
