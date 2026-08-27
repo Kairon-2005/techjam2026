@@ -187,6 +187,20 @@ DEFAULTS = {
     # that wrongly excluded the target removed it permanently whenever the
     # surviving pool alone was large enough to fill the page.
     "buying_rescue_budget": 200,
+    # ---- the funnel ------------------------------------------------------
+    # Deep retrieval feeds a DETERMINISTIC preselection, and only funnel_top
+    # candidates reach the reranker. R1 handed the ranker everything it
+    # generated -- up to 1274 candidates against a ranker whose operating
+    # point is 100 -- and recall rose while ranking fell. Quotas are shares of
+    # funnel_top, so widening a source cannot widen the ranker's budget.
+    "funnel_top": 100,
+    "funnel_quota_primary": 0.70,
+    "funnel_quota_expansion": 0.20,
+    "funnel_quota_rescue": 0.10,
+    # A category match narrows the pool only when it is unambiguous. With
+    # several equally good shelves it contributes candidates and ranking
+    # weight instead: an ambiguous reading is not grounds for exclusion.
+    "category_hard_max_shelves": 1,
     "browsing_depth": 1200,
     "browsing_expand_up": 1,       # one level up reaches sibling shelves
     "browsing_expand_down": 2,
@@ -481,10 +495,29 @@ class _CategoryIndex:
         top = max(self._rank(p, tokens)[0] for p in winners)
         return sorted(p for p in winners if self._rank(p, tokens)[0] >= top)
 
+    def matching_shelves(self, text: str) -> list[tuple]:
+        """Every shelf whose path accounts for ALL the stated words, wherever
+        it sits in the tree.
+
+        The taxonomy files one product type under several top-level branches:
+        "men > clothing > pants" and "sport specific clothing > golf > men >
+        pants" are both men's pants. Keeping only the best-SCORING reading
+        dropped the others, and measured over the public set that put the
+        target outside the selected shelves 5.5% of the time. Requiring every
+        stated token to appear keeps precision; unioning across branches is
+        what stops a correct product being unreachable because of where the
+        taxonomy happened to file it.
+        """
+        tokens = {t for t in TOKEN_RE.findall(_norm(text or "")) if len(t) > 2}
+        if not tokens:
+            return []
+        hits = [prefix for prefix, toks in self.tokens.items() if tokens <= toks]
+        return sorted(hits) or self.shelves(text)
+
     def members_of(self, text: str) -> frozenset[int]:
         """Union of every equally good shelf for `text`. Empty when unknown."""
         out: set[int] = set()
-        for prefix in self.shelves(text):
+        for prefix in self.matching_shelves(text):
             out |= self.node.get(prefix, set())
         return frozenset(out)
 
@@ -1469,19 +1502,24 @@ class Agent:
         return eligible, skipped
 
     def _safe_pool(self, state: dict, cfg: dict, trace: dict) -> frozenset:
-        """Category shelf intersected with every filter that survives relaxation.
+        """The facet-consistent pool, and the shelves the category names.
 
-        When the intersection starves, constraints are surrendered in
-        relaxation_order -- soft, then low-confidence hard, then older hard --
-        so the last thing given up is the most recent stated requirement.
+        R1 intersected with the category shelves unconditionally, which put the
+        target outside the pool on 5.5% of public sessions and cost the whole
+        regression. The category now narrows only when it resolves to a single
+        shelf; otherwise it feeds a candidate source and the ranker's category
+        weight, because an ambiguous reading is not grounds for exclusion.
         """
         cats, facets = self.cat.category_index, self.cat.facet_index
         universe = cats.universe
-        shelves = cats.shelves(state["category"] or "")
-        base = cats.members_of(state["category"] or "") or universe
-        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        shelves = cats.matching_shelves(state["category"] or "")
+        shelf_ids = cats.members_of(state["category"] or "")
+        hard_category = 0 < len(shelves) <= int(cfg["category_hard_max_shelves"])
+        base = shelf_ids if (hard_category and shelf_ids) else universe
+        trace["category_node"] = [" > ".join(p) for p in shelves][:6] or None
         trace["category_shelves"] = len(shelves)
-        trace["category_pool"] = len(base)
+        trace["category_pool"] = len(shelf_ids)
+        trace["category_is_hard"] = bool(hard_category and shelf_ids)
         eligible, skipped = self._eligible_filters(state, cfg)
         trace["eligible_filters"] = [sl.value for sl in eligible]
         trace["skipped_filters"] = [{"value": v, "reason": r} for v, r in skipped]
@@ -1507,90 +1545,136 @@ class Agent:
         trace["pool_after_filter"] = len(pool)
         return pool if pool else base
 
+    def _shelf_source(self, state: dict, cfg: dict, ids: frozenset,
+                      budget: int, floor: float) -> list:
+        """Category members BM25 never surfaced, as an `expansion` source.
+
+        Ordered by a BOUNDED popularity prior and scored at the weakest
+        observed lexical score rather than 0.0, so injecting them cannot
+        stretch the reranker's score normalisation.
+        """
+        cats = self.cat.category_index
+        ranked = sorted(ids, key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
+        return [(cats.asins[i], floor, "expansion") for i in ranked[:max(0, budget)]]
+
     def _plane_buying(self, state: dict, cfg: dict, limit: int,
-                      trace: dict) -> list[tuple[str, float]]:
-        """verified hard slots -> safe intersection -> BM25 -> rescue lane."""
+                      trace: dict) -> list:
+        """deep BM25 -> presence-aware facet pool -> tagged sources."""
         cats = self.cat.category_index
         pool = self._safe_pool(state, cfg, trace)
-        depth = max(limit, int(cfg["buying_depth"]))
-        raw = self._retrieve(state["terms"], depth, cfg)
-        trace["route_candidates"] = {"bm25": len(raw)}
-        inside = [(a, sc) for a, sc in raw if cats.ids.get(a, -1) in pool]
-        # THE RESCUE LANE IS NOT OPTIONAL. A parser slip, a missing attribute
-        # or a wrong facet reading must never be able to remove the target
-        # permanently, so whatever the filter rejected stays reachable behind
-        # what it kept. The ranker decides; the filter only orders.
-        kept = {a for a, _ in inside}
-        rescue = [(a, sc) for a, sc in raw if a not in kept]
+        raw = self._retrieve(state["terms"], max(limit, int(cfg["buying_depth"])), cfg)
+        floor = min((sc for _, sc in raw), default=0.0)
+        inside = [(a, sc, "primary") for a, sc in raw if cats.ids.get(a, -1) in pool]
+        # THE RESCUE LANE IS NOT OPTIONAL, but in R1 it was unbounded and
+        # simply enlarged the ranker's input. It is now a quota INSIDE the
+        # funnel: still reachable, no longer free.
+        rescue = [(a, sc, "rescue") for a, sc in raw if cats.ids.get(a, -1) not in pool]
+        seen = {a for a, _, _ in inside} | {a for a, _, _ in rescue}
+        shelf_only = frozenset(i for i in cats.members_of(state["category"] or "")
+                               if cats.asins[i] not in seen)
+        expansion = self._shelf_source(state, cfg, shelf_only,
+                                       int(cfg["funnel_top"]), floor)
+        trace["route_candidates"] = {"bm25": len(raw), "in_pool": len(inside),
+                                     "rescue": len(rescue), "expansion": len(expansion)}
         trace["filtered_out"] = len(rescue)
         trace["exclusion_rate"] = round(len(rescue) / (len(raw) or 1), 4)
-        # The rescue budget is unconditional. A filter is a hypothesis about
-        # what the customer meant, and a wrong hypothesis must cost ranking
-        # position, never reachability.
-        budget = max(int(cfg["buying_rescue_budget"]), limit - len(inside))
-        carried = rescue[:budget]
         trace["rescue_candidates"] = len(rescue)
-        trace["rescue_carried"] = len(carried)
-        trace["rescue_needed"] = max(0, limit - len(inside))
-        return (inside + carried) or raw
+        return inside + expansion + rescue
 
     def _plane_browsing(self, state: dict, cfg: dict, limit: int,
-                        trace: dict) -> list[tuple[str, float]]:
-        """category expansion + BM25, capped per shelf so one aisle cannot
-        fill the page. No facet intersection: browsing is for finding out what
-        exists, and a filter can only remove things."""
+                        trace: dict) -> list:
+        """category expansion + BM25, capped per shelf. No facet filtering:
+        browsing is for finding out what exists, and a filter only removes."""
         cats = self.cat.category_index
-        shelves = cats.shelves(state["category"] or "")
+        shelves = cats.matching_shelves(state["category"] or "")
         near: set[int] = set()
         for shelf in shelves:
             near |= cats.expand(shelf, int(cfg["browsing_expand_up"]),
                                 int(cfg["browsing_expand_down"]))
-        near = frozenset(near)
-        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        trace["category_node"] = [" > ".join(p) for p in shelves][:6] or None
         trace["category_shelves"] = len(shelves)
         trace["category_pool"] = len(near)
-        depth = max(limit, int(cfg["browsing_depth"]))
-        raw = self._retrieve(state["terms"], depth, cfg)
+        raw = self._retrieve(state["terms"], max(limit, int(cfg["browsing_depth"])), cfg)
+        floor = min((sc for _, sc in raw), default=0.0)
         cap, counts = int(cfg["browsing_category_cap"]), {}
         primary, overflow = [], []
         for asin, score in raw:
             leaf = cats.leaf[cats.ids[asin]] if asin in cats.ids else ()
             if counts.get(leaf, 0) < cap:
                 counts[leaf] = counts.get(leaf, 0) + 1
-                primary.append((asin, score))
+                primary.append((asin, score, "primary"))
             else:
-                overflow.append((asin, score))
+                overflow.append((asin, score, "rescue"))
         seen = {a for a, _ in raw}
-        # Neighbouring shelves BM25 never surfaced, ordered by a BOUNDED
-        # popularity prior -- enough to prefer a real product over a dead one,
-        # never enough to decide the ranking, which the reranker still does.
-        budget = int(cfg["browsing_neighbour_budget"])
-        neighbours = sorted((i for i in near if cats.asins[i] not in seen),
-                            key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
-        extra = [(cats.asins[i], 0.0) for i in neighbours[:budget]]
-        trace["route_candidates"] = {"bm25": len(raw), "category_expansion": len(extra)}
+        expansion = self._shelf_source(
+            state, cfg, frozenset(i for i in near if cats.asins[i] not in seen),
+            int(cfg["browsing_neighbour_budget"]), floor)
+        trace["route_candidates"] = {"bm25": len(raw), "expansion": len(expansion),
+                                     "deferred": len(overflow)}
         trace["diversity_deferred"] = len(overflow)
-        return primary + extra + overflow
+        return primary + expansion + overflow
 
     def _plane_mixed(self, state: dict, cfg: dict, limit: int,
-                     trace: dict) -> list[tuple[str, float]]:
-        """Balanced union, no strict filtering. Where the route is uncertain
-        the only safe move is to keep recall and let the next turn decide."""
+                     trace: dict) -> list:
+        """Balanced union, no filtering. Where the route is uncertain the only
+        safe move is to keep recall and let the next turn decide."""
         cats = self.cat.category_index
-        shelves = cats.shelves(state["category"] or "")
+        shelves = cats.matching_shelves(state["category"] or "")
         members = cats.members_of(state["category"] or "")
-        trace["category_node"] = [" > ".join(p) for p in shelves] or None
+        trace["category_node"] = [" > ".join(p) for p in shelves][:6] or None
         trace["category_shelves"] = len(shelves)
         trace["category_pool"] = len(members)
-        depth = max(limit, int(cfg["mixed_depth"]))
-        raw = self._retrieve(state["terms"], depth, cfg)
+        raw = self._retrieve(state["terms"], max(limit, int(cfg["mixed_depth"])), cfg)
+        floor = min((sc for _, sc in raw), default=0.0)
         seen = {a for a, _ in raw}
-        budget = int(cfg["mixed_category_budget"])
-        extra_ids = sorted((i for i in members if cats.asins[i] not in seen),
-                           key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
-        extra = [(cats.asins[i], 0.0) for i in extra_ids[:budget]]
-        trace["route_candidates"] = {"bm25": len(raw), "category": len(extra)}
-        return raw + extra
+        expansion = self._shelf_source(
+            state, cfg, frozenset(i for i in members if cats.asins[i] not in seen),
+            int(cfg["mixed_category_budget"]), floor)
+        trace["route_candidates"] = {"bm25": len(raw), "expansion": len(expansion)}
+        return [(a, sc, "primary") for a, sc in raw] + expansion
+
+    def _funnel(self, tagged: list, cfg: dict, trace: dict) -> list:
+        """Deterministic preselection to a fixed reranker budget.
+
+        Deep retrieval is worth having only if the ranker is not asked to
+        order all of it: R1 raised Recall@pool to 1.000 and lost 0.045 of
+        score doing it, because 1274 candidates went straight into a reranker
+        whose operating point is 100. Quotas are shares of funnel_top, so a
+        wider source competes for the same budget instead of enlarging it.
+        """
+        top = int(cfg["funnel_top"])
+        quota = {"primary": float(cfg["funnel_quota_primary"]),
+                 "expansion": float(cfg["funnel_quota_expansion"]),
+                 "rescue": float(cfg["funnel_quota_rescue"])}
+        order = ("primary", "expansion", "rescue")
+        buckets: dict[str, list] = {k: [] for k in order}
+        seen: set[str] = set()
+        for asin, score, source in tagged:
+            if asin in seen:
+                continue                      # first source to claim it wins
+            seen.add(asin)
+            buckets.setdefault(source, []).append((asin, score))
+        for rows in buckets.values():
+            rows.sort(key=lambda t: -t[1])
+        picked: list[tuple[str, float]] = []
+        taken: set[str] = set()
+        for source in order:
+            cap = int(round(top * quota.get(source, 0.0)))
+            for asin, score in buckets.get(source, [])[:cap]:
+                picked.append((asin, score))
+                taken.add(asin)
+        if len(picked) < top:                 # unused quota refills in order
+            for source in order:
+                for asin, score in buckets.get(source, []):
+                    if len(picked) >= top:
+                        break
+                    if asin not in taken:
+                        picked.append((asin, score))
+                        taken.add(asin)
+        trace["funnel_in"] = len(seen)
+        trace["funnel_out"] = len(picked[:top])
+        trace["funnel_sources"] = {s: len(buckets.get(s, [])) for s in order}
+        return picked[:top]
 
     def _candidates(self, state: dict, cfg: dict,
                     limit: int) -> tuple[list[tuple[str, float]], dict]:
@@ -1615,7 +1699,7 @@ class Agent:
             plane = {"buying": self._plane_buying,
                      "browsing": self._plane_browsing}.get(route, self._plane_mixed)
             trace["plane"] = route if route in ("buying", "browsing") else "mixed"
-            cands = plane(state, cfg, limit, trace)
+            cands = self._funnel(plane(state, cfg, limit, trace), cfg, trace)
         seen: set[str] = set()
         deduped = [(a, sc) for a, sc in cands if not (a in seen or seen.add(a))]
         trace["fused_unique"] = len(deduped)

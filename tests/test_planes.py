@@ -132,8 +132,12 @@ class BuyingPlaneTest(PlaneTestBase):
         state["terms"] = ["leather", "boots", "silk", "dress"]
         trace: dict = {}
         cands = ag._plane_buying(state, ag.cfg, 2, trace)
-        self.assertIn("W3", [a for a, _ in cands], "the filter permanently lost a product")
-        self.assertGreater(trace["rescue_carried"], 0)
+        self.assertIn("W3", [a for a, *_ in cands], "the filter permanently lost a product")
+        self.assertGreater(trace["rescue_candidates"], 0)
+        # ...and it must survive the funnel, not merely be generated.
+        funnelled = ag._funnel(cands, ag.cfg, {})
+        self.assertIn("W3", [a for a, _ in funnelled],
+                      "the funnel dropped a rescued product")
 
     def test_relaxation_runs_before_the_pool_starves(self) -> None:
         ag = self.agent(buying_min_candidates=4)
@@ -174,11 +178,11 @@ class BrowsingAndMixedTest(PlaneTestBase):
         browsing = ag._plane_browsing(brw_state, ag.cfg, 10, wt)
         ci = ag.cat.category_index
         buying_shelves = {ci.leaf[i] for i in pool}
-        browsing_shelves = {ci.leaf[ci.ids[a]] for a, _ in browsing if a in ci.ids}
+        browsing_shelves = {ci.leaf[ci.ids[a]] for a, *_ in browsing if a in ci.ids}
         self.assertGreater(len(browsing_shelves), len(buying_shelves),
                            "browsing must reach shelves the buying filter does not")
         self.assertTrue(browsing_shelves - buying_shelves)
-        self.assertIn("category_expansion", wt["route_candidates"])
+        self.assertIn("expansion", wt["route_candidates"])
 
     def test_mixed_applies_no_strict_filtering(self) -> None:
         ag = self.agent()
@@ -189,18 +193,28 @@ class BrowsingAndMixedTest(PlaneTestBase):
         self.assertNotIn("applied_filters", trace, "mixed must not filter")
         self.assertNotIn("pool_after_filter", trace)
 
-    def test_the_three_planes_produce_different_candidate_sets(self) -> None:
+    def test_the_three_planes_differ_in_candidate_origin(self) -> None:
+        # On a five-product catalog the three planes can converge on the same
+        # handful of asins, so the claim under test is composition: which
+        # sources each route draws from, and how many from each.
         ag = self.agent(buying_min_candidates=1)
-        sets = {}
+        sets, origins = {}, {}
         for name, plane in (("buying", ag._plane_buying),
                             ("browsing", ag._plane_browsing),
                             ("mixed", ag._plane_mixed)):
             state = self.state_with(ag, "women dresses", self.hard("material", "silk"))
-            state["terms"] = ["dress"]
-            sets[name] = tuple(a for a, _ in plane(state, ag.cfg, 10, {}))
+            state["terms"] = ["dress", "skirt", "boots", "coat"]
+            trace: dict = {}
+            tagged = plane(state, ag.cfg, 10, trace)
+            sets[name] = tuple(a for a, *_ in tagged)
+            origins[name] = {src for _, _, src in tagged}
         self.assertNotEqual(sets["buying"], sets["browsing"],
                             "buying and browsing returned identical candidates")
-        self.assertNotEqual(sets["buying"], sets["mixed"])
+        self.assertIn("rescue", origins["buying"],
+                      "buying must carry a rescue source")
+        self.assertNotIn("rescue", origins["mixed"],
+                         "mixed must not filter, so it has nothing to rescue")
+        self.assertNotEqual(origins["buying"], origins["mixed"])
 
 
 class RouteWiringTest(PlaneTestBase):
@@ -215,7 +229,7 @@ class RouteWiringTest(PlaneTestBase):
             state["terms"] = ["dress"]
             trace: dict = {}
             ag._plane_browsing(state, ag.cfg, 5, trace)
-            got.append(trace["route_candidates"]["category_expansion"])
+            got.append(trace["route_candidates"]["expansion"])
         self.assertNotEqual(got[0], got[1], "the neighbour budget did nothing")
 
     def test_expansion_depth_reaches_the_candidate_pool(self) -> None:
@@ -268,6 +282,78 @@ class RouteWiringTest(PlaneTestBase):
         ag.respond("s", "Actually, forget dresses entirely. What I need is: Clothing Men Coats.", 2, 5)
         after = ag.cat.category_index.shelves(ag._sessions["s"]["category"])
         self.assertNotEqual(before, after, "the old shelf survived the pivot")
+
+
+class FunnelTest(PlaneTestBase):
+    """Deep retrieval is only worth having if the ranker is not handed all of
+    it. R1 fed 1274 candidates to a ranker whose operating point is 100."""
+
+    def tagged(self, primary=40, expansion=40, rescue=40) -> list:
+        out = []
+        for kind, n in (("primary", primary), ("expansion", expansion), ("rescue", rescue)):
+            out += [(f"{kind}{i}", float(n - i), kind) for i in range(n)]
+        return out
+
+    def test_the_reranker_budget_is_capped(self) -> None:
+        ag = self.agent(funnel_top=30)
+        picked = ag._funnel(self.tagged(), ag.cfg, {})
+        self.assertEqual(len(picked), 30)
+
+    def test_each_source_gets_its_quota(self) -> None:
+        ag = self.agent(funnel_top=100, funnel_quota_primary=0.7,
+                        funnel_quota_expansion=0.2, funnel_quota_rescue=0.1)
+        trace: dict = {}
+        picked = [a for a, _ in ag._funnel(self.tagged(200, 200, 200), ag.cfg, trace)]
+        kinds = {k: sum(1 for a in picked if a.startswith(k))
+                 for k in ("primary", "expansion", "rescue")}
+        self.assertEqual(kinds, {"primary": 70, "expansion": 20, "rescue": 10})
+        self.assertEqual(trace["funnel_out"], 100)
+
+    def test_a_wider_source_cannot_enlarge_the_budget(self) -> None:
+        # The R1 failure in one assertion: widening retrieval must not widen
+        # what the ranker is asked to order.
+        ag = self.agent(funnel_top=50)
+        small = ag._funnel(self.tagged(50, 10, 10), ag.cfg, {})
+        huge = ag._funnel(self.tagged(5000, 5000, 5000), ag.cfg, {})
+        self.assertEqual(len(small), len(huge), 50)
+
+    def test_unused_quota_refills_rather_than_shrinking_the_pool(self) -> None:
+        ag = self.agent(funnel_top=40)
+        picked = ag._funnel(self.tagged(100, 0, 0), ag.cfg, {})
+        self.assertEqual(len(picked), 40, "an empty source shrank the funnel")
+
+    def test_selection_is_deterministic(self) -> None:
+        ag = self.agent(funnel_top=25)
+        first = ag._funnel(self.tagged(), ag.cfg, {})
+        second = ag._funnel(self.tagged(), ag.cfg, {})
+        self.assertEqual(first, second)
+
+    def test_a_candidate_is_claimed_by_its_first_source_only(self) -> None:
+        ag = self.agent(funnel_top=10)
+        dupes = [("x", 9.0, "primary"), ("x", 1.0, "rescue"), ("y", 5.0, "rescue")]
+        picked = ag._funnel(dupes, ag.cfg, {})
+        self.assertEqual([a for a, _ in picked].count("x"), 1)
+
+
+class CategoryConstraintTest(PlaneTestBase):
+    def test_an_ambiguous_category_does_not_exclude(self) -> None:
+        # "clothing" matches several shelves. An ambiguous reading is not
+        # grounds for removing anything; it feeds a source and the ranker.
+        ag = self.agent()
+        state = self.state_with(ag, "clothing")
+        trace: dict = {}
+        ag._safe_pool(state, ag.cfg, trace)
+        self.assertGreater(trace["category_shelves"], 1)
+        self.assertFalse(trace["category_is_hard"],
+                         "an ambiguous category was used as a hard filter")
+        self.assertEqual(trace["pool_before_filter"],
+                         len(ag.cat.category_index.universe))
+
+    def test_cross_branch_shelves_are_unioned(self) -> None:
+        ci = self.agent().cat.category_index
+        self.assertGreaterEqual(len(ci.matching_shelves("women dresses")), 1)
+        both = ci.matching_shelves("clothing")
+        self.assertGreater(len(both), 1, "sibling branches were dropped")
 
 
 class CompatibilityTest(PlaneTestBase):
