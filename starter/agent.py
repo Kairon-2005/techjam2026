@@ -767,6 +767,10 @@ class Agent:
         costs paraphrase robustness, because most old evidence is still valid.
         The customer told us which part is dead -- suppress only that.
         """
+        if not cfg.get("suppress_abandoned"):
+            return          # the switch must disable the whole mechanism, not
+                            # just the rerank blocklist: without this the "off"
+                            # arm of the ablation still deactivated slots.
         span = abandoned_span(message)
         if not span:
             return

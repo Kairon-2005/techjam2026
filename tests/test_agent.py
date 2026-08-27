@@ -603,6 +603,32 @@ class AbandonedSpanSuppressionTest(unittest.TestCase):
             tmp.cleanup()
 
 
+    def test_the_off_arm_of_the_ablation_really_is_off(self) -> None:
+        # Regression: suppress_abandoned=False only skipped the rerank
+        # blocklist. _suppress_abandoned still ran and, under the default
+        # abandoned_policy="deactivate", still set slot.active=False -- so the
+        # "no suppression" arm performed targeted erasure anyway and scored
+        # bit-identical to the default. An ablation switch that does not
+        # ablate silently invalidates its own contrast.
+        A.clear_catalog_cache()
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            ag = A.Agent(_catalog_file(Path(tmp.name)),
+                         config={"suppress_abandoned": False})
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Accessories Scarves. A key requirement is: silk.", 1, 10)
+            ag.respond("s", "Actually, forget silk. What I need is: genuine leather.", 2, 10)
+            silk = {sl.value: sl for sl in ag._sessions["s"]["slots"]}["silk"]
+            self.assertTrue(silk.soft_ok,
+                            "suppression off must leave soft rescue intact")
+            self.assertTrue(silk.active,
+                            "suppression off must not erase the slot either")
+            self.assertIn("silk", ag._sessions["s"]["terms"])
+        finally:
+            A.clear_catalog_cache()
+            tmp.cleanup()
+
+
 class EvidenceWeightingTest(unittest.TestCase):
     """confidence and polarity must reach the SCORE, not just the dataclass."""
 
