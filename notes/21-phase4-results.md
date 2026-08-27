@@ -163,6 +163,48 @@ in the phase was trace-on and is not the cost of the product.
 Dense adds **98 MB** resident over lexical. Combined index memory stays under
 the 160 MB gate.
 
+## Corrections to this note's own feasibility figures
+
+Two numbers above were re-measured and are wrong as first written. Both are
+recorded here rather than edited away.
+
+### Dense build time is order-dependent, and degrades badly
+
+| when dense is built | build time |
+|---|---|
+| fresh process, before `FacetIndex` exists | **4.66 s** |
+| after `FacetIndex` is already resident | **92.17 s** |
+
+A 20× difference from ordering alone. The cause is memory pressure: the
+catalog plus `CategoryIndex` plus `FacetIndex` already hold ~660 MB, and the
+dense build then peaks a further ~110 MB of Python allocation on top.
+
+The shipped route ordering happens to hit the fast case — dense fires only on
+browsing/mixed turns, which precede any constraint, and `_retarget` never
+returns a session to browsing once it has firmed up — so a real session builds
+dense *before* facets. **That is a fragile property of route ordering, not a
+guarantee**, and "4.83 s" should never have been reported as *the* build cost.
+
+### Resident memory: three numbers measuring three different things
+
+| method | value | what it measures |
+|---|---|---|
+| `tracemalloc` retained | **19.9 MB** | Python objects the index still holds |
+| `tracemalloc` peak | **109.7 MB** | including transient build allocation |
+| process high-water growth | **+122.3 MB** | `ru_maxrss` across the dense turn |
+| cross-process steady delta | **98 MB** | two processes at the end of a run |
+| R0's "resident artefacts" | 39.4 MB | **not reproducible at `dense_dim=32`** |
+
+**The operational figure is ~98–122 MB, and that is what the report uses.**
+R0's 39.4 MB is withdrawn: no measurement method reproduces it at the R1
+configuration, so it is not carried forward as if it were a smaller estimate
+of the same quantity.
+
+**The 160 MB gate is not comfortable headroom and will not be described as
+such.** It counts index artefacts, which is narrower than operational memory:
+the dense process reaches ~539 MB peak RSS cold and ~759 MB steady after a
+240-turn run. The gate passes as written; the process is not small.
+
 ## Decision
 
 **Dense default OFF.** Blocking items, precisely:
