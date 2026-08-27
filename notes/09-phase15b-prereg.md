@@ -79,3 +79,105 @@ missing evidence, that actually costs ranking.
 
 **If the end-to-end score drops by more than 1 sd**, the fixes did not remove
 the inversion class, and Phase 2B's hard-negative filter must not be built.
+
+---
+
+# Outcome, against the predictions above
+
+All shards leased and isolated at **`af327b4`**, every one `matrix_complete`,
+24 cells, no partial or invalid rows. Rendered through `lab.report`, which
+filters on `citable()`.
+
+## H1 — negation scope fixes: CONFIRMED, and smaller than it looks
+
+| set | dev target | result |
+|---|---|---|
+| dev scope polarity | 15/15 | 15/15 |
+| dev hedges | 4/4 | 4/4 |
+| `clean` | unchanged | **0.928508, bit-exact** |
+| `clean` compat | unchanged | **0.928708, bit-exact** |
+
+Both frozen baselines held to the last digit, as predicted.
+
+The prediction that the negative CHANNEL would not move was also right, and
+more strongly than expected:
+
+| scenario | w_neg=2 | w_neg=0 | Δ | sd |
+|---|---|---|---|---|
+| `negative_preference` | 0.700683 | 0.698583 | +0.0021 | 0.020 |
+| `negative_preference_paraphrase` | 0.677826 | 0.677751 | +0.000075 | 0.017 |
+| `negative_scope` | 0.688255 | 0.685938 | +0.0023 | 0.020 |
+
+Every delta is an order of magnitude inside its own sd. **The parser fixes are
+correct and the channel they feed still does nothing measurable.** Those are
+separate claims and only the first is supported.
+
+## H2 — hardness from wording: CONFIRMED
+
+No metric moved. `clean` bit-exact, every scenario bit-exact against its
+`rescue_relax=False` twin. Hardness is read correctly and consumed nowhere by
+default, which is what was predicted.
+
+## H3 — rescue-lane relaxation: CONFIRMED, ≈ 0, and now explained
+
+`rescue_relax` on vs off is **bit-identical** on both `vague_start`
+(0.917534) and `uncooperative` (0.833266). Bit-identical is stronger than "no
+measurable difference", so the branch was instrumented to rule out a wiring
+defect:
+
+| scenario | rerank calls | with >1 unsatisfiable constraint |
+|---|---|---|
+| `vague_start` | 407 | 3 (0.7%) |
+| `uncooperative` | 311 | 1.0% |
+
+The gate is `len(dead) > 1`, and two constraints are almost never
+unsatisfiable at once in these scenarios. The mechanism works — a unit test
+drives it directly — it simply has nothing to act on. **Stays off by default**
+and carries into Phase 2B, where the safe hard-filter creates that state
+deliberately.
+
+## H4 — prospective challenge set v2
+
+Not a blind or private holdout: the phrasings were authored for this purpose
+and the outcome was predicted in advance. It can test whether the fixes
+generalise past the cases they were written for; it cannot give an unbiased
+estimate.
+
+| config | score | sd |
+|---|---|---|
+| w_neg=2 (default) | 0.702788 | 0.0203 |
+| w_neg=0 (control) | **0.702788** | 0.0203 |
+
+Predicted "within 1 sd of `negative_preference` (0.700683)". Result: +0.0021,
+well inside. **Prediction held.**
+
+The control is the informative half, and it is bit-identical. That separates
+the two failure modes without any per-phrase probing, which the contract
+forbids:
+
+* an **inverted** negation creates a slot that penalises the right product, so
+  w_neg=2 would score BELOW w_neg=0;
+* a **missed** negation creates no slot at all, so the two are identical.
+
+They are identical to the last digit. Every unrecognised v2 phrasing
+(`barring`, `save for`, `hard pass`, `off the table`) degraded to *no
+evidence*. **Missed evidence only, zero inversions** — the failure mode the
+fixes were built to eliminate is gone.
+
+Per the standing rule: missed evidence is recorded and carried forward; only
+inversion would justify further work here. v2 is now consumed and will not be
+run again.
+
+## What this does NOT establish
+
+* That the negative channel is worth its weight. Three scenarios and a
+  challenge set all say it is not measurable. `w_neg=2.0` is retained as
+  saturated and harmless, never as a measured gain.
+* That a Phase 2B hard-negative FILTER will pay. It faces the same scarcity:
+  candidates reaching the top 10 rarely carry a rejected attribute. Build the
+  category/facet planes first and re-measure before committing to it.
+* Anything about `override_genuine`, where suppression on and off are
+  bit-identical (0.922134). Targeted erasure pays on `override_category`
+  (+0.0137 over no suppression) because a category pivot NAMES what is being
+  abandoned. When the customer does not name it, the mechanism correctly does
+  nothing. The headline number belongs to the pivot case only.
