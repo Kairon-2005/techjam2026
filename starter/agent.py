@@ -67,6 +67,14 @@ DEFAULTS = {
     # which question a person can actually answer. After a dry turn, weight by
     # both instead of chasing the most discriminative-but-unanswerable facet.
     "answerability_after": 1,     # dry turns before answerability is weighted in
+    # Phase 3B. Raw Shannon entropy counts "this product mentions no colour"
+    # as a colour, so an attribute most candidates are SILENT about scores as
+    # one they disagree about. Measured on the shipped policy: the attribute
+    # actually asked about has a value on only 56% of the window on clean and
+    # 26% on uncooperative. Utility scores coverage and answerability
+    # explicitly instead, and excludes the missing bucket from the entropy.
+    "question_utility": False,
+    "question_dry_cost": 0.35,    # penalty for a question likely to go dry
     "rotate_on_request": True,    # "show me more" rotates unseen candidates up
     "rotate_keep_top": 3,         # protect the confident head so MRR survives
     # Starved-evidence broadening. A customer who will not answer leaves a thin
@@ -1179,7 +1187,8 @@ class Agent:
                 return "browsing"
         return route
 
-    def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]") -> float:
+    def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]",
+                      skip_missing: bool = False) -> float:
         """Shannon entropy (bits) of one attribute's values across the pool.
 
         A question is worth asking only if the surviving candidates actually
@@ -1188,6 +1197,11 @@ class Agent:
         counts: dict[str, int] = {}
         for asin in asins:
             match = pattern.search(self.cat.text.get(asin, ""))
+            if match is None and skip_missing:
+                # Silence is not an answer the customer can give. Counting it
+                # as a value makes a sparsely-described attribute look like the
+                # most discriminating question in the pool.
+                continue
             value = match.group(1).lower() if match else ""
             counts[value] = counts.get(value, 0) + 1
         total = sum(counts.values())
@@ -1350,12 +1364,22 @@ class Agent:
         # Once the customer has gone quiet, a question they cannot answer costs
         # a whole turn for nothing, so discount by how answerable it is.
         weigh = state.get("dry_streak", 0) >= int(cfg["answerability_after"])
+        utility = bool(cfg["question_utility"])
         best, best_bits, best_util = "other", 0.0, 0.0
         for attribute, pattern in ATTR_VOCAB.items():
-            if attribute in state["asked"]:
+            if attribute in state["asked"]:      # not_already_asked
                 continue
-            bits = self._pool_entropy(window, pattern)
-            util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
+            if utility:
+                # information_gain x catalog_coverage x answerability
+                #   - expected_dry_turn_cost
+                bits = self._pool_entropy(window, pattern, skip_missing=True)
+                coverage = self._facet_coverage(window, attribute)
+                answerable = ANSWERABILITY.get(attribute, 0.5)
+                util = (bits * coverage * answerable
+                        - cfg["question_dry_cost"] * (1.0 - coverage * answerable))
+            else:
+                bits = self._pool_entropy(window, pattern)
+                util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
             if util > best_util:
                 best, best_bits, best_util = attribute, bits, util
         # How much of the window actually STATES a value for the attribute we

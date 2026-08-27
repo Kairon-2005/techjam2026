@@ -467,3 +467,49 @@ class CompatibilityTest(PlaneTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuestionUtilityTest(PlaneTestBase):
+    """Phase 3B: coverage- and answerability-aware question selection."""
+
+    def test_missing_values_do_not_count_as_agreement_or_disagreement(self) -> None:
+        ag = self.agent()
+        pool = list(ag.cat.category_index.asins)
+        material = A.ATTR_VOCAB["material"]
+        with_missing = ag._pool_entropy(pool, material, skip_missing=False)
+        without = ag._pool_entropy(pool, material, skip_missing=True)
+        self.assertNotEqual(with_missing, without,
+                            "the missing bucket was not contributing entropy")
+        self.assertLess(without, with_missing)
+
+    def test_a_facet_nobody_mentions_scores_no_utility(self) -> None:
+        # Q1 alone mentions nothing; a window of silent products must not look
+        # like a pool that disagrees.
+        ag = self.agent(question_utility=True)
+        self.assertEqual(ag._facet_coverage(["Q1"], "material"), 0.0)
+        self.assertEqual(ag._pool_entropy(["Q1"], A.ATTR_VOCAB["material"],
+                                          skip_missing=True), 0.0)
+
+    def test_utility_prefers_the_better_covered_attribute(self) -> None:
+        ag = self.agent(question_utility=True)
+        state = ag._blank_state()
+        pool = list(ag.cat.category_index.asins)
+        chosen, bits, _ = ag._pool_attribute(state, pool, ag.cfg)
+        if chosen != "other":
+            self.assertGreater(state["last_coverage"], 0.0,
+                               "utility picked an attribute nothing in the pool states")
+
+    def test_the_flag_is_off_by_default(self) -> None:
+        self.assertFalse(A.DEFAULTS["question_utility"])
+
+    def test_utility_changes_which_question_is_asked(self) -> None:
+        entropy_ag = self.agent(question_utility=False)
+        utility_ag = self.agent(question_utility=True)
+        pool = list(entropy_ag.cat.category_index.asins)
+        picked = []
+        for ag in (entropy_ag, utility_ag):
+            state = ag._blank_state()
+            picked.append(ag._pool_attribute(state, pool, ag.cfg)[0])
+        self.assertEqual(len(picked), 2)   # both produce a legal attribute
+        for name in picked:
+            self.assertIn(name, set(A.ATTR_VOCAB) | {"other"})
