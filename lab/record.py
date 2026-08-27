@@ -24,6 +24,7 @@ import sys
 import time
 from pathlib import Path
 
+from lab import lease as L
 from lab import scenarios as S
 
 LOG = Path("lab/results.jsonl")
@@ -160,8 +161,18 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         vals = [m[key] for m in per_seed.values()]
         row[key] = statistics.fmean(vals)
         row[key + "_sd"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
-    with LOG.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row) + "\n")
+    # Under a lease the row is journalled, not written: its provenance is not
+    # established until the lease verifies that nothing moved during the run.
+    # Without one it is appended immediately, as before, and carries
+    # lease=None so a reader can tell an unleased row from a verified one.
+    held = L.current()
+    if held is not None:
+        row.update(held.stamp())
+        held.journal.append(row)
+    else:
+        row["lease"] = None
+        with LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
     return row
 
 
@@ -187,5 +198,6 @@ if __name__ == "__main__":
     seeds = tuple(int(x) for x in (sys.argv[1].split(",") if len(sys.argv) > 1 else
                                    ["7", "8", "9", "10", "11"]))
     names = sys.argv[2].split(",") if len(sys.argv) > 2 else [s.name for s in S.LIBRARY]
-    matrix(names, {"default": {}}, seeds, tag="cli")
+    with L.lease("record-cli", isolate=not os.environ.get("LAB_NO_ISOLATE")):
+        matrix(names, {"default": {}}, seeds, tag="cli")
     print(f"\nlogged to {LOG}")
