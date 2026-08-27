@@ -8,6 +8,11 @@ Revision 3 fixes five further defects found in review; revision 2 fixed five
 before them. All are recorded rather than silently corrected, because they are
 the kind of error this project keeps catching late.
 
+**Revision 4:** one blocker — the planned `category_index.coverage()` call
+would have implicitly built the whole `_CategoryIndex` on the compat/legacy
+path, where `_cat_index` is `None`: a catalog-wide scan and a hidden cold start
+(§2b). Plus two documentation duplications removed.
+
 **Revision 3:**
 
 | # | defect in revision 2 |
@@ -152,13 +157,54 @@ The snapshot instead builds a **bounded candidate summary** over
   `_overgeneral(ranked, turn_cfg)`. It is a pure function returning a tuple;
   the write to `state["broad_options"]` happens in its *caller*, so calling it
   from the snapshot builder mutates nothing.
-* `category_count`, `category_entropy` — `category_index.coverage()` over the
-  same 30 ids.
+* `category_count`, `category_entropy` — from the **same single pass**, never
+  from `category_index`.
 
-**This is new computation and is acknowledged as such:** ~30 category lookups,
-one `_overgeneral` pass over 30 blobs, and `_overgeneral` then runs a second
-time inside `_pick_attribute`. Both are bounded by `pool_depth` and both are
-**counted in the latency budget**.
+### The helper must not touch `category_index`
+
+Revision 3 planned `category_index.coverage()`. **That was a blocker.**
+`category_index` is a lazy property (`catalog.py`): on the compat/legacy path
+`_cat_index` is `None`, so reading it would build the entire `_CategoryIndex`
+— a catalog-wide scan and a hidden cold start, on a path that never otherwise
+needs it.
+
+`cat.cats` and `cat.catpath` are populated in `_Catalog.__init__` and are
+therefore **always resident**. The helper reads those.
+
+Planned in `starter/context.py`, pure and bounded:
+
+```python
+summarize_categories(ranked_ids, category_by_asin, pool_depth,
+                     overgeneral_limit) -> CandidateCategorySummary
+```
+
+* reads at most `max(2, pool_depth)` = **30** ranked ids;
+* **one pass** yields `category_count`, `entropy`, `overgeneral`,
+  `option_count`;
+* **never** touches `cat.category_index`, `cat.facet_index` or
+  `cat.dense_index`;
+* takes `category_by_asin` as an argument rather than a catalog, so it cannot
+  reach an index even by accident.
+
+**A coherence gain, not only a cost fix.** `_overgeneral()` already derives its
+leaf from `cat.cats` — `cats.get(asin, "").split(",")[-1].strip()` — while
+`category_index.coverage()` groups by the full path tuple. Those are *different
+groupings*, so revision 3 would have reported a `category_count` that did not
+match its own `overgeneral` flag. Sharing one pass makes them consistent by
+construction.
+
+**Two tests:**
+
+1. **Equivalence** — for the same `ranked` and config, the helper's
+   `overgeneral` boolean and option list equal `_overgeneral()`'s.
+2. **No hidden build** — start from `cat._cat_index is None`, build a full
+   snapshot, and assert `_cat_index`, `_facet_index` and `_dense_index` are
+   **all still `None`**.
+
+**This is new computation and is acknowledged as such:** one pass over 30
+entries, plus `_overgeneral` running a second time inside `_pick_attribute`.
+Both are bounded by `pool_depth` and both are **counted in the latency
+budget**.
 
 `trace["category_coverage"]` is deliberately **not** reused. It exists under
 `score_default` (`retrieval.py:398`), but describes `deduped[:100]` from the
@@ -291,11 +337,14 @@ built before `_pick_attribute`, with no current-question outcome in its input.
 Precedence locked. Reason-code tests for `uncooperative`,
 `override_category` and `vague_start` from scenarios; the
 `PROPOSE_RELAX_LOW_CONFIDENCE` test uses a hand-built low-confidence hard
-slot. `contradiction` appears ONLY as a bit-exact gate.
-`override_category`, `vague_start`. Enum and renderer tested separately.
+slot. `contradiction` appears ONLY as a bit-exact gate. Enum and renderer are
+tested separately.
 
 **C — performance.** Shadow warm p95 delta **≤ 1 ms**, including profile
-coverage. No `FacetIndex`, no `DenseIndex`, no catalog-wide scan. Snapshot size
+coverage and the bounded category summary. **No `CategoryIndex`, no
+`FacetIndex`, no `DenseIndex`, no catalog-wide scan** — asserted by the
+no-hidden-build test in §2b, which starts with all three lazy indexes unbuilt
+and requires them still unbuilt afterwards. Snapshot size
 recorded p50/p95. **If the budget is missed, 6A ships default-off and the cost
 is attributed, not averaged away.**
 
@@ -311,7 +360,6 @@ or profile weights.
    bounded candidate summary in §2b is also real work — ~30 category lookups,
    one extra `_overgeneral` pass over 30 blobs, plus ≤ 240 substring checks
    for profile coverage.
-   profile coverage is now acknowledged as real work: ≤ 240 substring checks.
 3. Maximal canonical snapshot ≈ 2.4 KB at 53 entries, inside 4096 bytes.
 4. Shadow/actual route agreement high on clean, lower on `vague_start` and
    `uncooperative` — **reported as a diagnostic, not scored.**
