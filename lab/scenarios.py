@@ -72,6 +72,12 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
         return card, beh
 
     def initial_message(sample, category, disclosed):
+        # The evaluator names sessions with a fresh uuid4, so a recorded trace
+        # cannot be matched back to its sample by id. initial_message is
+        # called exactly once per session, in session order, so the order of
+        # these calls IS the pairing. Without this, recall silently scored
+        # nothing and the absent keys read as 0.000 next to HR@10 of 0.995.
+        seen_samples.append(str(sample["sample_id"]))
         if scenario.init:
             out = scenario.init(sample, category, disclosed,
                                 _rng_for(scenario.name, sample, seed))
@@ -87,6 +93,7 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
                 return out
         return orig_reply(sample, ask_attribute, disclosed, boundary_used)
 
+    seen_samples: list[str] = []
     work = samples
     if scenario.keep:
         # Segmenting the public set rather than mutating it: a per-route
@@ -99,9 +106,18 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
     E.initial_message, E.customer_reply, E.materialize_hidden_fields = (
         initial_message, customer_reply, materialize)
     agent = A.Agent(CATALOG, config=config)
+    seen_sessions: list[str] = []
+    plain_reset = agent.reset
+
+    def reset(session_id, profile):
+        seen_sessions.append(str(session_id))
+        return plain_reset(session_id, profile)
+
+    agent.reset = reset            # type: ignore[method-assign]
     try:
         result = E.evaluate(agent, work, ids, cats, prods)
-        result["telemetry"] = _telemetry(agent, work)
+        result["telemetry"] = _telemetry(agent, work,
+                                         dict(zip(seen_sessions, seen_samples)))
         return result
     finally:
         E.initial_message, E.customer_reply, E.materialize_hidden_fields = (
@@ -120,14 +136,18 @@ def _percentile(values: list[float], pct: float) -> float:
     return round(ordered[idx], 3)
 
 
-def _telemetry(agent, samples) -> dict:
+def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
     """Aggregate the per-turn decision traces the agent recorded.
 
     Recall is computed HERE, not in the agent: it needs the ground-truth asin,
     which the agent must never see. The agent only records which candidates it
     generated; whether the right one was among them is the harness's question.
     """
-    truth = {s["sample_id"]: str(s["ground_truth"]["parent_asin"]) for s in samples}
+    by_sample = {str(s["sample_id"]): str(s["ground_truth"]["parent_asin"])
+                 for s in samples}
+    truth = {sid: by_sample[sample_id]
+             for sid, sample_id in (session_to_sample or {}).items()
+             if sample_id in by_sample}
     turns, latency = [], []
     hits = {50: 0, 100: 0, "pool": 0}
     scored = 0
