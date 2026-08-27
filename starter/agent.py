@@ -228,6 +228,18 @@ class _Catalog:
         self.order: dict[str, list[str]] = {}  # ordered flattened values (position signal)
         self.card: dict[str, list[str]] = {}   # simulator-replicated 4 constraint strings
         self.cats: dict[str, str] = {}
+        # The category LIST, not the flattened string. "women > clothing >
+        # dresses" and "girls > clothing > dresses" share every token and are
+        # different shelves; a route that wants "near dresses" needs the edges,
+        # not a bag of words. Levels are interned: 50k paths over a few hundred
+        # distinct level names cost almost nothing when shared.
+        self.catpath: dict[str, tuple[str, ...]] = {}
+        self.dept: dict[str, str] = {}    # details.Department, 87% covered
+        self.store: dict[str, str] = {}   # brand proxy, 99% covered
+        # Phase 2B indexes are built on first use, not here: they cost time and
+        # memory that the compatibility path (dual_plane off) must not pay.
+        self._cat_index: "_CategoryIndex | None" = None
+        self._facet_index: "_FacetIndex | None" = None
         self.title: dict[str, str] = {}   # short display title for explanations
         self.pop: dict[str, float] = {}
         self.pop_pct: dict[str, float] = {}
@@ -252,7 +264,13 @@ class _Catalog:
                     self.order[asin] = ordered[:12]
                     self.card[asin] = _card4(p, blob)
                 self.cats[asin] = _norm(_text(p.get("categories")))
+                raw_path = [_norm(str(c)) for c in (p.get("categories") or []) if str(c).strip()]
+                self.catpath[asin] = tuple(sys.intern(c) for c in raw_path)
+                det = p.get("details")
+                self.dept[asin] = _norm(str((det or {}).get("Department", ""))) \
+                    if isinstance(det, dict) else ""
                 self.title[asin] = _clean(_text(p.get("title")), 90)
+                self.store[asin] = _norm(_text(p.get("store")))
                 rating = p.get("average_rating") or 0.0
                 count = p.get("rating_number") or 0
                 raw_pop[asin] = (float(rating) / 5.0) * math.log1p(float(count))
@@ -273,6 +291,32 @@ class _Catalog:
         order = sorted(counts.items(), key=lambda kv: kv[1])
         n = len(order) or 1
         self.pop_pct = {asin: i / n for i, (asin, _) in enumerate(order)}
+
+    @property
+    def category_index(self) -> "_CategoryIndex":
+        """Built once per catalog, shared by every agent and every turn."""
+        if self._cat_index is None:
+            self._cat_index = _CategoryIndex(self.catpath)
+        return self._cat_index
+
+    @property
+    def facet_index(self) -> "_FacetIndex":
+        if self._facet_index is None:
+            self._facet_index = _FacetIndex(self.category_index.ids, self.text,
+                                            self.store, self.dept)
+        return self._facet_index
+
+    def index_stats(self) -> dict:
+        """Shape and cost of the Phase 2B indexes, for the telemetry row."""
+        ci, fi = self.category_index, self.facet_index
+        return {
+            "category_nodes": len(ci.node),
+            "category_leaves": len({tuple(p) for p in ci.leaf}),
+            "facets": {name: {"values": fi.values(name),
+                              "coverage": round(fi.coverage.get(name, 0.0), 4),
+                              "missing_rate": fi.missing_rate(name)}
+                       for name in sorted(fi.coverage)},
+        }
 
     def close(self) -> None:
         """Release the in-memory SQLite handle.
@@ -300,6 +344,206 @@ class _Catalog:
 
     def idf(self, term: str) -> float:
         return math.log((self.n_docs + 1) / (self.df.get(term, 0) + 1))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2B retrieval data planes.
+#
+# Phase 2A built a routing CONTROL plane: buying/browsing/mixed labels that
+# selected different weights over one shared candidate set. That is not what
+# Pillar I asks for, and calling it dual-track would have been a claim the
+# code did not support. These two indexes exist so the routes can generate
+# genuinely different candidates -- different topology, not different scoring.
+#
+# Ownership, so it is not claimed twice: CategoryIndex, FacetIndex, safe
+# filtering and route budgets are PHASE 2B. DenseIndex, route-conditioned
+# Weighted RRF and semantic hybrid retrieval are PHASE 4 and are not here.
+# ---------------------------------------------------------------------------
+
+
+class _CategoryIndex:
+    """The category tree, with products attached at every level.
+
+    Attaching at every LEVEL rather than only at the leaf is what makes
+    expansion cheap: "one step up from women > clothing > dresses" is a
+    dictionary lookup on the parent tuple, and it already contains the
+    siblings.
+    """
+
+    def __init__(self, paths: dict[str, tuple[str, ...]]) -> None:
+        self.asins: list[str] = sorted(paths)
+        self.ids: dict[str, int] = {a: i for i, a in enumerate(self.asins)}
+        self.node: dict[tuple, set[int]] = {}
+        self.leaf: list[tuple] = [()] * len(self.asins)
+        self.children: dict[tuple, set[tuple]] = {}
+        self.by_token: dict[str, set[tuple]] = {}
+        for asin, path in paths.items():
+            i = self.ids[asin]
+            self.leaf[i] = path
+            for depth in range(1, len(path) + 1):
+                prefix = path[:depth]
+                self.node.setdefault(prefix, set()).add(i)
+                if depth > 1:
+                    self.children.setdefault(prefix[:-1], set()).add(prefix)
+        for prefix in self.node:
+            for token in TOKEN_RE.findall(" ".join(prefix[-2:])):
+                self.by_token.setdefault(token, set()).add(prefix)
+        self.universe = frozenset(range(len(self.asins)))
+
+    # ---- lookup --------------------------------------------------------
+    def lookup(self, text: str, min_overlap: int = 1) -> tuple | None:
+        """Best node for free-text like "Accessories Belts", or None.
+
+        None is a real answer and callers must handle it: an unrecognised
+        category has to degrade to "no category constraint", never to "no
+        products". Returning an empty set here would silently empty the pool.
+        """
+        tokens = [t for t in TOKEN_RE.findall(_norm(text or "")) if len(t) > 2]
+        if not tokens:
+            return None
+        scores: dict[tuple, int] = {}
+        for token in tokens:
+            for prefix in self.by_token.get(token, ()):  # noqa: B007
+                scores[prefix] = scores.get(prefix, 0) + 1
+        if not scores:
+            return None
+        best = max(scores.values())
+        if best < min_overlap:
+            return None
+        # Deepest node among the best-matching, then largest: prefer the most
+        # specific shelf, but do not pick a 3-product corner over a real one.
+        winners = [p for p, v in scores.items() if v == best]
+        return max(winners, key=lambda p: (len(p), len(self.node[p])))
+
+    def members(self, path: tuple | None) -> frozenset[int]:
+        return frozenset(self.node.get(path, ())) if path else frozenset()
+
+    def expand(self, path: tuple | None, up: int = 1, down: int = 1) -> frozenset[int]:
+        """The node, its ancestors up to `up` levels, and children `down` deep.
+
+        Going up one level is what brings in siblings, which is the whole point
+        for browsing: someone looking at dresses should see skirts.
+        """
+        if not path:
+            return frozenset()
+        out: set[int] = set(self.node.get(path, ()))
+        anchor = path
+        for _ in range(max(0, up)):
+            if len(anchor) <= 1:
+                break
+            anchor = anchor[:-1]
+            out |= self.node.get(anchor, set())
+        frontier = {path}
+        for _ in range(max(0, down)):
+            nxt: set[tuple] = set()
+            for node in frontier:
+                for child in self.children.get(node, ()):  # noqa: B007
+                    out |= self.node.get(child, set())
+                    nxt.add(child)
+            frontier = nxt
+        return frozenset(out)
+
+    def coverage(self, ids) -> dict:
+        """How many distinct shelves a candidate set spans, and how evenly."""
+        counts: dict[tuple, int] = {}
+        for i in ids:
+            counts[self.leaf[i]] = counts.get(self.leaf[i], 0) + 1
+        total = sum(counts.values())
+        if not total:
+            return {"categories": 0, "entropy": 0.0, "top_share": 0.0}
+        entropy = -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
+        return {"categories": len(counts), "entropy": round(entropy, 4),
+                "top_share": round(max(counts.values()) / total, 4)}
+
+
+class _FacetIndex:
+    """Value postings per attribute, with the coverage needed to trust them.
+
+    The structured fields in this catalog cannot carry a filter: details.Color
+    is present on 4.9% of products, Material on 4.1%, Size on 1.9%. Values are
+    therefore read out of the product text with the same vocabularies the
+    reranker uses, which lifts material to 57% and colour to 39%.
+
+    Even at 57%, `material = leather` cannot mean "drop everything not indexed
+    as leather" -- that would drop 43% of the catalog for having said nothing,
+    the target included. So every filter here is PRESENCE-AWARE: a product is
+    excluded only if it has some value for the facet and none of them match.
+    Silence is never treated as refusal.
+    """
+
+    @staticmethod
+    def sources() -> tuple[tuple[str, "re.Pattern[str]"], ...]:
+        """Resolved at call time, not at class-definition time: the index
+        classes sit above the vocabularies they read, and binding these at
+        import made the module fail to load."""
+        return (
+            ("material", MATERIAL_RE),
+            ("color", COLOR_RE),
+            ("style", ATTR_VOCAB["style"]),
+            ("use_case", ATTR_VOCAB["use_case"]),
+            ("size", ATTR_VOCAB["size"]),
+        )
+
+    def __init__(self, ids: dict[str, int], text: dict[str, str],
+                 store: dict[str, str], dept: dict[str, str]) -> None:
+        self.n = len(ids) or 1
+        self.postings: dict[str, dict[str, set[int]]] = {}
+        self.present: dict[str, set[int]] = {}
+        sources = self.sources()
+        for name, _ in sources:
+            self.postings[name] = {}
+            self.present[name] = set()
+        self.postings["brand"], self.present["brand"] = {}, set()
+        self.postings["department"], self.present["department"] = {}, set()
+        for asin, i in ids.items():
+            blob = text.get(asin, "")
+            for name, pattern in sources:
+                seen = {_norm(m.group(0)) for m in pattern.finditer(blob)}
+                seen = {v for v in seen if v}
+                if seen:
+                    self.present[name].add(i)
+                    for value in seen:
+                        self.postings[name].setdefault(value, set()).add(i)
+            brand = _norm(store.get(asin, ""))
+            if brand:
+                self.present["brand"].add(i)
+                self.postings["brand"].setdefault(brand, set()).add(i)
+            department = _norm(dept.get(asin, ""))
+            if department:
+                self.present["department"].add(i)
+                self.postings["department"].setdefault(department, set()).add(i)
+        self.coverage = {name: len(present) / self.n
+                         for name, present in self.present.items()}
+
+    def values(self, facet: str) -> int:
+        return len(self.postings.get(facet, {}))
+
+    def missing_rate(self, facet: str) -> float:
+        return round(1.0 - self.coverage.get(facet, 0.0), 4)
+
+    def hard_ok(self, facet: str, min_coverage: float) -> bool:
+        """Whether this facet may narrow a pool at all, filter aside."""
+        return self.coverage.get(facet, 0.0) >= min_coverage
+
+    def match(self, facet: str, value: str) -> frozenset[int]:
+        table = self.postings.get(facet) or {}
+        value = _norm(value)
+        if value in table:
+            return frozenset(table[value])
+        # The stated phrase may carry the value plus words the catalog does not
+        # use ("genuine leather"). Fall back to any indexed value it contains.
+        hits: set[int] = set()
+        for known, ids in table.items():
+            if known and known in value:
+                hits |= ids
+        return frozenset(hits)
+
+    def safe_keep(self, facet: str, value: str, universe: frozenset[int]) -> frozenset[int]:
+        """Products consistent with `value`: matches, plus every product that
+        never said. Presence-aware by construction -- this is the only filter
+        primitive the buying plane is allowed to use."""
+        unknown = universe - self.present.get(facet, set())
+        return frozenset((self.match(facet, value) & universe) | unknown)
 
 
 def clear_catalog_cache() -> None:
