@@ -237,7 +237,7 @@ DEFAULTS = {
     #   control decision controls depth and starvation
     # "control" works with trace=False. Telemetry may depend on trace;
     # orchestration may not.
-    "retrieval_context_mode": "off",
+    "retrieval_context_mode": "control",
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -569,10 +569,10 @@ class Agent(RetrievalMixin, DialogueMixin):
                 rotate_pending=bool(state.get("rotate_pending")))
             decision = _context.decide_retrieval(
                 snapshot, _context.policy_from(turn_cfg))
-        # TEMPORARY (Phase 6B1 measurement commit): the legacy rule is kept
-        # alongside the new one so shadow mode can compare them per turn. Two
-        # copies of a starvation rule is exactly the defect class this project
-        # has already paid for twice, and the adoption commit deletes this one.
+        # After adoption there is one rule: _starved() is a thin wrapper over
+        # the same decide_retrieval() call, so these two paths cannot diverge.
+        # The name is kept because shadow mode still reports a comparison, and
+        # because tests and older call sites use it.
         legacy_starved = self._starved(state, turn_cfg)
         legacy_depth = turn_cfg["candidates"]
         if legacy_starved:

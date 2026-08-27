@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import re
 
+from starter import context as _context
 from starter.catalog import _clean
 from starter.evidence import (
     ABANDON_RE, ANSWERABILITY, ATTR_VOCAB, NOISE_REPLIES, OVERRIDE_MARK,
@@ -190,20 +191,25 @@ class DialogueMixin:
         return frozenset(blocked)
 
     def _starved(self, state: dict, cfg: dict) -> bool:
-        """Thin evidence, not merely a quiet turn.
+        """Thin wrapper. The rule itself lives in context.decide_retrieval.
 
-        Widening trades MRR for recall, so it must fire only when recall is
-        actually the binding constraint: the customer has stalled AND the query
-        we would run is thin, or they explicitly asked to see more.
+        Phase 6B1 relocated this decision into a pure function so it could be
+        tested against a boundary grid and driven from telemetry. What is left
+        here is an adapter, kept because tests and older call sites name it.
+
+        There is deliberately ONE copy of the rule. The measurement commit
+        held two side by side to compare them across 8,483 turns; keeping them
+        after that would have been the same defect this project has already
+        paid for twice -- the void suppress_abandoned switch and the inert
+        route_overrides patch.
         """
-        if not cfg["starved_candidates"]:
-            return False
-        stalled = state.get("dry_streak", 0) >= int(cfg["starved_after"])
-        if not (stalled or state.get("rotate_pending")):
-            return False
-        active = sum(1 for slot in state["slots"] if slot.usable)
-        return (len(state["terms"]) <= int(cfg["starved_max_terms"])
-                or active <= int(cfg["starved_max_slots"]))
+        snapshot = _context.PreRetrievalSnapshot(
+            route=str(state.get("route") or "mixed"),
+            query_term_count=len(state.get("terms") or ()),
+            active_slot_count=sum(1 for slot in state.get("slots") or () if slot.usable),
+            dry_streak=int(state.get("dry_streak") or 0),
+            rotate_pending=bool(state.get("rotate_pending")))
+        return _context.decide_retrieval(snapshot, _context.policy_from(cfg)).starved
 
     def _overgeneral(self, pool: list[str], cfg: dict) -> tuple[bool, list[str]]:
         """Is the pool too broad to rank, rather than merely unranked?

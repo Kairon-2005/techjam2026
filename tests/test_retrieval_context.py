@@ -171,11 +171,30 @@ class ModeTest(unittest.TestCase):
         log = ag._sessions["s"].get("trace_log") or [{}]
         return log[-1]
 
-    def test_the_default_is_off(self) -> None:
-        self.assertEqual(A.DEFAULTS["retrieval_context_mode"], "off")
+    def test_the_default_is_control(self) -> None:
+        # Adopted after every agreement, bit-exactness and performance gate
+        # passed. Shipping a verified controller in "off" would be building the
+        # thing and declining to use it.
+        self.assertEqual(A.DEFAULTS["retrieval_context_mode"], "control")
 
     def test_off_computes_no_decision(self) -> None:
-        self.assertNotIn("decided_starved", self.turn(self.agent()))
+        trace = self.turn(self.agent(retrieval_context_mode="off"))
+        self.assertNotIn("decided_starved", trace)
+
+    def test_the_rule_exists_once(self) -> None:
+        # _starved is an adapter now. If its body ever reacquires the rule,
+        # patching decide_retrieval would stop changing what _starved returns.
+        ag = self.agent()
+        state = {"terms": ["t"], "slots": [], "dry_streak": 99, "rotate_pending": True}
+        original = C.decide_retrieval
+        try:
+            C.decide_retrieval = lambda *a, **k: C.RetrievalDecision(
+                starved=False, candidate_depth=1, retrieval_mode="standard", reasons=())
+            self.assertFalse(ag._starved(state, ag.cfg),
+                             "_starved did not go through decide_retrieval")
+        finally:
+            C.decide_retrieval = original
+        self.assertTrue(ag._starved(state, ag.cfg))
 
     def test_shadow_records_the_comparison(self) -> None:
         trace = self.turn(self.agent(retrieval_context_mode="shadow"))
