@@ -45,6 +45,7 @@ import time
 from pathlib import Path
 
 # --------------------------------------------------------------------------
+from starter import context as _context  # noqa: E402
 from starter.dialogue import DialogueMixin  # noqa: E402
 from starter.retrieval import RetrievalMixin  # noqa: E402
 from starter.catalog import (  # noqa: F401,E402
@@ -223,6 +224,11 @@ DEFAULTS = {
     # the query fixed and vary nothing but the plane.
     "force_route": "",
     "trace": True,                # telemetry; must never change a ranking
+    # Phase 6A shadow context. Computes a ContextSnapshot and a ContextDecision
+    # and writes them to the trace. It controls NOTHING: not route, retrieval,
+    # ranking, question selection, slot mutation or personalization. Requires
+    # trace=True, because there is nowhere else to put the result.
+    "context_shadow": False,
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -365,6 +371,35 @@ class Agent(RetrievalMixin, DialogueMixin):
         return terms_of(text, self.stop)
 
 
+
+    def _shadow_context(self, state: dict, trace: dict, ranked: list[str],
+                        turn: int, cfg: dict) -> None:
+        """Build the snapshot, run the policy, record both. Controls nothing.
+
+        The decision is written to the trace and never read back, which is what
+        makes shadow mode structural rather than a convention: there is no code
+        path from here to retrieval, ranking or question selection.
+        """
+        window = ranked[: int(cfg["pool_depth"])]
+        snapshot = _context.build_snapshot(
+            state=state, trace=trace, ranked=window, turn=turn, cfg=cfg,
+            category_by_asin=self.cat.cats, text_by_asin=self.cat.text,
+            distinguishing=_distinguishing)
+        decision = _context.decide(snapshot, cfg)
+        trace.update({
+            "shadow_route": decision.route,
+            "shadow_retrieval_mode": decision.retrieval_mode,
+            "shadow_clarification_mode": decision.clarification_mode,
+            "shadow_profile_credible": decision.profile_credible,
+            "shadow_relaxation": len(decision.relaxation),
+            "shadow_reasons": [code.value for code in decision.reasons],
+            "snapshot_fields": _context.entry_count(snapshot),
+            "snapshot_bytes": _context.snapshot_bytes(snapshot),
+            "profile_rejected_reason": (
+                "generic_or_covered"
+                if snapshot.profile_tag_count and not snapshot.profile_credible
+                else ""),
+        })
 
     def close(self) -> None:
         """Drop this agent's session state.
@@ -515,6 +550,12 @@ class Agent(RetrievalMixin, DialogueMixin):
                           "route_history": list(state.get("route_history") or []),
                           "shown": len(ordered)})
             state.setdefault("trace_log", []).append(trace)
+        if turn_cfg["trace"] and turn_cfg["context_shadow"]:
+            # THE CALL SITE IS FIXED: after _rotate(), before _pick_attribute().
+            # `state["asked"]` and the last_* fields therefore hold PRIOR-turn
+            # history, and this turn's question cannot leak in -- it has not
+            # been chosen yet.
+            self._shadow_context(state, trace, ranked, turn, turn_cfg)
         for asin in ordered:
             if asin not in state["shown"]:
                 state["shown"].append(asin)

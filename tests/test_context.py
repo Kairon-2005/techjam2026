@@ -284,3 +284,105 @@ class ModuleBoundaryTest(unittest.TestCase):
             elif isinstance(node, ast.Import):
                 names.update(a.name for a in node.names if a.name.startswith("starter"))
         self.assertEqual(names, set(), f"context.py reached into the package: {names}")
+
+
+class ShadowIntegrationTest(unittest.TestCase):
+    """The call site, and the leak it must not have."""
+
+    def setUp(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = _catalog_file(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp.cleanup()
+
+    def agent(self, **cfg) -> A.Agent:
+        return A.Agent(self.path, config={"context_shadow": True, **cfg})
+
+    def test_the_default_is_off(self) -> None:
+        self.assertFalse(A.DEFAULTS["context_shadow"])
+
+    def test_shadow_needs_trace(self) -> None:
+        ag = self.agent(trace=False)
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Clothing Women Dresses. A key requirement is: silk.", 1, 5)
+        self.assertEqual(ag._sessions["s"].get("trace_log"), None)
+
+    def test_the_snapshot_sees_prior_questions_but_not_this_turn_s(self) -> None:
+        # The exact sequence: enter with asked=["material"], the snapshot
+        # contains material, _pick_attribute chooses something for THIS turn,
+        # the snapshot does not contain it, and state holds both afterwards.
+        ag = self.agent()
+        ag.reset("s", {})
+        state = ag._sessions["s"]
+        state["asked"] = ["material"]
+        seen = {}
+        original = ag._shadow_context
+
+        def spy(st, trace, ranked, turn, cfg, _o=original):
+            seen["asked_at_snapshot"] = list(st["asked"])
+            return _o(st, trace, ranked, turn, cfg)
+
+        ag._shadow_context = spy
+        ag.respond("s", "I'm looking for Clothing Women Dresses. A key requirement is: silk.", 2, 5)
+        chosen = state["asked"][-1]
+        self.assertIn("material", seen["asked_at_snapshot"], "prior history was hidden")
+        self.assertNotIn(chosen, seen["asked_at_snapshot"][1:],
+                         "this turn's question leaked into the snapshot")
+        self.assertEqual(state["asked"], ["material", chosen])
+
+    def test_the_shadow_runs_before_pick_attribute(self) -> None:
+        ag = self.agent()
+        order = []
+        s_orig, p_orig = ag._shadow_context, ag._pick_attribute
+        ag._shadow_context = lambda *a, _o=s_orig, **k: (order.append("shadow"), _o(*a, **k))[1]
+        ag._pick_attribute = lambda *a, _o=p_orig, **k: (order.append("pick"), _o(*a, **k))[1]
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Clothing Women Dresses, but I'm still exploring.", 1, 5)
+        self.assertEqual(order, ["shadow", "pick"])
+
+    def test_the_trace_carries_the_decision_and_its_size(self) -> None:
+        ag = self.agent()
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Clothing Women Dresses. A key requirement is: silk.", 1, 5)
+        trace = ag._sessions["s"]["trace_log"][-1]
+        for key in ("shadow_route", "shadow_retrieval_mode", "shadow_clarification_mode",
+                    "shadow_reasons", "snapshot_fields", "snapshot_bytes"):
+            self.assertIn(key, trace)
+        self.assertLessEqual(trace["snapshot_fields"], C.MAX_ENTRIES)
+        self.assertLessEqual(trace["snapshot_bytes"], C.MAX_BYTES)
+
+    def test_shadow_builds_no_index_that_retrieval_had_not_already_built(self) -> None:
+        # Differential, because retrieval itself builds CategoryIndex under
+        # deep_funnel whether shadow is on or off. The claim that matters is
+        # that shadow adds nothing; that the SUMMARY builds nothing at all is
+        # proven directly in CategorySummaryTest.
+        built = []
+        for shadow in (False, True):
+            A.clear_catalog_cache()
+            ag = A.Agent(self.path, config={"context_shadow": shadow})
+            self.assertIsNone(ag.cat._cat_index)
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Clothing Women Dresses, "
+                            "but I'm still exploring.", 1, 5)
+            built.append((ag.cat._cat_index is not None,
+                          ag.cat._facet_index is not None,
+                          ag.cat._dense_index is not None))
+        self.assertEqual(built[0], built[1], "shadow built an index retrieval did not")
+        self.assertFalse(built[1][2], "shadow must never reach the dense index")
+
+    def test_shadow_changes_nothing_a_customer_sees(self) -> None:
+        results = []
+        for shadow in (False, True):
+            A.clear_catalog_cache()
+            ag = A.Agent(self.path, config={"context_shadow": shadow})
+            ag.reset("s", {})
+            first = ag.respond("s", "I'm looking for Clothing Women Dresses. "
+                                    "A key requirement is: silk.", 1, 5)
+            second = ag.respond("s", "For that, what matters is: black.", 2, 5)
+            results.append([(r["recommendations"], r["ask_attribute"], r["message"])
+                            for r in (first, second)])
+        self.assertEqual(results[0], results[1],
+                         "shadow mode changed a customer-visible field")

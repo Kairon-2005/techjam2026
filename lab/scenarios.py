@@ -226,6 +226,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
         out["unstarved_latency_p95"] = _percentile(
             [t.get("retrieval_ms", 0.0) for t in non], 0.95)
     out.update(_question_telemetry(agent))
+    out.update(_shadow_telemetry(turns))
     # Route-topology evidence. The Pillar I claim rests on these and not on a
     # route label, so they are recorded for every arm including the ones with
     # no dense source at all.
@@ -262,6 +263,40 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
                     "recall_pool": round(hits["pool"] / scored, 4),
                     "recall_turns": scored})
     return out
+
+
+def _shadow_telemetry(turns: list) -> dict:
+    """Phase 6A shadow decisions. Aggregate only -- no raw text, no history.
+
+    Route agreement is reported because it is interesting, NOT as evidence of
+    capability: the policy's default row copies the snapshot route, so a high
+    agreement rate would partly be measuring itself.
+    """
+    shadow = [t for t in turns if "shadow_route" in t]
+    if not shadow:
+        return {}
+    codes: dict[str, int] = {}
+    for trace in shadow:
+        for code in trace.get("shadow_reasons") or ():
+            codes[code] = codes.get(code, 0) + 1
+    agree = sum(1 for t in shadow if t.get("shadow_route") == t.get("route"))
+    rejected = sum(1 for t in shadow if t.get("profile_rejected_reason"))
+    sizes = [t.get("snapshot_bytes", 0) for t in shadow]
+    fields = [t.get("snapshot_fields", 0) for t in shadow]
+    modes: dict[str, int] = {}
+    for trace in shadow:
+        key = f"{trace.get('shadow_retrieval_mode')}/{trace.get('shadow_clarification_mode')}"
+        modes[key] = modes.get(key, 0) + 1
+    return {
+        "shadow_turns": len(shadow),
+        "shadow_route_agreement": round(agree / len(shadow), 4),
+        "shadow_profile_rejected_rate": round(rejected / len(shadow), 4),
+        "shadow_reason_counts": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
+        "shadow_mode_counts": dict(sorted(modes.items(), key=lambda kv: -kv[1])),
+        "snapshot_bytes_p50": _percentile(sizes, 0.50),
+        "snapshot_bytes_p95": _percentile(sizes, 0.95),
+        "snapshot_fields_max": max(fields) if fields else 0,
+    }
 
 
 def _question_telemetry(agent) -> dict:
