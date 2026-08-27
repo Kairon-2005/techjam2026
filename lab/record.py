@@ -106,7 +106,7 @@ def _blob_commit(path: str | Path, depth: int = 40) -> str:
     return ""
 
 
-def git_state(agent_module=None) -> dict:
+def git_state(agent_module=None, dataset: str | None = None) -> dict:
     """Provenance for one measurement.
 
     code_dirty is what gates a citable result; result-log churn is tracked
@@ -127,7 +127,8 @@ def git_state(agent_module=None) -> dict:
         "agent_sha256": _cached_sha256(agent_src),
         "agent_commit": _blob_commit(agent_src) or ("worktree" if in_tree else "isolated"),
         "scenario_sha256": _cached_sha256("lab/scenarios.py"),
-        "dataset_sha256": _cached_sha256(S.DATASET),
+        "dataset_sha256": _cached_sha256(dataset or S.DATASET),
+        "dataset": str(dataset or S.DATASET),
         "catalog_sha256": _cached_sha256(S.CATALOG),
     }
 
@@ -160,7 +161,13 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         "seconds": round(time.time() - started, 1),
         "ts": dt.datetime.now().isoformat(timespec="seconds"),
         "python": platform.python_version(),
-        **git_state(),
+        # A row must say which corpus it describes. Without this a
+        # supplementary number and an official one are indistinguishable once
+        # they are both in the ledger, which is exactly how a veto signal gets
+        # quoted as a score.
+        "source": scenario.source,
+        "official": scenario.official,
+        **git_state(dataset=scenario.dataset),
     }
     for key in METRICS:
         vals = [m[key] for m in per_seed.values()]

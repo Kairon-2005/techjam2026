@@ -162,3 +162,38 @@ class TestFrozenSupplementaryArtifacts(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class SupplementaryLedgerWiringTest(unittest.TestCase):
+    """The ledger must be able to tell a veto signal from a score."""
+
+    def test_supplementary_scenarios_are_marked_non_official(self) -> None:
+        from lab import scenarios as S
+        names = [n for n in S.BY_NAME if n.startswith("supplementary_")]
+        self.assertIn("supplementary_dev", names)
+        for name in names:
+            sc = S.BY_NAME[name]
+            self.assertFalse(sc.official, name)
+            self.assertEqual(sc.source, "supplementary_catalog_synthetic", name)
+            self.assertEqual(sc.dataset, S.SUPPLEMENTARY_DEV, name)
+
+    def test_official_scenarios_stay_official(self) -> None:
+        from lab import scenarios as S
+        for name in ("clean", "clean_buying", "uncooperative", "override_category"):
+            self.assertTrue(S.BY_NAME[name].official, name)
+            self.assertIsNone(S.BY_NAME[name].dataset, name)
+
+    def test_the_sealed_holdout_has_no_scenario_to_run_it_through(self) -> None:
+        # The surest way not to run a sealed split is to give it no way in.
+        from lab import scenarios as S
+        for name, sc in S.BY_NAME.items():
+            self.assertNotIn("holdout", str(sc.dataset or ""), name)
+
+    def test_the_four_supplementary_slices_partition_the_split(self) -> None:
+        from lab import scenarios as S
+        rows = S.load_dataset(S.SUPPLEMENTARY_DEV)
+        total = 0
+        for name in ("buying", "browsing", "intent_override", "boundary"):
+            keep = S.BY_NAME[f"supplementary_{name}"].keep
+            total += sum(1 for r in rows if keep(r))
+        self.assertEqual(total, len(rows))

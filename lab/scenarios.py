@@ -33,6 +33,10 @@ import evaluator.local_evaluator as E
 import starter.agent as A
 
 CATALOG, DATASET = "data/catalog.jsonl", "data/public_set.jsonl"
+SUPPLEMENTARY_DEV = "data/supplementary_dev.jsonl"
+# data/supplementary_holdout.jsonl is deliberately absent: it is sealed until
+# Phase 4, Phase 6 and the final defaults are all frozen, and the surest way
+# not to run it is to give it no Scenario to be run through.
 
 
 @dataclass
@@ -49,6 +53,12 @@ class Scenario:
     sample_tf: Callable | None = None
     # Selects a SUBSET of the public sessions instead of mutating them.
     keep: Callable | None = None
+    # A different sample file. Everything else -- evaluator, catalog, metrics
+    # -- is unchanged, so a supplementary result is comparable in shape while
+    # staying clearly marked as not official.
+    dataset: str | None = None
+    source: str = "official_public_set"
+    official: bool = True
     mutate: Callable | None = None
     init: Callable | None = None
     reply: Callable | None = None
@@ -94,7 +104,7 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
         return orig_reply(sample, ask_attribute, disclosed, boundary_used)
 
     seen_samples: list[str] = []
-    work = samples
+    work = load_dataset(scenario.dataset) if scenario.dataset else samples
     if scenario.keep:
         # Segmenting the public set rather than mutating it: a per-route
         # breakdown of the SAME sessions is the only way to say whether a
@@ -545,6 +555,22 @@ LIBRARY: list[Scenario] = [
              reply=_reply_negation_scope,
              notes="consumed by fb46755 and by the 'steer clear' fix; "
                    "no longer evidence of generalisation -- see SEALED_NEGATION_V2"),
+    # ---- supplementary, non-official ------------------------------------
+    # Robustness VETO evidence only: a supplementary gain can never offset an
+    # official regression, and a supplementary collapse can veto a default.
+    # The sealed holdout is never registered here -- it has no Scenario, so it
+    # cannot be run by accident.
+    Scenario("supplementary_dev",
+             "NON-OFFICIAL: 1000 catalog-synthetic sessions, robustness veto only",
+             dataset=SUPPLEMENTARY_DEV, source="supplementary_catalog_synthetic",
+             official=False,
+             notes="targets disjoint from the public set and from the sealed holdout"),
+    *[Scenario(f"supplementary_{name}",
+               f"NON-OFFICIAL: supplementary {name} slice",
+               dataset=SUPPLEMENTARY_DEV, source="supplementary_catalog_synthetic",
+               official=False,
+               keep=(lambda st: (lambda s: s.get("scenario_type") == st))(name))
+       for name in ("buying", "browsing", "intent_override", "boundary")],
     Scenario("clean_buying",
              "Pillar I: the 80 public sessions the Buying route actually handles",
              keep=lambda s: s.get("scenario_type") == "buying"),
@@ -577,6 +603,16 @@ LIBRARY: list[Scenario] = [
 ]
 
 BY_NAME = {s.name: s for s in LIBRARY}
+
+
+_DATASETS: dict[str, list] = {}
+
+
+def load_dataset(path: str) -> list:
+    """Samples from an alternate file, cached. The catalog is shared."""
+    if path not in _DATASETS:
+        _DATASETS[path] = E.load_jsonl(path)
+    return _DATASETS[path]
 
 
 def load():
