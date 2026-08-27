@@ -226,6 +226,34 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
         out["unstarved_latency_p95"] = _percentile(
             [t.get("retrieval_ms", 0.0) for t in non], 0.95)
     out.update(_question_telemetry(agent))
+    # Route-topology evidence. The Pillar I claim rests on these and not on a
+    # route label, so they are recorded for every arm including the ones with
+    # no dense source at all.
+    dense_turns = [t for t in turns if t.get("dense_returned") is not None]
+    if dense_turns:
+        out["dense_turn_rate"] = round(len(dense_turns) / len(turns), 4)
+        out["dense_returned"] = round(sum(t["dense_returned"] for t in dense_turns)
+                                      / len(dense_turns), 2)
+        out["dense_only"] = round(sum(t.get("dense_only", 0) for t in dense_turns)
+                                  / len(dense_turns), 2)
+        out["dense_overlap"] = round(sum(t.get("dense_overlap", 0) for t in dense_turns)
+                                     / len(dense_turns), 2)
+    by_plane: dict[str, int] = {}
+    fusion: dict[str, int] = {}
+    for t in turns:
+        by_plane[t.get("plane", "?")] = by_plane.get(t.get("plane", "?"), 0) + 1
+        if t.get("fusion"):
+            fusion[t["fusion"]] = fusion.get(t["fusion"], 0) + 1
+    out["plane_counts"] = by_plane
+    out["fusion_counts"] = fusion
+    routes: dict[str, int] = {}
+    transitions = 0
+    for state in (getattr(agent, "_sessions", {}) or {}).values():
+        hist = state.get("route_history") or []
+        transitions += max(0, len(hist) - 1)
+        routes[state.get("route", "?")] = routes.get(state.get("route", "?"), 0) + 1
+    out["final_route_counts"] = routes
+    out["route_transitions"] = transitions
     if starved_scored:
         out["starved_recall_pool"] = round(starved_pool_hits / starved_scored, 4)
     if scored:

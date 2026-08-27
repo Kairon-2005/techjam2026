@@ -185,13 +185,14 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
     # question_attribute_counts is a histogram, not a scalar, so the numeric
     # aggregation above drops it. Summing across seeds keeps the shape of what
     # was asked, which is the whole point of recording it.
-    counts: dict[str, int] = {}
-    for m in per_seed.values():
-        for name, n in (m["telemetry"].get("question_attribute_counts") or {}).items():
-            counts[name] = counts.get(name, 0) + n
-    if counts:
-        row["telemetry"]["question_attribute_counts"] = dict(
-            sorted(counts.items(), key=lambda kv: -kv[1]))
+    for field in ("question_attribute_counts", "plane_counts", "fusion_counts",
+                  "final_route_counts"):
+        counts: dict[str, int] = {}
+        for m in per_seed.values():
+            for name, n in (m["telemetry"].get(field) or {}).items():
+                counts[name] = counts.get(name, 0) + n
+        if counts:
+            row["telemetry"][field] = dict(sorted(counts.items(), key=lambda kv: -kv[1]))
     names = {n for m in per_seed.values() for n in m["slices"]}
     row["slices"] = {
         name: {k: round(statistics.fmean(

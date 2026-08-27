@@ -16,6 +16,8 @@ import json
 import math
 import os
 import re
+import array
+import random
 import sqlite3
 import sys
 import time
@@ -237,6 +239,18 @@ DEFAULTS = {
     "browsing_neighbour_budget": 120,
     "mixed_depth": 900,
     "mixed_category_budget": 60,
+    # ---- Phase 4: dense candidate source (Browsing / Mixed only) --------
+    # Buying stays lexical in every arm: a typed constraint is not something a
+    # co-occurrence neighbourhood should be allowed to override.
+    "dense_browsing": False,      # dense source on the browsing plane
+    "dense_mixed": False,         # ...and on the mixed plane
+    "dense_fusion": "rrf",        # "rrf" | "dense_only"
+    "dense_depth": 300,
+    "dense_dim": 32,
+    "dense_seed": 20260827,
+    "rrf_k": 60,
+    "rrf_weight_lexical": 1.0,
+    "rrf_weight_dense": 1.0,
     # Off until measured: hardness has never had a live consumer, so switching
     # this on by default would be a claim without an experiment behind it.
     "rescue_relax": False,        # surrender unsatisfiable constraints in order
@@ -316,6 +330,7 @@ class _Catalog:
         # memory that the compatibility path (dual_plane off) must not pay.
         self._cat_index: "_CategoryIndex | None" = None
         self._facet_index: "_FacetIndex | None" = None
+        self._dense_index: "_DenseIndex | None" = None
         self.title: dict[str, str] = {}   # short display title for explanations
         self.pop: dict[str, float] = {}
         self.pop_pct: dict[str, float] = {}
@@ -381,6 +396,14 @@ class _Catalog:
             self._facet_index = _FacetIndex(self.category_index.ids, self.text,
                                             self.store, self.dept)
         return self._facet_index
+
+    def dense_index(self, dim: int, seed: int) -> "_DenseIndex":
+        """Built once per catalog and shared, like the other indexes. Only
+        reached when a route actually asks for a dense candidate source, so
+        the lexical default pays nothing for it."""
+        if self._dense_index is None or (self._dense_index.dim, self._dense_index.seed) != (dim, seed):
+            self._dense_index = _DenseIndex(self, dim=dim, seed=seed)
+        return self._dense_index
 
     def index_stats(self) -> dict:
         """Shape and cost of the Phase 2B indexes, for the telemetry row."""
@@ -679,6 +702,127 @@ class _FacetIndex:
         primitive the buying plane is allowed to use."""
         unknown = universe - self.present.get(facet, set())
         return frozenset((self.match(facet, value) & universe) | unknown)
+
+
+class _DenseIndex:
+    """Reflective Random Indexing over the catalog, as sign signatures.
+
+    Phase 4's requirement is a candidate source that is genuinely NOT the
+    lexical one. A random projection of TF-IDF would not be: it preserves
+    lexical inner products, so it returns BM25's neighbours through a
+    different arithmetic and would be a lexical hash wearing a vector costume.
+
+    The REFLECTION pass is what makes this co-occurrence-based. Terms are given
+    random index vectors; documents are summed from them; then term *context*
+    vectors are summed back from the documents each term appears in; then
+    documents are rebuilt from those contexts. Two products sharing no terms
+    can end up close, because their terms co-occur elsewhere in the catalog.
+
+    Measured on the real catalog: BM25 Top-100 and dense Top-100 overlap by
+    mean 0.020. Everything is stdlib, deterministic from a fixed seed, and
+    nothing is fetched at any point.
+    """
+
+    NONZERO = 6          # non-zeros per term index vector
+    TERMS_PER_DOC = 14   # highest-idf terms kept per product
+
+    def __init__(self, cat: "_Catalog", dim: int = 32, seed: int = 20260827) -> None:
+        self.dim, self.seed = int(dim), int(seed)
+        started = time.perf_counter()
+        self.asins: list[str] = sorted(cat.text)
+        doc_terms: list[list[str]] = []
+        for asin in self.asins:
+            blob = cat.feat.get(asin, "") or cat.text.get(asin, "")[:400]
+            toks = {t for t in TOKEN_RE.findall(blob) if len(t) > 2}
+            doc_terms.append(sorted(toks, key=lambda t: -cat.idf(t))[:self.TERMS_PER_DOC])
+        vocab = sorted({t for d in doc_terms for t in d})
+        self.tid = {t: i for i, t in enumerate(vocab)}
+        dim = self.dim
+
+        # Pass 1: documents from term index vectors. array('f') rather than
+        # lists of floats -- the list version peaked at 239 MB, over budget.
+        doc_vec = array.array("f", bytes(4 * dim * len(doc_terms)))
+        index_vec: dict[str, list[tuple[int, int]]] = {}
+        for term in vocab:
+            rng = random.Random(f"{seed}:{term}")
+            picks = rng.sample(range(dim), min(self.NONZERO, dim))
+            index_vec[term] = [(p, 1 if i % 2 == 0 else -1) for i, p in enumerate(picks)]
+        for i, terms in enumerate(doc_terms):
+            base = i * dim
+            for term in terms:
+                weight = cat.idf(term)
+                for p, sign in index_vec[term]:
+                    doc_vec[base + p] += sign * weight
+
+        # Reflection: term contexts from the documents they occur in.
+        self.term_ctx = array.array("f", bytes(4 * dim * len(vocab)))
+        for i, terms in enumerate(doc_terms):
+            base = i * dim
+            for term in terms:
+                tbase = self.tid[term] * dim
+                for p in range(dim):
+                    self.term_ctx[tbase + p] += doc_vec[base + p]
+        del doc_vec
+
+        # Pass 2: documents rebuilt from term CONTEXTS, then thresholded.
+        self.sig: list[int] = []
+        for terms in doc_terms:
+            acc = [0.0] * dim
+            for term in terms:
+                tbase = self.tid[term] * dim
+                for p in range(dim):
+                    acc[p] += self.term_ctx[tbase + p]
+            bits = 0
+            for p in range(dim):
+                if acc[p] > 0.0:
+                    bits |= 1 << p
+            self.sig.append(bits)
+        self.build_seconds = round(time.perf_counter() - started, 2)
+        self.vocab_size = len(vocab)
+
+    def encode(self, terms) -> "int | None":
+        """Query signature, or None when no term is in the vocabulary."""
+        dim = self.dim
+        acc = [0.0] * dim
+        hit = False
+        for term in terms:
+            j = self.tid.get(term)
+            if j is None:
+                continue
+            hit = True
+            tbase = j * dim
+            for p in range(dim):
+                acc[p] += self.term_ctx[tbase + p]
+        if not hit:
+            return None
+        bits = 0
+        for p in range(dim):
+            if acc[p] > 0.0:
+                bits |= 1 << p
+        return bits
+
+    def search(self, terms, limit: int) -> list[tuple[str, float]]:
+        """Nearest signatures by Hamming distance, best first.
+
+        Returns a normalised similarity so the caller never has to know the
+        dimension; RRF uses rank anyway, and this keeps the scores readable in
+        a trace.
+        """
+        query = self.encode(terms)
+        if query is None or limit < 1:
+            return []
+        dim = self.dim
+        sig = self.sig
+        order = sorted(range(len(sig)), key=lambda i: (query ^ sig[i]).bit_count())
+        return [(self.asins[i], 1.0 - (query ^ sig[i]).bit_count() / dim)
+                for i in order[:limit]]
+
+    def identity(self, catalog_sha: str) -> dict:
+        """What this artefact IS. No file, no download, no fetch."""
+        return {"builder": "reflective_random_indexing_v1", "dim": self.dim,
+                "seed": self.seed, "vocab": self.vocab_size,
+                "catalog_sha256": catalog_sha, "offline": True,
+                "build_seconds": self.build_seconds}
 
 
 def clear_catalog_cache() -> None:
@@ -1687,7 +1831,17 @@ class Agent:
         trace["route_candidates"] = {"bm25": len(raw), "expansion": len(expansion),
                                      "deferred": len(overflow)}
         trace["diversity_deferred"] = len(overflow)
-        return primary + expansion + overflow
+        if not cfg["dense_browsing"]:
+            return primary + expansion + overflow
+        dense = self._dense_source(state, cfg, trace, {a for a, _ in raw})
+        trace["route_candidates"]["dense"] = len(dense)
+        if cfg["dense_fusion"] == "dense_only":
+            # Arm B: the lexical list is dropped entirely, which is the point
+            # of the arm -- it measures what dense alone can carry.
+            trace["fusion"] = "dense_only"
+            return dense + overflow
+        trace["fusion"] = "rrf"
+        return self._rrf([primary, dense], cfg, trace) + expansion + overflow
 
     def _plane_mixed(self, state: dict, cfg: dict, limit: int,
                      trace: dict) -> list:
@@ -1706,8 +1860,57 @@ class Agent:
         expansion = self._shelf_source(
             state, cfg, frozenset(i for i in members if cats.asins[i] not in seen),
             int(cfg["mixed_category_budget"]), floor)
+        lexical = [(a, sc, "primary") for a, sc in raw]
         trace["route_candidates"] = {"bm25": len(raw), "expansion": len(expansion)}
-        return [(a, sc, "primary") for a, sc in raw] + expansion
+        if not cfg["dense_mixed"]:
+            trace["fusion"] = "lexical_only"
+            return lexical + expansion
+        # Mixed begins browsing-oriented and firms up as evidence arrives:
+        # once the customer has stated anything usable, _retarget() moves the
+        # session to Buying and this plane stops being consulted at all. Until
+        # then it fuses both sources rather than guessing which one is right.
+        dense = self._dense_source(state, cfg, trace, seen)
+        trace["route_candidates"]["dense"] = len(dense)
+        trace["fusion"] = "rrf"
+        trace["evidence_slots"] = sum(1 for sl in state["slots"] if sl.usable)
+        return self._rrf([lexical, dense], cfg, trace) + expansion
+
+    def _dense_source(self, state: dict, cfg: dict, trace: dict,
+                      seen: set) -> list:
+        """Dense candidates the lexical route did not already return.
+
+        Tagged `dense` rather than `expansion` so the funnel's quotas and the
+        telemetry can both tell where a candidate came from -- which is the
+        whole Pillar I claim and cannot rest on a route label.
+        """
+        index = self.cat.dense_index(int(cfg["dense_dim"]), int(cfg["dense_seed"]))
+        hits = index.search(state["terms"][: cfg["term_cap"]], int(cfg["dense_depth"]))
+        trace["dense_returned"] = len(hits)
+        fresh = [(a, sc, "dense") for a, sc in hits if a not in seen]
+        trace["dense_only"] = len(fresh)
+        trace["dense_overlap"] = len(hits) - len(fresh)
+        return fresh
+
+    @staticmethod
+    def _rrf(ranked_lists: list, cfg: dict, trace: dict) -> list:
+        """Weighted Reciprocal Rank Fusion over already-ranked sources.
+
+        Rank-based, so the lexical BM25 scale and the dense Hamming similarity
+        never have to be made commensurable -- which is the reason to start
+        here rather than with a score blend.
+        """
+        k = float(cfg["rrf_k"])
+        weights = {"primary": float(cfg["rrf_weight_lexical"]),
+                   "dense": float(cfg["rrf_weight_dense"])}
+        fused: dict[str, float] = {}
+        origin: dict[str, str] = {}
+        for rows in ranked_lists:
+            for rank, (asin, _score, source) in enumerate(rows):
+                fused[asin] = fused.get(asin, 0.0) + weights.get(source, 1.0) / (k + rank + 1)
+                origin.setdefault(asin, source)
+        order = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
+        trace["rrf_fused"] = len(order)
+        return [(asin, score, origin[asin]) for asin, score in order]
 
     def _funnel(self, tagged: list, cfg: dict, trace: dict) -> list:
         """Deterministic preselection to a fixed reranker budget.

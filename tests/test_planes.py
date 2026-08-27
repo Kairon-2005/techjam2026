@@ -515,3 +515,85 @@ class QuestionUtilityTest(PlaneTestBase):
         self.assertEqual(len(picked), 2)   # both produce a legal attribute
         for name in picked:
             self.assertIn(name, set(A.ATTR_VOCAB) | {"other"})
+
+
+class DenseRouteTest(PlaneTestBase):
+    """Phase 4: Browsing gets dense candidates, Buying never does."""
+
+    def dense(self, **cfg) -> A.Agent:
+        return self.agent(dense_browsing=True, dense_dim=16, **cfg)
+
+    def test_the_dense_route_is_deterministic(self) -> None:
+        one = self.dense().cat.dense_index(16, 20260827)
+        A.clear_catalog_cache()
+        two = A.Agent(self.path).cat.dense_index(16, 20260827)
+        self.assertEqual(one.sig, two.sig, "same seed produced a different index")
+
+    def test_a_different_seed_gives_a_different_index(self) -> None:
+        ag = self.dense()
+        self.assertNotEqual(ag.cat.dense_index(16, 1).sig,
+                            ag.cat.dense_index(16, 2).sig)
+
+    def test_an_out_of_vocabulary_query_returns_nothing_rather_than_noise(self) -> None:
+        index = self.dense().cat.dense_index(16, 20260827)
+        self.assertIsNone(index.encode(["zzzzqqq", "notaword"]))
+        self.assertEqual(index.search(["zzzzqqq"], 10), [])
+
+    def test_buying_never_receives_dense_candidates(self) -> None:
+        # Buying is lexical in every arm: a typed constraint is not something
+        # a co-occurrence neighbourhood may override.
+        ag = self.dense(dense_mixed=True)
+        state = self.state_with(ag, "", self.hard("material", "silk"))
+        state["terms"] = ["silk", "dress"]
+        trace: dict = {}
+        tagged = ag._plane_buying(state, ag.cfg, 10, trace)
+        self.assertNotIn("dense", {src for _, _, src in tagged})
+        self.assertNotIn("dense", trace.get("route_candidates", {}))
+
+    def test_browsing_receives_dense_candidates(self) -> None:
+        ag = self.dense()
+        state = self.state_with(ag, "women dresses")
+        state["terms"] = ["dress", "silk"]
+        trace: dict = {}
+        ag._plane_browsing(state, ag.cfg, 10, trace)
+        self.assertIn("dense", trace["route_candidates"])
+        self.assertEqual(trace["fusion"], "rrf")
+
+    def test_dense_only_fusion_drops_the_lexical_list(self) -> None:
+        ag = self.dense(dense_fusion="dense_only")
+        state = self.state_with(ag, "women dresses")
+        state["terms"] = ["dress"]
+        trace: dict = {}
+        tagged = ag._plane_browsing(state, ag.cfg, 10, trace)
+        self.assertEqual(trace["fusion"], "dense_only")
+        self.assertNotIn("primary", {src for _, _, src in tagged})
+
+    def test_rrf_is_rank_based_not_score_based(self) -> None:
+        # The point of RRF here: BM25 magnitudes and Hamming similarities never
+        # have to be made commensurable.
+        ag = self.dense()
+        lexical = [("x", 900.0, "primary"), ("y", 1.0, "primary")]
+        dense = [("y", 0.02, "dense"), ("z", 0.01, "dense")]
+        fused = ag._rrf([lexical, dense], ag.cfg, {})
+        names = [a for a, _, _ in fused]
+        self.assertEqual(names[0], "y", "the doubly-ranked candidate must win")
+        self.assertEqual(set(names), {"x", "y", "z"})
+
+    def test_rrf_records_each_candidate_s_origin(self) -> None:
+        ag = self.dense()
+        fused = ag._rrf([[("x", 5.0, "primary")], [("q", 0.5, "dense")]], ag.cfg, {})
+        origin = {a: src for a, _, src in fused}
+        self.assertEqual(origin["x"], "primary")
+        self.assertEqual(origin["q"], "dense")
+
+    def test_the_dense_flags_are_off_by_default(self) -> None:
+        self.assertFalse(A.DEFAULTS["dense_browsing"])
+        self.assertFalse(A.DEFAULTS["dense_mixed"])
+
+    def test_the_artefact_identifies_itself_and_is_offline(self) -> None:
+        index = self.dense().cat.dense_index(16, 20260827)
+        ident = index.identity("deadbeef")
+        self.assertTrue(ident["offline"])
+        self.assertEqual(ident["dim"], 16)
+        self.assertEqual(ident["seed"], 20260827)
+        self.assertEqual(ident["builder"], "reflective_random_indexing_v1")
