@@ -81,21 +81,49 @@ nothing at all — is proven at unit level.
 | `ASK_STRUCTURED` | candidate pool spans too many shelves → ask a structured question |
 | `REJECT_PROFILE_PRIOR` | profile tags are generic or already covered by session evidence → reject the profile prior |
 
-**The distribution is the evidence, and it is largely encouraging.**
-`SUPPRESS_ABANDONED` fires *only* on the category-pivot scenario;
-`ROTATE_OR_BROADEN` *only* where customers ask for more; `BROADEN_THIN_DRY`
-concentrates where queries are thinnest. Codes land where their names say they
-should, which is what legibility means here.
+### What this does and does not establish
+
+**Established: reason-code LOCALIZATION.** `SUPPRESS_ABANDONED` fires *only*
+on the category-pivot scenario; `ROTATE_OR_BROADEN` *only* where customers ask
+for more; `BROADEN_THIN_DRY` concentrates where queries are thinnest. Codes
+land where their names say they should, and they are computed from declared
+snapshot fields rather than copied from the agent's own choice.
+
+**Not established: the action policy.** Nothing here shows that acting on
+these codes would help. They were never allowed to act, so the histogram is
+evidence that the *labels* are well-placed, not that the *decisions* attached
+to them are right. Phase 6A validated a vocabulary, not a controller.
+
+**`ASK_STRUCTURED` at 77% is not merely a threshold problem.** It exposes a
+missing concept: **clarification eligibility**. The code fires whenever the
+pool spans enough shelves, with no notion of whether asking a structured
+question is *appropriate* on this turn — the real `_pick_attribute` gates
+that behind a first-two-`other` rule, an uncertain/easier branch and a dry
+give-up guard, none of which the snapshot models. Retuning
+`overgeneral_cats` would move the rate without supplying the missing gate.
+
+**Multi-signal precedence is undefined.** `decide()` appends reason codes in
+source order and lets later branches overwrite `clarification_mode`. That is
+adequate for observation and inadequate for control: when request-more,
+thin-and-dry, uncertain and overgeneral fire together, nothing states which
+should win. A precedence table has to precede any takeover.
+
+**Most codes explain existing mechanisms rather than adding product
+behaviour.** `BROADEN_THIN_DRY` narrates `_starved()`; `ASK_STRUCTURED`
+narrates `_overgeneral()`; `SUPPRESS_ABANDONED` narrates the abandoned-span
+logic. That is exactly what a foundation phase should produce — a legible
+account of what already happens — but it should not be read as new capability.
 
 **Two honest qualifications.**
 
-1. `PROPOSE_RELAX_LOW_CONFIDENCE` **never fires**. Every hard slot on these
+1. `PROPOSE_RELAX_LOW_CONFIDENCE` **never fires**, and is the one code with no
+   existing mechanism behind it. Every hard slot on these
    sets arrives through the template parser at confidence 1.0. It is unit-
    tested with a hand-built slot and has never been observed in the wild. It
    is a code the system can emit, not a capability demonstrated on data.
-2. `ASK_STRUCTURED` accounts for **77%** of all codes. A signal that fires on
-   most turns carries little information per firing; if Phase 6B acts on
-   these, that threshold needs revisiting before it drives anything.
+2. `ASK_STRUCTURED` accounts for **77%** of all codes — see the eligibility
+   gap above. Phase 6B must not let it drive behaviour; it stays a historical
+   observation code, and any action needs its own code gated on eligibility.
 
 **Route agreement is 1.000 and proves nothing.** The default row copies
 `snapshot.route`, so this partly measures itself. Reported as the diagnostic
