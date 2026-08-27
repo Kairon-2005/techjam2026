@@ -69,7 +69,11 @@ WATCHED = (
     "data/catalog.jsonl",
 )
 
-RESULT_PREFIX = "lab/results"
+# Ledgers churn by definition -- appending a row, or an invalidation for one,
+# dirties the tree -- so they are excluded from the fingerprint's dirty set.
+# invalidations.jsonl was missing here, so recording an aborted run made the
+# lease refuse to start the re-run of that same experiment.
+LEDGER_PREFIXES = ("lab/results", "lab/invalidations")
 JOURNAL_ENV = "LAB_JOURNAL"
 
 
@@ -100,7 +104,7 @@ def _dirty(cwd: str | Path | None = None) -> list[str]:
     raw = _sh("git", "status", "--porcelain=v1", "-z", "--",
               "starter", "lab", "tests", "evaluator", "data", cwd=cwd)
     return sorted(e[3:] for e in raw.split("\0")
-                  if len(e) > 3 and not e[3:].startswith(RESULT_PREFIX))
+                  if len(e) > 3 and not e[3:].startswith(LEDGER_PREFIXES))
 
 
 def fingerprint(cwd: str | Path | None = None) -> dict:
