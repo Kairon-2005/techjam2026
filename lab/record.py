@@ -220,9 +220,12 @@ def matrix(scenario_names, configs: dict[str, dict], seeds: tuple[int, ...],
     data = data or S.load()
     rows = []
     for name in scenario_names:
-        # Every clean* scenario is deterministic: no reply, mutate or init
-        # hook, so the seed cannot change anything.
-        use = (0,) if name.startswith("clean") else seeds
+        # A scenario with no reply, mutate, init or sample_tf hook cannot use
+        # its seed for anything, so running five is running one five times.
+        # This was costing 5x on supplementary_dev, which is 1000 sessions.
+        scen = S.BY_NAME[name]
+        deterministic = not any((scen.reply, scen.mutate, scen.init, scen.sample_tf))
+        use = (0,) if deterministic else seeds
         print(f"\n=== {name}  (seeds={list(use)}) ===")
         print(f"  {'config':<22}{'score':>10}{'sd':>8}{'HR@10':>8}{'MRR':>8}{'MTTC':>7}")
         for label, cfg in configs.items():
