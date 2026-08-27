@@ -47,6 +47,8 @@ class Scenario:
     name: str
     probes: str
     sample_tf: Callable | None = None
+    # Selects a SUBSET of the public sessions instead of mutating them.
+    keep: Callable | None = None
     mutate: Callable | None = None
     init: Callable | None = None
     reply: Callable | None = None
@@ -86,6 +88,11 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
         return orig_reply(sample, ask_attribute, disclosed, boundary_used)
 
     work = samples
+    if scenario.keep:
+        # Segmenting the public set rather than mutating it: a per-route
+        # breakdown of the SAME sessions is the only way to say whether a
+        # route helped the traffic it actually handles.
+        work = [s for s in work if scenario.keep(s)]
     if scenario.sample_tf:
         work = [scenario.sample_tf(s, prods, _rng_for(scenario.name, s, seed)) for s in samples]
 
@@ -423,6 +430,12 @@ LIBRARY: list[Scenario] = [
              reply=_reply_negation_scope,
              notes="consumed by fb46755 and by the 'steer clear' fix; "
                    "no longer evidence of generalisation -- see SEALED_NEGATION_V2"),
+    Scenario("clean_buying",
+             "Pillar I: the 80 public sessions the Buying route actually handles",
+             keep=lambda s: s.get("scenario_type") == "buying"),
+    Scenario("clean_browsing",
+             "Pillar I: the 80 public sessions the Browsing route actually handles",
+             keep=lambda s: s.get("scenario_type") == "browsing"),
     Scenario("negative_preference_paraphrase",
              "Pillar II: rejections worded outside the tuning scenario's vocabulary",
              reply=_reply_negative_paraphrase,
