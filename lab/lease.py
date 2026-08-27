@@ -165,7 +165,11 @@ def _acquire(purpose: str) -> None:
 @contextlib.contextmanager
 def _worktree(commit: str, origin: Path):
     """A detached checkout of `commit`, with the untracked catalog linked in."""
-    tmp = Path(tempfile.mkdtemp(prefix="techjam-lease-"))
+    # realpath: on macOS mkdtemp hands back /var/folders/... while every path
+    # the child reports comes back as /private/var/folders/..., and a run_dir
+    # that does not match what the child sees makes the isolation assertion
+    # unfalsifiable in the direction that matters.
+    tmp = Path(tempfile.mkdtemp(prefix="techjam-lease-")).resolve()
     tree = tmp / "tree"
     proc = subprocess.run(["git", "worktree", "add", "--detach", str(tree), commit],
                           capture_output=True, text=True)

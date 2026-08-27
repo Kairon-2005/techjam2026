@@ -142,10 +142,11 @@ class LeaseIsolationTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             rows = ls.rows()
         self.assertEqual(len(rows), 1)
-        loaded = rows[0]["agent"]
-        self.assertTrue(loaded.startswith(str(ls.run_dir)),
+        loaded = os.path.realpath(rows[0]["agent"])
+        worktree = os.path.realpath(ls.run_dir)
+        self.assertTrue(loaded.startswith(worktree),
                         f"child imported {loaded}, not the isolated worktree")
-        self.assertNotIn(str(ls.origin / "starter"), loaded)
+        self.assertNotIn(os.path.realpath(ls.origin / "starter"), loaded)
 
 
 if __name__ == "__main__":
