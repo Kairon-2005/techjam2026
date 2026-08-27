@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -137,7 +137,11 @@ class LeaseIsolationTest(unittest.TestCase):
         script = ("import starter.agent as A, os, json;"
                   "open(os.environ['LAB_JOURNAL'],'a').write("
                   "json.dumps({'tag':'iso','agent':A.__file__})+chr(10))")
-        with L.lease("isolation-test") as ls:
+        # A test must never append to the real ledger: `lease` flushes to
+        # `log` on exit, and the default is lab/results.jsonl.
+        scratch = Path(tempfile.mkdtemp(prefix="lease-test-")) / "results.jsonl"
+        self.addCleanup(shutil.rmtree, scratch.parent, ignore_errors=True)
+        with L.lease("isolation-test", log=scratch) as ls:
             rc = ls.run(script, expected_cells=1)
             self.assertEqual(rc, 0)
             rows = ls.rows()
