@@ -1,0 +1,109 @@
+{
+  "catalog": {
+    "path": "data/catalog.jsonl",
+    "row_count": 50000,
+    "sha256": "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67"
+  },
+  "claims": {
+    "official": false,
+    "reconstructs_private_labels": false,
+    "selection_depends_on_agent_outputs": false,
+    "source": "supplementary_catalog_synthetic",
+    "uses_purchase_history": false,
+    "uses_review_text": false
+  },
+  "generator_commit": "edcff4d",
+  "generator_config": {
+    "allow_upstream_purchase_or_review_data": false,
+    "exclude_public_targets": true,
+    "generator_seed": 20260827,
+    "generator_version": "1.0.0",
+    "max_turns": 10,
+    "minimum_safe_facts": 2,
+    "override_turns": [
+      3,
+      4
+    ],
+    "scenario_mix": {
+      "boundary": 0.05,
+      "browsing": 0.4,
+      "buying": 0.4,
+      "intent_override": 0.15
+    },
+    "schema_version": "supplementary-catalog-v1",
+    "selection_strategy": "category_stratified_hash_round_robin",
+    "splits": {
+      "supplementary_dev": {
+        "sealed": false,
+        "seed_offset": 0,
+        "size": 1000
+      },
+      "supplementary_holdout": {
+        "sealed": true,
+        "seed_offset": 1000003,
+        "size": 1000
+      }
+    },
+    "top_k": 10
+  },
+  "generator_version": "1.0.0",
+  "holdout_contract": {
+    "forbidden": [
+      "parameter_tuning",
+      "candidate_selection",
+      "repeated_evaluation",
+      "per_row_manual_analysis"
+    ],
+    "permitted_before_one_shot_evaluation": [
+      "schema_validation",
+      "hash_validation",
+      "aggregate_statistics"
+    ],
+    "sealed": true,
+    "split": "supplementary_holdout"
+  },
+  "limitations": [
+    "Synthetic shopping intents derived from catalog metadata, not real shopping conversations.",
+    "Target selection increases category and attribute coverage and is not an estimate of the private distribution.",
+    "Neutral synthetic profiles do not evaluate purchase-history personalization.",
+    "Metadata assertions may be noisy or incomplete despite deterministic extraction.",
+    "Supplementary results can veto a brittle default but cannot override an official-set regression."
+  ],
+  "public_set": {
+    "excluded_target_count": 200,
+    "path": "data/public_set.jsonl",
+    "row_count": 200,
+    "sha256": "857259f7a438e6188ac63e18995b6ff4489bfcfc4a716a798b9a2aa0ee8f7579"
+  },
+  "schema_version": "supplementary-catalog-v1",
+  "splits": {
+    "supplementary_dev": {
+      "path": "data/supplementary_dev.jsonl",
+      "row_count": 1000,
+      "scenario_counts": {
+        "boundary": 50,
+        "browsing": 400,
+        "buying": 400,
+        "intent_override": 150
+      },
+      "sealed": false,
+      "sha256": "6cde11cca2612b772b5966fe81f793283b9380d76a14930b8e3478a25846f3fd",
+      "status": "development",
+      "target_count": 1000
+    },
+    "supplementary_holdout": {
+      "path": "data/supplementary_holdout.jsonl",
+      "row_count": 1000,
+      "scenario_counts": {
+        "boundary": 50,
+        "browsing": 400,
+        "buying": 400,
+        "intent_override": 150
+      },
+      "sealed": true,
+      "sha256": "8f0dae7f2ab39d45a0b9f3a443eddb7ebb0b41a81241e3144853fd6484295868",
+      "status": "sealed_unrun",
+      "target_count": 1000
+    }
+  }
+}
