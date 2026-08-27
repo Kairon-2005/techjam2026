@@ -1,0 +1,31 @@
+{
+  "schema_version": "supplementary-catalog-v1",
+  "generator_version": "1.0.0",
+  "generator_seed": 20260827,
+  "selection_strategy": "category_stratified_hash_round_robin",
+  "splits": {
+    "supplementary_dev": {
+      "size": 1000,
+      "seed_offset": 0,
+      "sealed": false
+    },
+    "supplementary_holdout": {
+      "size": 1000,
+      "seed_offset": 1000003,
+      "sealed": true
+    }
+  },
+  "scenario_mix": {
+    "buying": 0.40,
+    "browsing": 0.40,
+    "intent_override": 0.15,
+    "boundary": 0.05
+  },
+  "override_turns": [3, 4],
+  "max_turns": 10,
+  "top_k": 10,
+  "minimum_safe_facts": 2,
+  "exclude_public_targets": true,
+  "allow_upstream_purchase_or_review_data": false
+}
+
