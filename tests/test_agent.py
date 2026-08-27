@@ -399,6 +399,12 @@ class Phase1StateTest(unittest.TestCase):
         # "shown" is repopulated for the NEW result set, not carried over
         self.assertLessEqual(len(state["shown"]), 10)
 
+    # These three pin PHASE 1's widening, so they pin the pre-Phase-2 retrieval
+    # path explicitly. Under the arm C default every turn retrieves at least
+    # buying_depth and the limit no longer reveals whether widening fired; the
+    # arm C behaviour is covered by tests/test_planes.StarvationBypassTest.
+    LEGACY = {"deep_funnel": False, "starvation_bypass": False}
+
     def test_a_rich_but_stalled_query_is_not_widened(self) -> None:
         # Clean-set stalls carry ~17 terms and ~7 constraints; widening those
         # trades away MRR for recall that is not the binding constraint.
@@ -413,7 +419,8 @@ class Phase1StateTest(unittest.TestCase):
 
     def test_starved_evidence_widens_the_candidate_pool(self) -> None:
         A.clear_catalog_cache()
-        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
+        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500,
+                                           **self.LEGACY})
         limits: list[int] = []
         original = ag._retrieve
         ag._retrieve = lambda terms, limit, cfg=None, _o=original: (
@@ -426,7 +433,8 @@ class Phase1StateTest(unittest.TestCase):
 
     def test_widening_does_not_trigger_while_the_customer_cooperates(self) -> None:
         A.clear_catalog_cache()
-        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500})
+        ag = A.Agent(self.catalog, config={"starved_after": 1, "starved_candidates": 500,
+                                           **self.LEGACY})
         limits: list[int] = []
         original = ag._retrieve
         ag._retrieve = lambda terms, limit, cfg=None, _o=original: (

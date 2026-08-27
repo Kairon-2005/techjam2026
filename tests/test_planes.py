@@ -445,7 +445,7 @@ class StarvationBypassTest(PlaneTestBase):
 
 class CompatibilityTest(PlaneTestBase):
     def test_the_feature_off_path_is_untouched(self) -> None:
-        off = self.agent(dual_plane=False)
+        off = self.agent(dual_plane=False, deep_funnel=False)
         state = self.state_with(off, "women dresses", self.hard("material", "silk"))
         state["terms"] = ["dress", "silk"]
         cands, trace = off._candidates(state, off.cfg, 10)

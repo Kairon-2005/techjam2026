@@ -15,11 +15,18 @@ from pathlib import Path
 CATALOG = Path("data/catalog.jsonl")
 DATASET = Path("data/public_set.jsonl")
 
-# Default config (ask_policy="other_then_pool").
-EXPECTED = {"score": 0.928508, "hr10": 0.995, "mrr": 0.839361, "mttc": 2.04}
-# Pure-"other" asking, the config frozen at commit 2f85538. Retained as a lock
-# because the two must differ ONLY in MTTC: pool-aware questioning changes which
-# questions get asked, never the ranking, so hr10 and mrr have to match exactly.
+# The shipped default: Phase 2 arm C (deep_funnel on, category_plane off,
+# starvation_bypass on), adopted at Phase 2 closure.
+EXPECTED = {"score": 0.931967, "hr10": 0.995, "mrr": 0.852556, "mttc": 2.065}
+# The pre-Phase-2 retrieval path. Kept as a lock, not as history: every
+# robustness comparison in notes/ is paired against it, and the R3 arm A rows
+# in lab/results.jsonl reproduce exactly this.
+LEGACY = {"deep_funnel": False, "starvation_bypass": False}
+EXPECTED_LEGACY = {"score": 0.928508, "hr10": 0.995, "mrr": 0.839361, "mttc": 2.04}
+# Pure-"other" asking on the legacy path, the config frozen at 2f85538. It
+# locks a RELATIONSHIP as much as a number: it must differ from EXPECTED_LEGACY
+# only in MTTC, because pool-aware questioning changes which questions are
+# asked, never the ranking.
 EXPECTED_ASK_OTHER = {"score": 0.928708, "hr10": 0.995, "mrr": 0.839361, "mttc": 2.03}
 
 
@@ -38,21 +45,40 @@ class ScoreRegressionTest(unittest.TestCase):
         self.assertEqual(result["mrr"], EXPECTED["mrr"])
         self.assertEqual(result["mttc"], EXPECTED["mttc"])
 
+    def test_the_legacy_retrieval_path_still_reproduces_its_score(self) -> None:
+        from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
+        import starter.agent as A
+
+        samples = load_jsonl(DATASET)
+        ids, cats, prods = catalog_index(CATALOG)
+        result = evaluate(A.Agent(str(CATALOG), config=dict(LEGACY)),
+                          samples, ids, cats, prods)
+        self.assertEqual(result["recommended_technical_score"], EXPECTED_LEGACY["score"])
+        self.assertEqual(result["mrr"], EXPECTED_LEGACY["mrr"])
+
     def test_pure_other_asking_still_reproduces_the_frozen_score(self) -> None:
         from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
         import starter.agent as A
 
         samples = load_jsonl(DATASET)
         ids, cats, prods = catalog_index(CATALOG)
-        result = evaluate(A.Agent(str(CATALOG), config={"ask_policy": "other"}),
+        result = evaluate(A.Agent(str(CATALOG), config={**LEGACY, "ask_policy": "other"}),
                           samples, ids, cats, prods)
         self.assertEqual(result["recommended_technical_score"], EXPECTED_ASK_OTHER["score"])
         self.assertEqual(result["mttc"], EXPECTED_ASK_OTHER["mttc"])
 
     def test_pool_asking_costs_turns_but_never_ranking(self) -> None:
-        self.assertEqual(EXPECTED["hr10"], EXPECTED_ASK_OTHER["hr10"])
-        self.assertEqual(EXPECTED["mrr"], EXPECTED_ASK_OTHER["mrr"])
-        self.assertGreater(EXPECTED["mttc"], EXPECTED_ASK_OTHER["mttc"])
+        # Compared within one retrieval path -- across paths the ranking moves
+        # for reasons that have nothing to do with the ask policy.
+        self.assertEqual(EXPECTED_LEGACY["hr10"], EXPECTED_ASK_OTHER["hr10"])
+        self.assertEqual(EXPECTED_LEGACY["mrr"], EXPECTED_ASK_OTHER["mrr"])
+        self.assertGreater(EXPECTED_LEGACY["mttc"], EXPECTED_ASK_OTHER["mttc"])
+
+    def test_the_default_is_phase_2_arm_c(self) -> None:
+        import starter.agent as A
+        self.assertTrue(A.DEFAULTS["deep_funnel"])
+        self.assertFalse(A.DEFAULTS["category_plane"])
+        self.assertTrue(A.DEFAULTS["starvation_bypass"])
 
     def test_agent_spends_no_tokens(self) -> None:
         from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl

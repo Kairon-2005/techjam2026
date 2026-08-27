@@ -171,13 +171,17 @@ DEFAULTS = {
     # the R1/R2 rows already in the ledger stay reproducible: it means
     # deep_funnel AND category_plane.
     "dual_plane": False,
-    "deep_funnel": False,      # deep retrieval + deterministic Top-100 preselect
+    # PHASE 2 CLOSURE, arm C. deep retrieval + funnel is ON; the category
+    # plane stays OFF because R2 measured it as a net cost at BOTH retrieval
+    # depths. Accepted with one gate failing on human review: non-starved p95
+    # rises 33.5 -> 44.3 ms. That is a trade-off, not a pass.
+    "deep_funnel": True,       # deep retrieval + deterministic Top-100 preselect
     "category_plane": False,   # category constraint + category candidate source
     # On a starved turn, bypass the fixed funnel and restore the Phase 1
     # widened pool. A constant funnel_top otherwise discards exactly the
     # widening that _starved() just asked for: measured on uncooperative as
     # pool 400.4 without the funnel against 100.0 with it, costing 0.158.
-    "starvation_bypass": False,
+    "starvation_bypass": True,
     # Pins the route regardless of evidence. Used ONLY for the controlled
     # same-query Buying/Browsing/Mixed comparison, where the point is to hold
     # the query fixed and vary nothing but the plane.
