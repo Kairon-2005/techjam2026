@@ -1,35 +1,42 @@
-"""An exclusive, verified lease over the tree for the duration of one experiment.
+"""An exclusive, verified, isolated lease over one experiment run.
 
 Two sessions ran experiments against this repository at the same time. One was
 rewriting starter/agent.py while the other imported it; both appended to
-lab/results.jsonl; and one of them committed twice while an eight-cell matrix
-was in flight. Nothing in the recorder could see any of it, because
-`git_state()` samples the tree ONCE, at the moment each row is written. A run
-whose code moved underneath it therefore records whatever state happened to
-exist by the end -- and if the tree is clean by then, every row reports
-code_dirty=false. The resulting matrix carried three different agent_commit
-values and looked perfectly citable.
+lab/results.jsonl; and one committed twice while an eight-cell matrix was in
+flight. Nothing in the recorder could see it, because `git_state()` samples the
+tree ONCE, when each row is written. A run whose inputs move underneath it
+records whatever state happens to exist at the end -- and if the tree is clean
+by then, every row reports code_dirty=false. The matrix that provoked this
+module carried three different agent_commit values and looked perfectly citable.
 
-A lease closes three holes:
+A lease closes four holes:
 
-  EXCLUSION      an O_EXCL lock file, so a second run refuses to start rather
-                 than interleaving with the first.
-  VERIFICATION   a fingerprint -- HEAD, the dirty set, and the hash of every
-                 file that can change a number -- taken before the first cell
-                 and checked again after the last. A run that was mutated
-                 mid-flight stamps its own rows invalid instead of looking
-                 trustworthy.
-  ISOLATION      by default the run happens in a detached git worktree at a
-                 fixed commit, so there is nothing in its import path for
-                 another session to edit even in principle.
+  EXCLUSION      an O_EXCL lock; a second run refuses to start rather than
+                 interleaving. Stale locks from dead holders are broken once,
+                 loudly; live holders are never evicted.
+  ISOLATION      the run happens in a detached git worktree at a fixed commit,
+                 IN A SEPARATE INTERPRETER whose cwd and PYTHONPATH are that
+                 worktree. The first version of this module only chdir'd, so
+                 `import starter.agent` had already resolved against the origin
+                 tree before the lease was entered: rows claimed isolation
+                 while measuring the working copy. Isolation that does not
+                 cover the import path is not isolation.
+  VERIFICATION   HEAD, the dirty set, and the hash of every file that can
+                 change a number -- the 58 MB catalog included, reached
+                 through its symlink -- fingerprinted before the run and
+                 checked after it.
+  COMPLETION     a run that raises, is killed, or produces fewer cells than it
+                 promised is marked invalid. Unchanged hashes only prove
+                 nothing was edited; they say nothing about whether the
+                 experiment finished.
 
-Rows are journalled in memory and appended only after verification passes, so
-the ledger never gains a row whose provenance has not been checked.
+Rows are journalled by the child and appended to the ledger only after all
+four checks pass, so the ledger cannot gain a row whose provenance was never
+established.
 
-    from lab import lease, record
-    with lease.lease("phase15b-baseline") as ls:
-        record.matrix(["clean"], {"default": {}}, (0,), tag="phase15b")
-    print(ls.verdict)
+    with lease("phase15b") as ls:
+        ls.run(SCRIPT, expected_cells=25)
+    print(ls.verdict, ls.broke)
 """
 from __future__ import annotations
 
@@ -41,27 +48,29 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 LOCK_PATH = Path("lab/.experiment.lock")
 
-# Every file whose content can change a recorded number. public_set.jsonl is
-# included because a silently regenerated dataset would otherwise be invisible.
+# Every file whose content can change a recorded number. The catalog is here
+# because it is the largest single input and, in an isolated run, it is
+# reached through a symlink -- exactly the kind of indirection that hides a
+# swapped file. public_set.jsonl is here because a silently regenerated
+# dataset would otherwise be invisible.
 WATCHED = (
     "starter/agent.py",
     "lab/scenarios.py",
     "lab/record.py",
     "evaluator/local_evaluator.py",
     "data/public_set.jsonl",
+    "data/catalog.jsonl",
 )
 
-# The result logs churn by definition -- appending a row dirties the tree --
-# so they are excluded from the fingerprint's dirty set.
 RESULT_PREFIX = "lab/results"
-
-_ACTIVE: "Lease | None" = None
+JOURNAL_ENV = "LAB_JOURNAL"
 
 
 class LeaseBusy(RuntimeError):
@@ -79,7 +88,7 @@ def _sh(*args: str, cwd: str | Path | None = None) -> str:
 def _sha256(path: str | Path) -> str:
     try:
         h = hashlib.sha256()
-        with open(path, "rb") as fh:
+        with open(path, "rb") as fh:                 # follows symlinks
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
         return h.hexdigest()[:16]
@@ -95,12 +104,19 @@ def _dirty(cwd: str | Path | None = None) -> list[str]:
 
 
 def fingerprint(cwd: str | Path | None = None) -> dict:
-    """Everything that must hold still while an experiment runs."""
+    """Everything that must hold still while an experiment runs.
+
+    `links` records where each symlinked input actually pointed. A run whose
+    catalog symlink is repointed mid-flight has different data with an
+    identical path, and the hash alone would not say which file moved.
+    """
     root = Path(cwd or ".")
     return {
         "head": _sh("git", "rev-parse", "HEAD", cwd=cwd).strip() or "nogit",
         "dirty": _dirty(cwd),
         "files": {p: _sha256(root / p) for p in WATCHED},
+        "links": {p: os.path.realpath(root / p)
+                  for p in WATCHED if (root / p).is_symlink()},
     }
 
 
@@ -108,7 +124,7 @@ def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except OSError as exc:
-        return exc.errno == errno.EPERM   # exists, not ours
+        return exc.errno == errno.EPERM              # exists, not ours
     except (TypeError, ValueError):
         return False
     return True
@@ -119,6 +135,10 @@ def _read_lock() -> dict:
         return json.loads(LOCK_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _acquire(purpose: str) -> None:
@@ -138,13 +158,8 @@ def _acquire(purpose: str) -> None:
                 f"Wait for it to finish, or delete {LOCK_PATH} if you are "
                 f"certain that process is gone.")
         with os.fdopen(fd, "w") as fh:
-            json.dump({"pid": os.getpid(), "purpose": purpose,
-                       "started": dt_now()}, fh)
+            json.dump({"pid": os.getpid(), "purpose": purpose, "started": now()}, fh)
         return
-
-
-def dt_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 @contextlib.contextmanager
@@ -159,7 +174,8 @@ def _worktree(commit: str, origin: Path):
         raise LeaseBusy(f"could not isolate: {proc.stderr.strip()}")
     try:
         # data/catalog.jsonl is 58 MB and gitignored, so the checkout has no
-        # copy of it. Link rather than copy: it is read-only to the run.
+        # copy. Link rather than copy: the run only reads it, and the link
+        # target is fingerprinted so a swap cannot pass unnoticed.
         catalog = origin / "data" / "catalog.jsonl"
         if catalog.exists():
             (tree / "data").mkdir(parents=True, exist_ok=True)
@@ -177,19 +193,52 @@ class Lease:
     before: dict
     origin: Path
     run_dir: Path
-    isolated: str = ""            # commit the isolated worktree runs, if any
-    journal: list = dataclasses.field(default_factory=list)
+    journal_path: Path
+    isolated: str = ""
+    expected_cells: int = 0
+    completed_cells: int = 0
+    returncode: int = 0
+    aborted: str = ""
     verdict: str = "pending"
     broke: str = ""
 
-    def stamp(self) -> dict:
-        """Provenance fields the recorder merges into every row."""
-        return {"lease": {"purpose": self.purpose, "isolated": self.isolated,
-                          "head": self.before["head"][:7],
-                          "started": dt_now()}}
+    # ---- running -------------------------------------------------------
+    def run(self, script: str, expected_cells: int) -> int:
+        """Execute `script` in the isolated tree, in its own interpreter.
+
+        A separate process is the point, not an implementation detail: it is
+        the only way the import path can be the worktree rather than whatever
+        the parent had already imported.
+        """
+        self.expected_cells += int(expected_cells)
+        env = {**os.environ,
+               JOURNAL_ENV: str(self.journal_path),
+               "PYTHONPATH": str(self.run_dir),
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        proc = subprocess.run([sys.executable, "-u", "-c", script],
+                              cwd=str(self.run_dir), env=env)
+        self.returncode = proc.returncode
+        if proc.returncode != 0:
+            self.aborted = f"run exited {proc.returncode}"
+        return proc.returncode
+
+    # ---- verdict -------------------------------------------------------
+    def rows(self) -> list[dict]:
+        if not self.journal_path.exists():
+            return []
+        return [json.loads(line) for line in
+                self.journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    @property
+    def matrix_complete(self) -> bool:
+        return (not self.aborted
+                and self.expected_cells > 0
+                and self.completed_cells == self.expected_cells)
 
     def verify(self) -> str:
-        """"" if the run's inputs never moved, else what changed."""
+        """"" if nothing moved AND the run finished; else what went wrong."""
+        if self.aborted:
+            return self.aborted
         after = fingerprint(self.run_dir)
         if after["head"] != self.before["head"]:
             return (f"HEAD moved during the run: {self.before['head'][:7]} -> "
@@ -197,76 +246,91 @@ class Lease:
         moved = [p for p, h in after["files"].items()
                  if h != self.before["files"].get(p)]
         if moved:
-            return "files changed during the run: " + ", ".join(moved)
+            return "inputs changed during the run: " + ", ".join(moved)
+        relinked = [p for p, t in after["links"].items()
+                    if t != self.before["links"].get(p)]
+        if relinked:
+            return "symlinked inputs were repointed during the run: " + ", ".join(relinked)
         if after["dirty"] != self.before["dirty"]:
             gained = sorted(set(after["dirty"]) - set(self.before["dirty"]))
             lost = sorted(set(self.before["dirty"]) - set(after["dirty"]))
             return f"working tree changed during the run: +{gained} -{lost}"
+        if not self.matrix_complete:
+            return (f"matrix incomplete: {self.completed_cells} of "
+                    f"{self.expected_cells} cells")
         return ""
 
 
-def current() -> "Lease | None":
-    return _ACTIVE
-
-
 @contextlib.contextmanager
-def lease(purpose: str, isolate: bool = True,
-          log: str | Path = "lab/results.jsonl"):
+def lease(purpose: str, log: str | Path = "lab/results.jsonl"):
     """Hold the experiment lease for the duration of the block.
 
-    With isolate=True (the default) the tree must be committed, and the run
-    happens in a detached worktree at HEAD -- the strongest available promise
-    that the code which produced a number is the code at that commit.
+    The tree must be committed: a run cannot claim to be at a commit while
+    carrying edits that commit does not have.
     """
-    global _ACTIVE
-    if _ACTIVE is not None:
-        raise LeaseBusy("this process already holds the lease")
     origin = Path.cwd().resolve()
     log_path = (origin / log).resolve()
+    outstanding = _dirty()
+    if outstanding:
+        raise LeaseBusy("an experiment needs a committed tree; uncommitted: "
+                        + ", ".join(outstanding))
     _acquire(purpose)
     stack = contextlib.ExitStack()
     obj = None
     try:
         head = _sh("git", "rev-parse", "HEAD").strip()
-        run_dir, isolated = origin, ""
-        if isolate:
-            outstanding = _dirty()
-            if outstanding:
-                raise LeaseBusy(
-                    "isolate=True needs a committed tree; uncommitted: "
-                    + ", ".join(outstanding))
-            run_dir = stack.enter_context(_worktree(head, origin))
-            isolated = head[:7]
-            os.chdir(run_dir)
-        obj = Lease(purpose=purpose, before=fingerprint(run_dir), origin=origin,
-                    run_dir=run_dir, isolated=isolated)
-        _ACTIVE = obj
+        tree = stack.enter_context(_worktree(head, origin))
+        journal = Path(tempfile.mkdtemp(prefix="techjam-journal-")) / "rows.jsonl"
+        stack.callback(shutil.rmtree, journal.parent, ignore_errors=True)
+        obj = Lease(purpose=purpose, before=fingerprint(tree), origin=origin,
+                    run_dir=tree, journal_path=journal, isolated=head[:7])
         yield obj
+    except BaseException as exc:                     # KeyboardInterrupt included
+        if obj is not None and not obj.aborted:
+            obj.aborted = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
-        try:
-            if obj is not None:
-                obj.broke = obj.verify()
-                obj.verdict = "invalid" if obj.broke else "valid"
-                _flush(obj, log_path)
-        finally:
-            _ACTIVE = None
-            os.chdir(origin)
-            stack.close()
-            LOCK_PATH.unlink(missing_ok=True)
+        if obj is not None:
+            _settle(obj, log_path)
+        LOCK_PATH.unlink(missing_ok=True)
+        stack.close()
 
 
-def _flush(obj: Lease, log_path: Path) -> None:
-    """Append the journalled rows, stamped with the post-run verdict."""
-    if not obj.journal:
-        return
-    for row in obj.journal:
-        row.setdefault("lease", {})["verdict"] = obj.verdict
-        row["lease"]["verified_ts"] = dt_now()
+def _settle(obj: Lease, log_path: Path) -> None:
+    """Verify, stamp and append whatever the run produced.
+
+    Partial rows are kept, not discarded -- a half-finished matrix is evidence
+    about what was running -- but they are never citable, because a run that
+    did not finish cannot be compared against one that did.
+    """
+    rows = obj.rows()
+    obj.completed_cells = len(rows)
+    obj.broke = obj.verify()
+    obj.verdict = "valid" if not obj.broke else "invalid"
+    reason = ("run_aborted" if obj.aborted else
+              "matrix_incomplete" if not obj.matrix_complete else
+              "lease_broken")
+    for row in rows:
+        row.setdefault("lease", {}).update({
+            "purpose": obj.purpose, "isolated": obj.isolated,
+            "head": obj.before["head"][:7], "verdict": obj.verdict,
+            "verified_ts": now(),
+            "expected_cells": obj.expected_cells,
+            "completed_cells": obj.completed_cells,
+            "matrix_complete": obj.matrix_complete,
+        })
         if obj.broke:
-            row["invalid"] = {"reason": "lease_broken", "note": obj.broke,
-                              "marked_ts": dt_now()}
-    with log_path.open("a", encoding="utf-8") as fh:
-        for row in obj.journal:
-            fh.write(json.dumps(row) + "\n")
-    state = "VALID" if obj.verdict == "valid" else f"INVALID -- {obj.broke}"
-    print(f"\nlease({obj.purpose}): {len(obj.journal)} rows appended, {state}")
+            row["invalid"] = {"reason": reason, "note": obj.broke,
+                              "marked_ts": now()}
+    if rows:
+        with log_path.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+    state = "VALID" if obj.verdict == "valid" else f"INVALID ({reason}) -- {obj.broke}"
+    print(f"\nlease({obj.purpose}): {len(rows)}/{obj.expected_cells} cells, {state}")
+
+
+def journal_path() -> "Path | None":
+    """Where the recorder should journal rows, if it is running under a lease."""
+    raw = os.environ.get(JOURNAL_ENV)
+    return Path(raw) if raw else None

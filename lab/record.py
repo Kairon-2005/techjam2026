@@ -161,18 +161,19 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         vals = [m[key] for m in per_seed.values()]
         row[key] = statistics.fmean(vals)
         row[key + "_sd"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
-    # Under a lease the row is journalled, not written: its provenance is not
-    # established until the lease verifies that nothing moved during the run.
-    # Without one it is appended immediately, as before, and carries
+    # Under a lease the row is journalled, not written: provenance is not
+    # established until the lease has verified, after the last cell, that
+    # nothing moved and that the matrix actually finished. The journal is a
+    # file rather than a list because the run happens in a child interpreter
+    # -- that is what makes the isolation cover the import path.
+    # Without a lease the row is appended immediately, as before, carrying
     # lease=None so a reader can tell an unleased row from a verified one.
-    held = L.current()
-    if held is not None:
-        row.update(held.stamp())
-        held.journal.append(row)
-    else:
+    journal = L.journal_path()
+    target = journal if journal is not None else LOG
+    if journal is None:
         row["lease"] = None
-        with LOG.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
     return row
 
 
@@ -198,6 +199,8 @@ if __name__ == "__main__":
     seeds = tuple(int(x) for x in (sys.argv[1].split(",") if len(sys.argv) > 1 else
                                    ["7", "8", "9", "10", "11"]))
     names = sys.argv[2].split(",") if len(sys.argv) > 2 else [s.name for s in S.LIBRARY]
-    with L.lease("record-cli", isolate=not os.environ.get("LAB_NO_ISOLATE")):
-        matrix(names, {"default": {}}, seeds, tag="cli")
-    print(f"\nlogged to {LOG}")
+    script = ("from lab import record as R\n"
+              f"R.matrix({names!r}, {{'default': {{}}}}, {tuple(seeds)!r}, tag='cli')\n")
+    with L.lease("record-cli") as held:
+        held.run(script, expected_cells=len(names))
+    print(f"\nlogged to {LOG}: lease {held.verdict} {held.broke}")

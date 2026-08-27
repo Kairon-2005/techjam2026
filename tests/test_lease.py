@@ -1,20 +1,27 @@
-"""The experiment lease: exclusion, verification, and journalling.
+"""The experiment lease: exclusion, isolation, verification, completion.
 
-These exist because the failure they guard against already happened. A matrix
+Every case here corresponds to a defect that actually occurred. A matrix
 recorded while a second session was committing produced eight rows carrying
-three different agent_commit values, every one of them reporting
-code_dirty=false, because provenance was sampled per row instead of being
-checked across the run.
+three different agent_commit values, all reporting code_dirty=false, because
+provenance was sampled per row instead of checked across the run. A later
+version isolated only the working directory, so `import starter.agent` still
+resolved against the origin tree and rows claimed an isolation they did not
+have.
 """
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from lab import lease as L
+
+
+def _tree_is_committed() -> bool:
+    return not L._dirty()
 
 
 class LeaseLockTest(unittest.TestCase):
@@ -25,7 +32,6 @@ class LeaseLockTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         L.LOCK_PATH = self._saved
-        L._ACTIVE = None
         self._tmp.cleanup()
 
     def test_the_lock_is_exclusive(self) -> None:
@@ -34,8 +40,6 @@ class LeaseLockTest(unittest.TestCase):
             L._acquire("second")
 
     def test_a_stale_lock_is_broken_once(self) -> None:
-        # A holder that died without releasing must not block the repository
-        # forever; a holder that is alive must.
         L.LOCK_PATH.write_text(json.dumps({"pid": 2 ** 30, "purpose": "dead"}))
         L._acquire("after the corpse")
         self.assertEqual(json.loads(L.LOCK_PATH.read_text())["pid"], os.getpid())
@@ -45,79 +49,103 @@ class LeaseLockTest(unittest.TestCase):
         with self.assertRaises(L.LeaseBusy):
             L._acquire("intruder")
 
-    def test_the_lease_releases_the_lock(self) -> None:
-        with L.lease("smoke", isolate=False, log=Path(self._tmp.name) / "r.jsonl"):
-            self.assertTrue(L.LOCK_PATH.exists())
-            self.assertIsNotNone(L.current())
-        self.assertFalse(L.LOCK_PATH.exists())
-        self.assertIsNone(L.current())
+
+class FingerprintTest(unittest.TestCase):
+    def test_the_catalog_is_watched(self) -> None:
+        # 58 MB, gitignored, and reached through a symlink inside an isolated
+        # run -- the single input most able to change without leaving a trace.
+        self.assertIn("data/catalog.jsonl", L.WATCHED)
+        self.assertIn("data/public_set.jsonl", L.WATCHED)
+        self.assertIn("starter/agent.py", L.WATCHED)
 
 
-class LeaseVerificationTest(unittest.TestCase):
+class LeaseVerdictTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
-        self._saved_lock, self._saved_watched = L.LOCK_PATH, L.WATCHED
-        L.LOCK_PATH = self.root / "lock"
-        self.watched = self.root / "agent.py"
-        self.watched.write_text("original")
-        L.WATCHED = ("agent.py",)
+        self._saved_watched = L.WATCHED
+        self.real = self.root / "real.bin"
+        self.real.write_text("original")
+        self.link = self.root / "linked.bin"
+        self.link.symlink_to(self.real)
+        L.WATCHED = ("real.bin", "linked.bin")
 
     def tearDown(self) -> None:
-        L.LOCK_PATH, L.WATCHED = self._saved_lock, self._saved_watched
-        L._ACTIVE = None
+        L.WATCHED = self._saved_watched
         self._tmp.cleanup()
 
-    def _lease(self) -> L.Lease:
-        return L.Lease(purpose="t", before=L.fingerprint(self.root),
-                       origin=self.root, run_dir=self.root)
+    def _lease(self, **kw) -> L.Lease:
+        obj = L.Lease(purpose="t", before=L.fingerprint(self.root), origin=self.root,
+                      run_dir=self.root, journal_path=self.root / "j.jsonl", **kw)
+        obj.expected_cells = obj.expected_cells or 2
+        obj.completed_cells = 2
+        return obj
 
-    def test_an_untouched_run_verifies(self) -> None:
+    def test_an_untouched_complete_run_verifies(self) -> None:
         self.assertEqual(self._lease().verify(), "")
 
     def test_a_rewritten_input_breaks_the_lease(self) -> None:
         obj = self._lease()
-        self.watched.write_text("rewritten mid-run")
-        self.assertIn("agent.py", obj.verify())
+        self.real.write_text("rewritten mid-run")
+        self.assertIn("real.bin", obj.verify())
 
-    def test_broken_lease_stamps_every_row_invalid(self) -> None:
-        log = self.root / "results.jsonl"
+    def test_a_repointed_symlink_breaks_the_lease(self) -> None:
+        # Same path, same bytes reachable, different file. A hash of the link
+        # target alone would not say which file moved.
         obj = self._lease()
-        obj.journal = [{"tag": "t", "score": 0.5}, {"tag": "t", "score": 0.6}]
-        self.watched.write_text("rewritten mid-run")
-        obj.broke = obj.verify()
-        obj.verdict = "invalid"
-        L._flush(obj, log)
-        rows = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(rows), 2)
-        for row in rows:
-            self.assertEqual(row["invalid"]["reason"], "lease_broken")
-            self.assertEqual(row["lease"]["verdict"], "invalid")
+        other = self.root / "other.bin"
+        other.write_text("original")             # identical CONTENT
+        self.link.unlink()
+        self.link.symlink_to(other)
+        self.assertIn("repointed", obj.verify())
 
+    def test_an_aborted_run_is_invalid_even_though_nothing_moved(self) -> None:
+        obj = self._lease()
+        obj.aborted = "RuntimeError: boom"
+        self.assertIn("boom", obj.verify())
+        self.assertFalse(obj.matrix_complete)
 
-class LeaseJournalTest(unittest.TestCase):
-    """Rows must not reach the ledger before the lease has verified them."""
+    def test_a_short_matrix_is_invalid(self) -> None:
+        obj = self._lease()
+        obj.expected_cells, obj.completed_cells = 25, 11
+        self.assertIn("matrix incomplete", obj.verify())
 
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        self._saved = L.LOCK_PATH
-        L.LOCK_PATH = self.root / "lock"
-
-    def tearDown(self) -> None:
-        L.LOCK_PATH = self._saved
-        L._ACTIVE = None
-        self._tmp.cleanup()
-
-    def test_rows_are_held_until_the_block_exits(self) -> None:
-        from lab import record as R
+    def test_settle_stamps_partial_rows_and_keeps_them(self) -> None:
+        obj = self._lease()
+        obj.expected_cells, obj.completed_cells = 4, 2
+        obj.journal_path.write_text(
+            json.dumps({"tag": "t", "score": 0.5}) + "\n"
+            + json.dumps({"tag": "t", "score": 0.6}) + "\n")
         log = self.root / "results.jsonl"
-        with L.lease("journal", isolate=False, log=log) as ls:
-            ls.journal.append({"tag": "held", "score": 1.0})
-            self.assertFalse(log.exists(), "a row reached the ledger unverified")
-        self.assertTrue(log.exists())
-        self.assertEqual(json.loads(log.read_text().strip())["tag"], "held")
-        self.assertIsNone(R.L.current())
+        obj.aborted = "KeyboardInterrupt: "
+        L._settle(obj, log)
+        rows = [json.loads(x) for x in log.read_text().splitlines()]
+        self.assertEqual(len(rows), 2, "partial rows are evidence and are kept")
+        for row in rows:
+            self.assertEqual(row["invalid"]["reason"], "run_aborted")
+            self.assertEqual(row["lease"]["expected_cells"], 4)
+            self.assertEqual(row["lease"]["completed_cells"], 2)
+            self.assertFalse(row["lease"]["matrix_complete"])
+
+
+class LeaseIsolationTest(unittest.TestCase):
+    """The run must import from the worktree, not from the working copy."""
+
+    @unittest.skipUnless(_tree_is_committed(),
+                         "needs a committed tree to isolate")
+    def test_the_child_imports_from_the_isolated_worktree(self) -> None:
+        script = ("import starter.agent as A, os, json;"
+                  "open(os.environ['LAB_JOURNAL'],'a').write("
+                  "json.dumps({'tag':'iso','agent':A.__file__})+chr(10))")
+        with L.lease("isolation-test") as ls:
+            rc = ls.run(script, expected_cells=1)
+            self.assertEqual(rc, 0)
+            rows = ls.rows()
+        self.assertEqual(len(rows), 1)
+        loaded = rows[0]["agent"]
+        self.assertTrue(loaded.startswith(str(ls.run_dir)),
+                        f"child imported {loaded}, not the isolated worktree")
+        self.assertNotIn(str(ls.origin / "starter"), loaded)
 
 
 if __name__ == "__main__":
