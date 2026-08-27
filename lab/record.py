@@ -135,7 +135,11 @@ def git_state(agent_module=None) -> dict:
 def _metrics(res: dict) -> dict:
     return {"score": res["recommended_technical_score"], "hr10": res["hit_rate_at_10"],
             "mrr": res["mrr"], "mttc": res["mttc"],
-            "telemetry": res.get("telemetry") or {}}
+            "telemetry": res.get("telemetry") or {},
+            # The official evaluator already splits by scenario_type. Carrying
+            # its four slices means a route claim can be checked against the
+            # organiser's own segmentation rather than against one we invented.
+            "slices": res.get("scenario_metrics") or {}}
 
 
 def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
@@ -171,6 +175,12 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         k: round(statistics.fmean([m["telemetry"][k] for m in per_seed.values()
                                    if k in m["telemetry"]]), 4)
         for k in sorted(keys)}
+    names = {n for m in per_seed.values() for n in m["slices"]}
+    row["slices"] = {
+        name: {k: round(statistics.fmean(
+                   [m["slices"][name][k] for m in per_seed.values() if name in m["slices"]]), 6)
+               for k in ("hit_rate_at_10", "mrr", "mttc")}
+        for name in sorted(names)}
     # Under a lease the row is journalled, not written: provenance is not
     # established until the lease has verified, after the last cell, that
     # nothing moved and that the matrix actually finished. The journal is a

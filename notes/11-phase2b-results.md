@@ -37,9 +37,10 @@ pool. Buying is narrow and shelf-concentrated with a heavy exclusion rate;
 browsing is four times wider across three times as many shelves; mixed sits
 between them. This is the Pillar I gap Phase 2A left open.
 
-## The result I did not predict
+## The result I did not predict — with the attribution corrected
 
-**`negative_preference` improves by +0.0889, roughly 4.5 sd.**
+**`negative_preference` improves by +0.0889, roughly 4.5 sd. The responsible
+component is UNATTRIBUTED.**
 
 | | off | on | Δ |
 |---|---|---|---|
@@ -47,15 +48,22 @@ between them. This is the Pillar I gap Phase 2A left open.
 | HR@10 | 0.754 | 0.891 | +0.137 |
 | MTTC | 4.13 | 2.48 | −1.65 |
 
-This is the Phase 1.5B question answered. Three scenarios and a challenge set
-all said the negative channel did nothing measurable, and the narrowed
-conclusion was that rejected attributes are scarce *in the current top 10* and
-that this "says nothing about their density in the deeper candidate pools a
-category/facet plane will produce". A 660-candidate pool is that deeper pool,
-and the channel that was inert over 100 candidates is worth 0.089 over it.
+**This is dual-plane on versus off, not `w_neg=2` versus `w_neg=0` at equal
+depth.** Turning `dual_plane` on changes retrieval depth, the category
+constraint, candidate composition and pool size at once, so nothing here
+isolates the negative channel. An earlier version of this note credited that
+channel; the experiment cannot support it, because a whole-pipeline A/B cannot
+attribute a gain to one component inside the pipeline.
 
-Refusing to generalise the scarcity finding was the right call, and the
-narrowed version is what made this interpretable rather than surprising.
+What is established: **the dual-plane pipeline improves this scenario by
++0.0889; the responsible component is un-attributed.** Plausible contributors
+include the deeper pool, the category constraint acting as an implicit filter,
+and the negative penalty finally having matching candidates to act on. This
+design does not separate them.
+
+Attribution would need `w_neg` varied WITHIN the deep pool with everything
+else held fixed. That is not run here, and nothing is promoted on the strength
+of an un-attributed gain.
 
 `contradiction` moves +0.0019 (inside noise) but its HR@10 rises 0.913 → 0.943
 and MTTC falls 3.20 → 2.54. `vague_start` HR@10 rises 0.985 → 0.995 — the
@@ -118,9 +126,11 @@ is diagnostic and must never become the default whatever it scores.
 ## H4 — hard-negative filter
 
 Not run, as pre-registered, and the deep-pool coverage measurement that would
-gate it is not done. `filter_negative` stays off. Given that the negative
-*penalty* is now worth +0.089 over the deep pool, measuring the filter is the
-single most promising item outstanding — but it needs its own pre-registration.
+gate it is not done. `filter_negative` stays off, and it is **not** the next
+priority. The +0.0889 above is a whole-pipeline effect that says nothing about
+the negative channel specifically, so promoting a hard-negative filter on the
+strength of it would be building on an attribution this experiment never
+made.
 
 ## The facet filter does nothing
 
@@ -137,6 +147,8 @@ category constraint is doing all the work — and all the damage.
 
 ## What this does not establish
 
+* That the negative channel is responsible for anything. The +0.0889 is a
+  whole-pipeline A/B, not a component measurement.
 * That dual-track retrieval is wrong. Two fixable specification errors account
   for the entire regression, and one of them is arithmetic. It establishes
   that **this configuration** is not shippable.
