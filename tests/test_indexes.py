@@ -172,3 +172,62 @@ class IndexReuseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LazyFacetBuildTest(IndexTestBase):
+    """Facets are built per attribute, on first use, and never eagerly.
+
+    Building all seven eagerly cost 6.19 s on the first turn that stated a
+    constraint -- in the shipped default, where category_plane is off and most
+    of those facets are never consulted.
+    """
+
+    def setUp(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp2 = tempfile.TemporaryDirectory()
+        self.cat2 = A._catalog(_catalog_file(Path(self._tmp2.name)))
+
+    def tearDown(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp2.cleanup()
+
+    def test_constructing_the_index_scans_nothing(self) -> None:
+        self.assertEqual(self.cat2.facet_index.built, frozenset())
+
+    def test_asking_whether_an_attribute_is_a_facet_builds_nothing(self) -> None:
+        # The eligibility gate asks this for EVERY slot, including budget and
+        # feature. It must not cost a catalog scan to answer.
+        fi = self.cat2.facet_index
+        self.assertIn("material", fi.coverage)
+        self.assertNotIn("budget", fi.coverage)
+        self.assertNotIn("feature", fi.coverage)
+        self.assertEqual(fi.built, frozenset())
+
+    def test_reading_one_facet_builds_only_that_one(self) -> None:
+        fi = self.cat2.facet_index
+        fi.coverage["material"]
+        self.assertEqual(fi.built, frozenset({"material"}))
+        fi.match("color", "black")
+        self.assertEqual(fi.built, frozenset({"material", "color"}))
+
+    def test_lazy_values_match_the_eager_ones(self) -> None:
+        # Same data, same vocabularies, built later. Every value must agree.
+        fi = self.cat2.facet_index
+        self.assertAlmostEqual(fi.coverage["material"], 4 / 5)
+        self.assertEqual(self.asins2(fi.match("material", "silk")), {"W1"})
+        self.assertEqual(self.asins2(fi.match("material", "genuine leather")), {"W3"})
+        universe = self.cat2.category_index.universe
+        kept = self.asins2(fi.safe_keep("material", "silk", universe))
+        self.assertIn("W1", kept)
+        self.assertIn("Q1", kept, "silence is still not refusal")
+        self.assertNotIn("M1", kept)
+
+    def test_an_unknown_facet_never_builds_and_never_empties(self) -> None:
+        fi = self.cat2.facet_index
+        universe = self.cat2.category_index.universe
+        self.assertEqual(fi.safe_keep("nonexistent", "x", universe), universe)
+        self.assertEqual(fi.coverage.get("nonexistent"), 0.0)
+        self.assertEqual(fi.built, frozenset())
+
+    def asins2(self, ids) -> set:
+        return {self.cat2.category_index.asins[i] for i in ids}

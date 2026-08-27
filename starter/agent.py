@@ -614,6 +614,34 @@ class _CategoryIndex:
                 "top_share": round(max(counts.values()) / total, 4)}
 
 
+class _FacetCoverage:
+    """A read-through view of per-facet coverage.
+
+    `facet in coverage` and iteration answer from the static name list, so the
+    eligibility gate can ask "is this attribute a facet at all?" -- which it
+    does for every slot, including `budget` and `feature` -- without scanning
+    50,000 products to find out.
+    """
+
+    def __init__(self, index: "_FacetIndex") -> None:
+        self._index = index
+
+    def __contains__(self, facet: object) -> bool:
+        return facet in self._index.NAMES
+
+    def __iter__(self):
+        return iter(self._index.NAMES)
+
+    def __getitem__(self, facet: str) -> float:
+        if facet not in self._index.NAMES:
+            return 0.0
+        self._index._build(facet)
+        return len(self._index.present.get(facet, ())) / self._index.n
+
+    def get(self, facet: str, default: float = 0.0) -> float:
+        return self[facet] if facet in self._index.NAMES else default
+
+
 class _FacetIndex:
     """Value postings per attribute, with the coverage needed to trust them.
 
@@ -642,48 +670,73 @@ class _FacetIndex:
             ("size", ATTR_VOCAB["size"]),
         )
 
+    # Every facet name this index can serve, known WITHOUT scanning anything.
+    # Membership questions ("is `budget` a facet?") must not force a build.
+    NAMES = ("material", "color", "style", "use_case", "size", "brand", "department")
+
     def __init__(self, ids: dict[str, int], text: dict[str, str],
                  store: dict[str, str], dept: dict[str, str]) -> None:
+        # Nothing is scanned here. Building all seven facets eagerly cost
+        # 6.19 s on the first turn that stated a constraint -- in the SHIPPED
+        # default, where category_plane is off and most of those facets are
+        # never consulted. Each facet is now built on first use, so a session
+        # naming one material pays for one facet and a session naming none
+        # pays nothing. The values produced are identical; only the moment of
+        # construction changed.
+        self._ids, self._text, self._store, self._dept = ids, text, store, dept
         self.n = len(ids) or 1
         self.postings: dict[str, dict[str, set[int]]] = {}
         self.present: dict[str, set[int]] = {}
-        sources = self.sources()
-        for name, _ in sources:
-            self.postings[name] = {}
-            self.present[name] = set()
-        self.postings["brand"], self.present["brand"] = {}, set()
-        self.postings["department"], self.present["department"] = {}, set()
-        for asin, i in ids.items():
-            blob = text.get(asin, "")
-            for name, pattern in sources:
-                seen = {_norm(m.group(0)) for m in pattern.finditer(blob)}
-                seen = {v for v in seen if v}
+        self._built: set[str] = set()
+
+    def _build(self, facet: str) -> None:
+        """One pass over the catalog for ONE facet."""
+        if facet in self._built or facet not in self.NAMES:
+            return
+        self._built.add(facet)
+        postings: dict[str, set[int]] = {}
+        present: set[int] = set()
+        if facet == "brand" or facet == "department":
+            field = self._store if facet == "brand" else self._dept
+            for asin, i in self._ids.items():
+                value = _norm(field.get(asin, ""))
+                if value:
+                    present.add(i)
+                    postings.setdefault(value, set()).add(i)
+        else:
+            pattern = dict(self.sources())[facet]
+            for asin, i in self._ids.items():
+                seen = {_norm(m.group(0)) for m in pattern.finditer(self._text.get(asin, ""))}
+                seen.discard("")
                 if seen:
-                    self.present[name].add(i)
+                    present.add(i)
                     for value in seen:
-                        self.postings[name].setdefault(value, set()).add(i)
-            brand = _norm(store.get(asin, ""))
-            if brand:
-                self.present["brand"].add(i)
-                self.postings["brand"].setdefault(brand, set()).add(i)
-            department = _norm(dept.get(asin, ""))
-            if department:
-                self.present["department"].add(i)
-                self.postings["department"].setdefault(department, set()).add(i)
-        self.coverage = {name: len(present) / self.n
-                         for name, present in self.present.items()}
+                        postings.setdefault(value, set()).add(i)
+        self.postings[facet], self.present[facet] = postings, present
+
+    @property
+    def coverage(self) -> "_FacetCoverage":
+        """Coverage by facet name. Reading one builds only that facet;
+        `in` and iteration answer from NAMES without building anything."""
+        return _FacetCoverage(self)
+
+    @property
+    def built(self) -> frozenset:
+        return frozenset(self._built)
 
     def values(self, facet: str) -> int:
+        self._build(facet)
         return len(self.postings.get(facet, {}))
 
     def missing_rate(self, facet: str) -> float:
-        return round(1.0 - self.coverage.get(facet, 0.0), 4)
+        return round(1.0 - self.coverage[facet], 4)
 
     def hard_ok(self, facet: str, min_coverage: float) -> bool:
         """Whether this facet may narrow a pool at all, filter aside."""
-        return self.coverage.get(facet, 0.0) >= min_coverage
+        return self.coverage[facet] >= min_coverage
 
     def match(self, facet: str, value: str) -> frozenset[int]:
+        self._build(facet)
         table = self.postings.get(facet) or {}
         value = _norm(value)
         if value in table:
@@ -700,6 +753,7 @@ class _FacetIndex:
         """Products consistent with `value`: matches, plus every product that
         never said. Presence-aware by construction -- this is the only filter
         primitive the buying plane is allowed to use."""
+        self._build(facet)
         unknown = universe - self.present.get(facet, set())
         return frozenset((self.match(facet, value) & universe) | unknown)
 
