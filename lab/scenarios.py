@@ -118,6 +118,53 @@ def _foreign_constraint(sample, prods, rng, donors, card) -> str:
 
 
 _DONORS: list[str] = []
+_PRODS: dict = {}
+
+# Values a customer might reject. Chosen so a target lacking the value gains
+# information when competitors carrying it are demoted.
+_REJECTABLE = ("polyester", "nylon", "wool", "silk", "leather", "spandex", "rayon")
+
+
+def _reply_negative_preference(sample, attribute, disclosed, bu, rng):
+    """Half the time, state a rejection of something the TARGET does not have.
+
+    This is genuine extra information: every candidate carrying the rejected
+    value is wrong, so a working negative channel should help and a broken one
+    (or a mis-scoped negation) should hurt.
+    """
+    if rng.random() >= 0.5:
+        return None
+    target = _PRODS.get(str(sample["ground_truth"]["parent_asin"])) or {}
+    blob = " ".join(str(target.get(f) or "") for f in
+                    ("title", "features", "details", "description")).lower()
+    options = [v for v in _REJECTABLE if v not in blob]
+    if not options:
+        return None
+    value = rng.choice(options)
+    return rng.choice([
+        f"No {value}, please.",
+        f"Please avoid {value}.",
+        f"I don't want {value}.",
+    ]), bu
+
+
+# SEALED holdout for negation SCOPE. Never used to tune anything; mixes true
+# rejections with restrictive positives ("nothing besides cotton" means ONLY
+# cotton). A mis-scoped negation inverts a real constraint into a penalty.
+SCOPE_PHRASINGS = (
+    ("Anything except polyester works.", "negative", "polyester"),
+    ("I'd rather steer clear of wool.", "negative", "wool"),
+    ("Nothing besides cotton, ideally.", "positive", "cotton"),
+    ("Other than nylon, I'm open.", "negative", "nylon"),
+    ("Just no plastic feel.", "negative", "plastic"),
+    ("Cotton and nothing else.", "positive", "cotton"),
+)
+
+
+def _reply_negation_scope(sample, attribute, disclosed, bu, rng):
+    if rng.random() >= 0.5:
+        return None
+    return rng.choice([text for text, _, _ in SCOPE_PHRASINGS]), bu
 
 
 def _mut_override_genuine(sample, card, beh, prods, rng):
@@ -245,6 +292,14 @@ LIBRARY: list[Scenario] = [
              "HOLDOUT: stonewalling in phrasing never used during development",
              reply=_reply_uncooperative_holdout,
              notes="shares no wording with the tuning scenario; validates detection generalises"),
+    Scenario("negative_preference",
+             "Pillar II: does the negative-evidence channel use a stated rejection?",
+             reply=_reply_negative_preference,
+             notes="rejects a value the target does not have, so it is pure signal"),
+    Scenario("negation_scope_holdout",
+             "SEALED: negation scope -- restrictive positives must not invert",
+             reply=_reply_negation_scope,
+             notes="never used for tuning; mixes true rejections with 'nothing besides X'"),
     Scenario("contradiction", "robustness: a stated constraint that is false of the target",
              sample_tf=_tf_contradiction),
     Scenario("profile_informative", "Pillar III: can personalization be exploited at all?",
@@ -260,4 +315,6 @@ def load():
     ids, cats, prods = E.catalog_index(CATALOG)
     _DONORS.clear()
     _DONORS.extend(str(s["ground_truth"]["parent_asin"]) for s in samples)
+    _PRODS.clear()
+    _PRODS.update(prods)
     return samples, ids, cats, prods

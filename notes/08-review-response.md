@@ -668,3 +668,67 @@ BM25/exact/phrase/field/IDF 打分。**「抑制 soft-rescue」确实不等于 s
 - **预注册措辞更正**：`11b5563` 同时包含实现与预测，属于
   **"predictions committed before measurement"**，
   **不是** protocol-only 的强隔离预注册。不再按后者宣传。
+
+---
+
+# Phase 1.5B（第三轮审查：confidence 数学、negation 评测、干净重录）
+
+## 1. confidence 此前只做「相对分配」，不是绝对置信度（属实）
+
+原式 `sum(匹配的 confidence) / sum(所有 confidence)`。**只有一条约束时分子分母
+相消**：0.1/0.1 = 0.6/0.6 = 1.0/1.0 = 1.0，单条低置信抽取仍拿满额分。
+我原来的测试也只比较了 dataclass 里的两个数字，**即使排序完全忽略 confidence 也会通过**。
+
+已改为**以短语数量为分母**，confidence 成为绝对折扣。实测（P2 = 丝巾，正向证据 "silk"）：
+
+| confidence | 1.0 | 0.6 | 0.1 |
+|---|---|---|---|
+| P2 得分 | **7.0000** | **4.2000** | **0.7000** |
+
+负向同理（w_neg=5）：confidence 0.0 / 0.3 / 1.0 → 0.0 / −1.5 / −5.0。
+confidence 也已接入 soft overlap 与 slot_soft 路径。
+新增 `score_candidates()` 暴露分数，测试改为**断言分数变化**而非仅比较排名或字段。
+
+## 2. 负向约束：已接入排序，并已建立场景评测
+
+`f_neg` 现在**按槽位 confidence 加权**（低置信抽取不得与明确拒绝同权）。
+
+新增两个场景：`negative_preference`（拒绝一个**目标不具备**的属性，是纯信号）
+与 `negation_scope_holdout`（**全新 sealed 集**，混入「限定性肯定」）。
+
+**发现并修复了一个真实的 scope bug**（审查预判正确）：
+
+| 输入 | 修复前 | 修复后 |
+|---|---|---|
+| "Nothing but leather." | leather = **−1**（错，实为「只要皮革」） | leather = +1 |
+| "Not only leather." | leather = **−1**（错） | leather = +1 |
+| "Leather, not synthetic." | 只抽到 +leather | +leather **且** −synthetic |
+
+在 `w_neg=2.0` 下，这个 bug 会把一条正向约束**反转成惩罚**，主动打压正确商品。
+已加 `RESTRICTIVE_RE` 守卫 + 8 条单元测试。
+
+**w_neg 的实证结论（诚实版）**：
+
+| w_neg | 0 | 1 | 2（默认） | 4 |
+|---|---|---|---|---|
+| negative_preference | 0.698583 | 0.699256 | 0.700683 | 0.700683 |
+
+**+0.0021，而 sd = 0.019 —— 与零无法区分。** sealed scope holdout 上
+w_neg=0 与 2 得分完全相同（0.700124），即**未造成伤害**。
+原因已量化：带 active 拒绝的轮次中，**只有 0.8% / 0.0% 的已展示候选真的命中被拒值**——
+能进 top-10 的候选本来就很少带有被拒属性。
+**结论：负向通道正确、安全，但在本目录/模拟器上近乎惰性。**
+保留 `w_neg=2.0`（已饱和、无害），但**不得声称它带来了可测收益**。
+这一点也影响 Phase 2B 排序：hard-negative filter 可过滤的东西本来就很少。
+
+**sealed holdout 又暴露一个缺陷（记录、不修）**：
+"I'd rather steer clear of wool." 未被识别为否定（`NEGATION_RE` 没有 "steer clear of"）。
+**不在 holdout 上修**；已从开发单元测试中剔除该措辞，留给下一轮开发集。
+（教训重申：把 holdout 措辞写进单元测试就等于烧掉 holdout。）
+
+## 3. 干净重录
+
+前一轮 targeted-erasure 的关键数字是 dirty run（`agent_commit=worktree`,
+`code_dirty=true`）。按我们自己的纪律，那些数字**当时不可引用**。
+已在干净 commit 上重录，见下节表格与 `lab/results.jsonl` 中
+`tag=phase15b-clean-rerecord` 的 schema-2 行。

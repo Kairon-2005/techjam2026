@@ -423,6 +423,15 @@ FEATURE_LEX = re.compile(
     r"|wrinkle[- ]free|stretchy|durable|warm|cushioned|arch support)\b", re.I)
 NEGATION_RE = re.compile(
     r"\b(?:not|no|nothing|never|avoid|without|don'?t want|rather not|too)\b", re.I)
+# Restrictive positives that LOOK like negations. "Nothing but leather" means
+# only leather -- reading it as a rejection inverts the constraint and actively
+# demotes the right product.
+RESTRICTIVE_RE = re.compile(
+    r"\b(?:nothing|none|no|anything)\s+(?:but|other than|except|besides)\b"
+    r"|\bnot only\b|\bonly\b", re.I)
+# Materials/qualities worth catching as rejections even though they are not in
+# the positive vocabularies.
+NEGATIVE_LEX = re.compile(r"\b(synthetic|plastic|itchy|scratchy|bulky|sheer|see[- ]through)\b", re.I)
 
 
 def open_world_evidence(message: str) -> list[tuple[str, str, int]]:
@@ -439,16 +448,19 @@ def open_world_evidence(message: str) -> list[tuple[str, str, int]]:
         return []
     found: list[tuple[str, str, int]] = []
     seen: set[tuple[str, str]] = set()
-    for attribute, pattern in list(ATTR_VOCAB.items()) + [("feature", FEATURE_LEX)]:
+    vocab = list(ATTR_VOCAB.items()) + [("feature", FEATURE_LEX), ("material", NEGATIVE_LEX)]
+    for attribute, pattern in vocab:
         for match in pattern.finditer(raw):
             value = _norm(match.group(0))
             if (attribute, value) in seen:
                 continue
             seen.add((attribute, value))
             # Negation within the ~28 characters before the value flips polarity:
-            # "nothing too formal" is a constraint, just an inverted one.
+            # "nothing too formal" is a constraint, just an inverted one. But
+            # "nothing BUT leather" is restrictive, not negative.
             window = raw[max(0, match.start() - 28):match.start()]
-            found.append((attribute, value, -1 if NEGATION_RE.search(window) else 1))
+            negated = bool(NEGATION_RE.search(window)) and not RESTRICTIVE_RE.search(window)
+            found.append((attribute, value, -1 if negated else 1))
     return found
 
 
@@ -993,7 +1005,14 @@ class Agent:
         patch = overrides.get(state.get("route"))
         return {**self.cfg, **patch} if patch else self.cfg
 
-    def _rerank(self, cands: list[tuple[str, float]], state: dict) -> list[str]:
+    def score_candidates(self, cands: list[tuple[str, float]],
+                         state: dict) -> dict[str, float]:
+        """Per-candidate final score. Exposed so tests can assert that evidence
+        weighting changes the SCORE, not merely the resulting order."""
+        return dict(self._rerank(cands, state, want_scores=True))
+
+    def _rerank(self, cands: list[tuple[str, float]], state: dict,
+                want_scores: bool = False):
         cfg = self._route_cfg(state)
         phrases = [_norm(p) for p in state["phrases"]]
         phrases = [p for p in phrases if len(p) >= 3]
@@ -1002,11 +1021,16 @@ class Agent:
         # the customer stated in a form the parser understood.
         conf = {sl.value: sl.confidence for sl in state["slots"] if sl.usable}
         pconf = [conf.get(p, 1.0) for p in phrases]
-        conf_total = sum(pconf) or 1.0
+        # Denominator is the phrase COUNT, not the confidence sum. Dividing by
+        # the sum makes confidence cancel for a lone constraint (0.1/0.1 == 1.0),
+        # which only reallocates weight between phrases and leaves a single
+        # low-confidence guess scoring like a stated fact. With the count, a
+        # 0.1-confidence phrase contributes 0.1 of what a stated one would.
+        n_phrases = len(phrases) or 1
         # Constraints the customer REJECTED. They never enter the query (a
         # negative is not a search term) but a candidate that matches one is
-        # penalised here.
-        neg = [sl.value for sl in state["slots"]
+        # penalised here, in proportion to how sure we are of the rejection.
+        neg = [(sl.value, sl.confidence) for sl in state["slots"]
                if sl.active and sl.polarity < 0 and len(sl.value) >= 3]
         terms = state["terms"][: cfg["term_cap"]]
         idfs = {t: self.cat.idf(t) for t in terms}
@@ -1072,14 +1096,14 @@ class Agent:
                     f_phrase = hit / (sum(pw) or 1.0)
                 else:
                     f_phrase = sum(pconf[i] for i, p in enumerate(phrases)
-                                   if p in blob) / conf_total
+                                   if p in blob) / n_phrases
                 f_exact = sum(pconf[i] for i, p in enumerate(phrases)
-                              if p in vals) / conf_total
+                              if p in vals) / n_phrases
                 if (w_soft_eff or cfg["soft_adaptive"]) and ptoks:
                     acc = 0.0
-                    for tok_w in ptoks:
+                    for i, tok_w in enumerate(ptoks):
                         tot = sum(w for _, w in tok_w) or 1.0
-                        acc += sum(w for t, w in tok_w if t in blob) / tot
+                        acc += (sum(w for t, w in tok_w if t in blob) / tot) * pconf[i]
                     f_soft = acc / len(ptoks)
                 f_slot = 0.0
                 if dead and ptoks:
@@ -1087,10 +1111,10 @@ class Agent:
                     for i in dead:
                         tok_w = ptoks[i]
                         tot = sum(w for _, w in tok_w) or 1.0
-                        acc += sum(w for t, w in tok_w if t in blob) / tot
+                        acc += (sum(w for t, w in tok_w if t in blob) / tot) * pconf[i]
                     f_slot = acc / len(dead)
                 f_field = sum(pconf[i] for i, p in enumerate(phrases)
-                              if p in feat_blob) / conf_total
+                              if p in feat_blob) / n_phrases
                 if cfg["w_pos"]:
                     ordered_vals = self.cat.order.get(asin, [])
                     got = [ordered_vals.index(p) for p in phrases if p in ordered_vals]
@@ -1111,7 +1135,9 @@ class Agent:
                 f_profile = sum(1 for t in prof_tags if t in blob) / len(prof_tags)
             f_neg = 0.0
             if neg:
-                f_neg = sum(1 for p in neg if p in blob) / len(neg)
+                # A tentative extraction ("nothing too formal") must not veto as
+                # hard as an explicit rejection.
+                f_neg = sum(c for value, c in neg if value in blob) / len(neg)
             f_pop = self.cat.popularity(asin, cfg["pop_mode"])
             total = (cfg["w_bm25"] * f_bm25 + cfg["w_phrase"] * f_phrase
                      + cfg["w_idf"] * f_idf + cfg["w_cat"] * f_cat
@@ -1122,6 +1148,8 @@ class Agent:
                      - cfg["w_neg"] * f_neg)
             scored.append((-total, order, asin))
         scored.sort()
+        if want_scores:
+            return [(asin, -neg_total) for neg_total, _, asin in scored]
         return [asin for _, _, asin in scored]
 
     # ---- customer-facing copy ----------------------------------------

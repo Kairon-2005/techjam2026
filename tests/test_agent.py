@@ -513,6 +513,38 @@ class OpenWorldEvidenceTest(unittest.TestCase):
             self.assertEqual(A.classify_reply(message, phrases, category),
                              A.Outcome.INFORMATIVE, message)
 
+    # Development phrasings only. The sealed scope set lives in
+    # lab/scenarios.SCOPE_PHRASINGS and must not be asserted on here -- putting
+    # holdout wording into a unit test is how a holdout gets burned.
+    RESTRICTIVE_POSITIVES = [
+        ("Nothing but leather.", "leather"),
+        ("Not only leather.", "leather"),
+        ("Only cotton please.", "cotton"),
+    ]
+    TRUE_NEGATIVES = [
+        ("No polyester, please.", "polyester"),
+        ("Avoid anything synthetic.", "synthetic"),
+    ]
+
+    def test_restrictive_positives_are_not_inverted(self) -> None:
+        # "Nothing but leather" means ONLY leather. Reading it as a rejection
+        # inverts a real constraint into a penalty and demotes the right item.
+        for message, value in self.RESTRICTIVE_POSITIVES:
+            found = {v: pol for _, v, pol in A.open_world_evidence(message)}
+            self.assertIn(value, found, message)
+            self.assertEqual(found[value], 1, f"inverted a restrictive positive: {message!r}")
+
+    def test_true_negatives_are_still_negative(self) -> None:
+        for message, value in self.TRUE_NEGATIVES:
+            found = {v: pol for _, v, pol in A.open_world_evidence(message)}
+            self.assertIn(value, found, message)
+            self.assertEqual(found[value], -1, f"missed a rejection: {message!r}")
+
+    def test_mixed_polarity_in_one_sentence(self) -> None:
+        found = {v: pol for _, v, pol in A.open_world_evidence("Leather, not synthetic.")}
+        self.assertEqual(found.get("leather"), 1)
+        self.assertEqual(found.get("synthetic"), -1)
+
     def test_negation_inverts_polarity(self) -> None:
         found = A.open_world_evidence("Nothing too formal.")
         self.assertTrue(any(pol == -1 for _, _, pol in found),
@@ -593,27 +625,34 @@ class EvidenceWeightingTest(unittest.TestCase):
         ranked = ag._rerank(cands, state)
         return ranked.index(asin)
 
-    def test_confidence_scales_evidence_weight(self) -> None:
-        # P2 is the silk scarf. Same phrase, two different confidences: the
-        # low-confidence version must contribute strictly less.
-        ag = self.agent(w_pop=0.0)
-        high = ag._blank_state()
-        high["phrases"] = ["silk"]
-        high["slots"] = [A.SlotValue(attribute="material", value="silk", confidence=1.0)]
-        low = ag._blank_state()
-        low["phrases"] = ["silk"]
-        low["slots"] = [A.SlotValue(attribute="material", value="silk", confidence=0.1)]
+    def _state_with(self, ag: A.Agent, value: str, confidence: float) -> dict:
+        state = ag._blank_state()
+        state["phrases"] = [value]
+        state["slots"] = [A.SlotValue(attribute="material", value=value,
+                                      confidence=confidence)]
+        return state
 
+    def test_confidence_scales_a_lone_constraint_absolutely(self) -> None:
+        # Regression: dividing by the confidence SUM made a single phrase score
+        # 1.0 at any confidence (0.1/0.1 == 1.0), so confidence only reallocated
+        # weight between phrases and a lone low-confidence guess scored like a
+        # stated fact. Assert the SCORE falls, not merely the rank.
+        ag = self.agent(w_pop=0.0)
         cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
-        scored_high = ag._rerank(cands, high)
-        scored_low = ag._rerank(cands, low)
-        self.assertEqual(scored_high[0], "P2")
-        # With w_pop off the only signal is the phrase, so both still rank P2
-        # first; the weighting is verified through the feature contribution.
-        conf_high = {sl.value: sl.confidence for sl in high["slots"]}
-        conf_low = {sl.value: sl.confidence for sl in low["slots"]}
-        self.assertGreater(conf_high["silk"], conf_low["silk"])
-        self.assertEqual(scored_low[0], "P2")
+        scores = {c: ag.score_candidates(cands, self._state_with(ag, "silk", c))["P2"]
+                  for c in (1.0, 0.6, 0.1)}
+        self.assertGreater(scores[1.0], scores[0.6],
+                           "0.6-confidence evidence must score below 1.0")
+        self.assertGreater(scores[0.6], scores[0.1],
+                           "0.1-confidence evidence must score below 0.6")
+
+    def test_confidence_is_actually_read_not_just_stored(self) -> None:
+        ag = self.agent(w_pop=0.0)
+        cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
+        full = ag.score_candidates(cands, self._state_with(ag, "silk", 1.0))
+        faint = ag.score_candidates(cands, self._state_with(ag, "silk", 0.1))
+        self.assertNotEqual(full["P2"], faint["P2"],
+                            "changing only confidence must change the score")
 
     def test_low_confidence_evidence_loses_to_high_confidence_evidence(self) -> None:
         # "leather" (template, 1.0) vs "silk" (open-world, 0.1). P1 is the
@@ -629,23 +668,18 @@ class EvidenceWeightingTest(unittest.TestCase):
         self.assertEqual(ranked[0], "P1",
                          "template evidence must outrank open-world extraction")
 
-    def test_confidence_is_actually_read_not_just_stored(self) -> None:
-        ag = self.agent(w_pop=0.0)
-        base = ag._blank_state()
-        base["phrases"] = ["leather", "silk"]
-        base["slots"] = [
-            A.SlotValue(attribute="material", value="leather", confidence=1.0),
-            A.SlotValue(attribute="material", value="silk", confidence=1.0),
-        ]
-        flipped = ag._blank_state()
-        flipped["phrases"] = ["leather", "silk"]
-        flipped["slots"] = [
-            A.SlotValue(attribute="material", value="leather", confidence=0.1),
-            A.SlotValue(attribute="material", value="silk", confidence=1.0),
-        ]
+    def test_negative_penalty_scales_with_confidence(self) -> None:
+        # A tentative extraction must not veto as hard as an explicit rejection.
+        ag = self.agent(w_pop=0.0, w_neg=5.0)
         cands = [(a, 0.0) for a in ("P1", "P2", "P3")]
-        self.assertNotEqual(ag._rerank(cands, base), ag._rerank(cands, flipped),
-                            "changing only confidence must change the ranking")
+        def reject(confidence: float) -> float:
+            state = ag._blank_state()
+            state["slots"] = [A.SlotValue(attribute="material", value="silk",
+                                          polarity=-1, confidence=confidence)]
+            return ag.score_candidates(cands, state)["P2"]
+        self.assertLess(reject(1.0), reject(0.3),
+                        "a confident rejection must penalise harder than a tentative one")
+        self.assertLess(reject(0.3), reject(0.0) + 1e-9)
 
     def test_negative_evidence_penalises_matching_candidates(self) -> None:
         # Reject silk: P2 (the silk scarf) must fall behind where it would
