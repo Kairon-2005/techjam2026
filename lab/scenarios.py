@@ -150,7 +150,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
              if sample_id in by_sample}
     turns, latency = [], []
     hits = {50: 0, 100: 0, "pool": 0}
-    scored = 0
+    scored = starved_scored = starved_pool_hits = 0
     for sid, state in getattr(agent, "_sessions", {}).items():
         target = truth.get(sid)
         for trace in state.get("trace_log") or []:
@@ -160,6 +160,10 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
             if cands is None or target is None:
                 continue
             scored += 1
+            if trace.get("starved"):
+                starved_scored += 1
+                if target in cands:
+                    starved_pool_hits += 1
             if target in cands[:50]:
                 hits[50] += 1
             if target in cands[:100]:
@@ -191,6 +195,27 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
         "latency_p50": _percentile(latency, 0.50),
         "latency_p95": _percentile(latency, 0.95),
     }
+    # Starvation telemetry: how often the widening fires, how deep it goes,
+    # and whether the funnel then threw the widened pool away.
+    starved = [t for t in turns if t.get("starved")]
+    bypassed = [t for t in turns if t.get("starvation_bypass")]
+    out["starved_rate"] = round(len(starved) / len(turns), 4)
+    out["bypass_rate"] = round(len(bypassed) / len(turns), 4)
+    out["bypass_per_session"] = round(
+        len(bypassed) / max(1, len(getattr(agent, "_sessions", {}) or {})), 4)
+    if starved:
+        depths = [t.get("retrieval_depth", 0) for t in starved]
+        pools = [t.get("fused_unique", 0) for t in starved]
+        out["starved_depth"] = round(sum(depths) / len(depths), 2)
+        out["starved_pool"] = round(sum(pools) / len(pools), 2)
+        out["starved_latency_p95"] = _percentile(
+            [t.get("retrieval_ms", 0.0) for t in starved], 0.95)
+    non = [t for t in turns if not t.get("starved")]
+    if non:
+        out["unstarved_latency_p95"] = _percentile(
+            [t.get("retrieval_ms", 0.0) for t in non], 0.95)
+    if starved_scored:
+        out["starved_recall_pool"] = round(starved_pool_hits / starved_scored, 4)
     if scored:
         out.update({"recall50": round(hits[50] / scored, 4),
                     "recall100": round(hits[100] / scored, 4),

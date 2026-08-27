@@ -356,6 +356,93 @@ class CategoryConstraintTest(PlaneTestBase):
         self.assertGreater(len(both), 1, "sibling branches were dropped")
 
 
+class SplitFlagTest(PlaneTestBase):
+    """deep_funnel, category_plane and starvation_bypass are independent.
+
+    dual_plane conflated all three, which is how "Phase 2B on" became a
+    package deal that could only be accepted or rejected whole.
+    """
+
+    def test_category_plane_off_leaves_the_pool_at_full_size(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": True, "category_plane": False})
+        state = self.state_with(ag, "women dresses")
+        trace: dict = {}
+        ag._safe_pool(state, ag.cfg, trace)
+        self.assertEqual(trace["category_shelves"], 0)
+        self.assertEqual(trace["pool_before_filter"],
+                         len(ag.cat.category_index.universe))
+
+    def test_category_plane_off_contributes_no_expansion_source(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": True, "category_plane": False})
+        state = self.state_with(ag, "women dresses")
+        state["terms"] = ["dress"]
+        trace: dict = {}
+        tagged = ag._plane_browsing(state, ag.cfg, 5, trace)
+        self.assertEqual(trace["route_candidates"]["expansion"], 0)
+        self.assertNotIn("expansion", {src for _, _, src in tagged})
+
+    def test_dual_plane_still_means_both(self) -> None:
+        # Retained only so the R1/R2 rows already in the ledger stay
+        # reproducible.
+        ag = A.Agent(self.path, config={"dual_plane": True})
+        self.assertTrue(ag._category_on(ag.cfg))
+        state = self.state_with(ag, "women dresses")
+        trace: dict = {}
+        ag._safe_pool(state, ag.cfg, trace)
+        self.assertGreater(trace["category_shelves"], 0)
+
+
+class StarvationBypassTest(PlaneTestBase):
+    """A constant funnel_top discards exactly the widening _starved() asks for."""
+
+    def _cands(self, ag: A.Agent, starved: bool, limit: int) -> tuple:
+        state = self.state_with(ag, "")
+        state["terms"] = ["dress", "skirt", "boots", "coat", "leather"]
+        state["starved"] = starved
+        return ag._candidates(state, ag.cfg, limit)
+
+    def test_a_starved_turn_bypasses_the_funnel(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": True, "category_plane": False,
+                                        "starvation_bypass": True, "funnel_top": 2})
+        _, trace = self._cands(ag, starved=True, limit=50)
+        self.assertTrue(trace["starvation_bypass"])
+        self.assertEqual(trace["plane"], "starved_legacy")
+        self.assertNotIn("funnel_out", trace, "the funnel ran on a starved turn")
+
+    def test_the_starved_pool_is_not_truncated_to_the_funnel_cap(self) -> None:
+        common = {"deep_funnel": True, "category_plane": False, "funnel_top": 2}
+        capped = A.Agent(self.path, config={**common, "starvation_bypass": False})
+        freed = A.Agent(self.path, config={**common, "starvation_bypass": True})
+        small, _ = self._cands(capped, starved=True, limit=50)
+        large, _ = self._cands(freed, starved=True, limit=50)
+        self.assertEqual(len(small), 2, "the funnel cap did not apply")
+        self.assertGreater(len(large), len(small),
+                           "the bypass did not restore the widened pool")
+
+    def test_the_bypass_does_not_leak_into_an_unstarved_turn(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": True, "category_plane": False,
+                                        "starvation_bypass": True, "funnel_top": 2})
+        _, starved = self._cands(ag, starved=True, limit=50)
+        cands, normal = self._cands(ag, starved=False, limit=50)
+        self.assertTrue(starved["starvation_bypass"])
+        self.assertFalse(normal["starvation_bypass"],
+                         "starvation state leaked into a later turn")
+        self.assertEqual(len(cands), 2, "the funnel did not resume")
+
+    def test_bypass_off_leaves_the_starved_turn_capped(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": True, "category_plane": False,
+                                        "starvation_bypass": False, "funnel_top": 2})
+        _, trace = self._cands(ag, starved=True, limit=50)
+        self.assertFalse(trace["starvation_bypass"])
+        self.assertEqual(trace["funnel_out"], 2)
+
+    def test_the_bypass_is_inert_without_deep_funnel(self) -> None:
+        ag = A.Agent(self.path, config={"deep_funnel": False, "starvation_bypass": True})
+        _, trace = self._cands(ag, starved=True, limit=50)
+        self.assertFalse(trace["starvation_bypass"])
+        self.assertEqual(trace["plane"], "legacy")
+
+
 class CompatibilityTest(PlaneTestBase):
     def test_the_feature_off_path_is_untouched(self) -> None:
         off = self.agent(dual_plane=False)

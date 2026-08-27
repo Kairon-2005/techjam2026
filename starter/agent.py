@@ -165,7 +165,19 @@ DEFAULTS = {
     # ---- Phase 2B: route-specific retrieval data planes -----------------
     # OFF until measured. With this false the retrieval path is exactly the
     # Phase 2A one, which is what keeps the compatibility score bit-exact.
+    # dual_plane conflated three independent things, which is how "Phase 2B
+    # on" came to mean a package deal that could only be accepted or rejected
+    # whole. They are separate switches now. dual_plane is retained ONLY so
+    # the R1/R2 rows already in the ledger stay reproducible: it means
+    # deep_funnel AND category_plane.
     "dual_plane": False,
+    "deep_funnel": False,      # deep retrieval + deterministic Top-100 preselect
+    "category_plane": False,   # category constraint + category candidate source
+    # On a starved turn, bypass the fixed funnel and restore the Phase 1
+    # widened pool. A constant funnel_top otherwise discards exactly the
+    # widening that _starved() just asked for: measured on uncooperative as
+    # pool 400.4 without the funnel against 100.0 with it, costing 0.158.
+    "starvation_bypass": False,
     # Pins the route regardless of evidence. Used ONLY for the controlled
     # same-query Buying/Browsing/Mixed comparison, where the point is to hold
     # the query fixed and vary nothing but the plane.
@@ -1227,7 +1239,7 @@ class Agent:
         on dual_plane because on the legacy path the category still feeds
         query TERMS, and removing them there would move the frozen baseline.
         """
-        if not cfg.get("dual_plane") or not state.get("category"):
+        if not self._category_on(cfg) or not state.get("category"):
             return
         span = abandoned_span(message)
         if not span:
@@ -1462,6 +1474,16 @@ class Agent:
 
     # ---- Phase 2B: route-specific retrieval data planes ----------------
 
+    @staticmethod
+    def _category_on(cfg: dict) -> bool:
+        """Whether the category plane contributes at all this turn.
+
+        R2 measured it as a net cost at both retrieval depths, so it is a
+        separate switch that the candidate default leaves off, rather than
+        something bolted to `deep_funnel`.
+        """
+        return bool(cfg["category_plane"] or cfg["dual_plane"])
+
     def _eligible_filters(self, state: dict, cfg: dict) -> tuple[list, list]:
         """Which constraints may narrow the pool, and why each other may not.
 
@@ -1512,8 +1534,9 @@ class Agent:
         """
         cats, facets = self.cat.category_index, self.cat.facet_index
         universe = cats.universe
-        shelves = cats.matching_shelves(state["category"] or "")
-        shelf_ids = cats.members_of(state["category"] or "")
+        on = self._category_on(cfg)
+        shelves = cats.matching_shelves(state["category"] or "") if on else []
+        shelf_ids = cats.members_of(state["category"] or "") if on else frozenset()
         hard_category = 0 < len(shelves) <= int(cfg["category_hard_max_shelves"])
         base = shelf_ids if (hard_category and shelf_ids) else universe
         trace["category_node"] = [" > ".join(p) for p in shelves][:6] or None
@@ -1555,6 +1578,8 @@ class Agent:
         """
         cats = self.cat.category_index
         ranked = sorted(ids, key=lambda i: -self.cat.pop_pct.get(cats.asins[i], 0.0))
+        if not self._category_on(cfg):
+            return []
         return [(cats.asins[i], floor, "expansion") for i in ranked[:max(0, budget)]]
 
     def _plane_buying(self, state: dict, cfg: dict, limit: int,
@@ -1571,7 +1596,8 @@ class Agent:
         rescue = [(a, sc, "rescue") for a, sc in raw if cats.ids.get(a, -1) not in pool]
         seen = {a for a, _, _ in inside} | {a for a, _, _ in rescue}
         shelf_only = frozenset(i for i in cats.members_of(state["category"] or "")
-                               if cats.asins[i] not in seen)
+                               if cats.asins[i] not in seen) \
+            if self._category_on(cfg) else frozenset()
         expansion = self._shelf_source(state, cfg, shelf_only,
                                        int(cfg["funnel_top"]), floor)
         trace["route_candidates"] = {"bm25": len(raw), "in_pool": len(inside),
@@ -1586,7 +1612,8 @@ class Agent:
         """category expansion + BM25, capped per shelf. No facet filtering:
         browsing is for finding out what exists, and a filter only removes."""
         cats = self.cat.category_index
-        shelves = cats.matching_shelves(state["category"] or "")
+        shelves = cats.matching_shelves(state["category"] or "") \
+            if self._category_on(cfg) else []
         near: set[int] = set()
         for shelf in shelves:
             near |= cats.expand(shelf, int(cfg["browsing_expand_up"]),
@@ -1619,8 +1646,9 @@ class Agent:
         """Balanced union, no filtering. Where the route is uncertain the only
         safe move is to keep recall and let the next turn decide."""
         cats = self.cat.category_index
-        shelves = cats.matching_shelves(state["category"] or "")
-        members = cats.members_of(state["category"] or "")
+        on = self._category_on(cfg)
+        shelves = cats.matching_shelves(state["category"] or "") if on else []
+        members = cats.members_of(state["category"] or "") if on else frozenset()
         trace["category_node"] = [" > ".join(p) for p in shelves][:6] or None
         trace["category_shelves"] = len(shelves)
         trace["category_pool"] = len(members)
@@ -1684,7 +1712,13 @@ class Agent:
         can change a result is not telemetry.
         """
         route = cfg.get("force_route") or state.get("route") or "mixed"
+        deep = bool(cfg["deep_funnel"] or cfg["dual_plane"])
+        starved = bool(state.get("starved"))
+        # The bypass is decided from this turn's starvation state alone, so it
+        # cannot leak into a later turn that has evidence again.
+        bypass = bool(deep and starved and cfg["starvation_bypass"])
         trace: dict = {"route": route, "plane": "legacy",
+                       "starved": starved, "starvation_bypass": bypass,
                        "hard_slots": sum(1 for sl in state["slots"]
                                          if sl.usable and sl.hardness == "hard"),
                        "soft_slots": sum(1 for sl in state["slots"]
@@ -1692,21 +1726,26 @@ class Agent:
                        "negative_slots": sum(1 for sl in state["slots"]
                                              if sl.active and sl.polarity < 0)}
         started = time.perf_counter()
-        if not cfg["dual_plane"]:
+        if not deep or bypass:
+            # Phase 1's path verbatim, at whatever limit the caller set --
+            # already widened to starved_candidates when starved. Reusing the
+            # verified path is the point: nothing new is designed here.
             cands = self._retrieve(state["terms"], limit, cfg)
+            trace["plane"] = "starved_legacy" if bypass else "legacy"
             trace["route_candidates"] = {"bm25": len(cands)}
         else:
             plane = {"buying": self._plane_buying,
                      "browsing": self._plane_browsing}.get(route, self._plane_mixed)
             trace["plane"] = route if route in ("buying", "browsing") else "mixed"
             cands = self._funnel(plane(state, cfg, limit, trace), cfg, trace)
+        trace["retrieval_depth"] = limit
         seen: set[str] = set()
         deduped = [(a, sc) for a, sc in cands if not (a in seen or seen.add(a))]
         trace["fused_unique"] = len(deduped)
         if cfg["trace_candidates"]:
             trace["candidates"] = [a for a, _ in deduped]
         trace["retrieval_ms"] = round((time.perf_counter() - started) * 1000, 3)
-        if cfg["dual_plane"]:
+        if deep:
             ids = self.cat.category_index.ids
             trace["category_coverage"] = self.cat.category_index.coverage(
                 [ids[a] for a, _ in deduped[:100] if a in ids])
