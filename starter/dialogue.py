@@ -1,0 +1,434 @@
+"""Dialogue: session state, and what to say next.
+
+Override handling and span-targeted erasure, credibility of older evidence,
+starvation detection, candidate-aware question utility, and the customer-facing
+copy. Everything here reads or writes the per-session state dict.
+
+HOST CAPABILITIES REQUIRED (reached through `self`, never imported):
+    self.cfg            resolved configuration
+    self.cat            catalog and its indexes
+    self.stop           stopword set
+    self._terms()       tokenisation
+    self._route_cfg()   per-route configuration      [RetrievalMixin]
+    self._category_on() whether the category plane contributes [RetrievalMixin]
+
+The last two are calls INTO RetrievalMixin. They are listed rather than
+imported: the two mixins must not import each other, and the domain
+dependency between them is real and is documented, not dissolved. See
+notes/25-phase5b-design.md -- an acyclic IMPORT graph is not an acyclic
+DOMAIN graph, and this split does not claim otherwise.
+"""
+from __future__ import annotations
+
+import math
+import re
+
+from starter.catalog import _clean
+from starter.evidence import (
+    ABANDON_RE, ANSWERABILITY, ATTR_VOCAB, NOISE_REPLIES, OVERRIDE_MARK,
+    PROBE_ORDER, SINGLE_VALUED, TOKEN_RE, _distinguishing, _norm,
+    abandoned_span, is_override, parse_message, slot_of,
+)
+
+
+class DialogueMixin:
+    """Mixed into Agent. Not instantiable alone -- see host capabilities above."""
+
+    @staticmethod
+    def _route(first_message: str, phrases: list[str] | None = None,
+               category: str | None = None) -> str:
+        """Classify the opening turn.
+
+        Unknown phrasing used to fall through to "override", which is a claim
+        the message never made -- 100% of vague openings ("Show me something
+        good") were labelled as intent overrides. Unknown now degrades to
+        "mixed", and the label is inferred from what the message actually
+        carried rather than from which template it failed to match.
+        """
+        low = (first_message or "").lower()
+        if "a key requirement is" in low:
+            return "buying"
+        if "still exploring" in low:
+            return "browsing"
+        if is_override(first_message):
+            return "override"
+        if phrases:
+            return "buying"        # a requirement was stated, whatever the wording
+        if category:
+            return "browsing"      # a category but no requirement yet
+        return "mixed"             # under-specified: neither is known
+    @staticmethod
+    def _retarget(state: dict) -> str:
+        """Routes are not fixed at turn 1: browsing converges into buying.
+
+        Once a shopper has committed to real constraints they are no longer
+        browsing, so an exploratory route must be able to firm up.
+        """
+        route = state.get("route") or "mixed"
+        if route in ("mixed", "browsing"):
+            # Any constraint the shopper volunteers is a commitment signal.
+            # Gating on hardness=="hard" would only ever count turn-1 openings,
+            # so a browser who later states requirements could never firm up.
+            if any(slot.usable for slot in state["slots"]):
+                return "buying"
+            if route == "mixed" and state.get("category"):
+                return "browsing"
+        return route
+
+    def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]",
+                      skip_missing: bool = False) -> float:
+        """Shannon entropy (bits) of one attribute's values across the pool.
+
+        A question is worth asking only if the surviving candidates actually
+        disagree on it: if every candidate is black, "what colour?" buys nothing.
+        """
+        counts: dict[str, int] = {}
+        for asin in asins:
+            match = pattern.search(self.cat.text.get(asin, ""))
+            if match is None and skip_missing:
+                # Silence is not an answer the customer can give. Counting it
+                # as a value makes a sparsely-described attribute look like the
+                # most discriminating question in the pool.
+                continue
+            value = match.group(1).lower() if match else ""
+            counts[value] = counts.get(value, 0) + 1
+        total = sum(counts.values())
+        if total < 2 or len(counts) < 2:
+            return 0.0
+        return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
+
+    def _easiest_unasked(self, state: dict) -> str:
+        """The most answerable facet not yet asked, ignoring pool entropy."""
+        asked = set(state["asked"])
+        options = [(score, name) for name, score in ANSWERABILITY.items()
+                   if name not in asked and name in ATTR_VOCAB]
+        return max(options)[1] if options else ""
+
+    def _suppress_abandoned(self, state: dict, message: str, cfg: dict) -> None:
+        """Bar soft-rescue for exactly what the customer named as abandoned.
+
+        Blanket blocking of every pre-pivot slot fixes the category pivot but
+        costs paraphrase robustness, because most old evidence is still valid.
+        The customer told us which part is dead -- suppress only that.
+        """
+        if not cfg.get("suppress_abandoned"):
+            return          # the switch must disable the whole mechanism, not
+                            # just the rerank blocklist: without this the "off"
+                            # arm of the ablation still deactivated slots.
+        span = abandoned_span(message)
+        if not span:
+            return
+        span_tokens = set(self._terms(span))
+        if not span_tokens:
+            return
+        for slot in state["slots"]:
+            if not slot.usable or not slot.soft_ok:
+                continue
+            tokens = set(self._terms(slot.value))
+            if tokens and len(tokens & span_tokens) / len(tokens) >= 0.5:
+                slot.soft_ok = False
+                slot.contradiction = "abandoned"
+                if cfg.get("abandoned_policy") == "deactivate":
+                    slot.active = False
+
+    def _release_abandoned_category(self, state: dict, message: str, cfg: dict) -> None:
+        """Stop pinning the shelf the customer just walked away from.
+
+        Before Phase 2B a stale category contributed a handful of weak query
+        terms and the ranker could out-vote it. With a category data plane it
+        selects the candidate pool, so "forget dresses" while state["category"]
+        still says dresses holds the customer on the shelf they just left --
+        and the rescue lane would be carrying the entire rest of the catalog.
+
+        Dropping to None is deliberate: no category constraint is a weaker
+        claim than the wrong one, and the next turn can re-establish it. Gated
+        on dual_plane because on the legacy path the category still feeds
+        query TERMS, and removing them there would move the frozen baseline.
+        """
+        if not self._category_on(cfg) or not state.get("category"):
+            return
+        span = abandoned_span(message)
+        if not span:
+            return
+        span_tokens = set(self._terms(span))
+        current = set(self._terms(state["category"]))
+        if not span_tokens or not current:
+            return
+        # Measured against the SPAN, not the category: "forget dresses" names
+        # one word of a three-word category and still abandons it, whereas
+        # requiring a third of the category to be named let that through.
+        if len(current & span_tokens) / len(span_tokens) < 0.5:
+            return                      # they abandoned something else
+        _, phrases = parse_message(message)
+        for phrase in phrases:          # did they name a shelf to move to?
+            if self.cat.category_index.shelves(phrase):
+                state["category"] = phrase
+                return
+        state["category"] = None
+
+    def _uncredible(self, state: dict) -> frozenset:
+        """Constraint values that may still match exactly but must not be
+        soft-matched: stated before an override, or contested by a newer value
+        of a single-valued attribute.
+        """
+        pivot = state.get("last_override_turn", 0)
+        blocked: set[str] = set()
+        latest: dict[str, tuple[int, str]] = {}
+        for slot in state["slots"]:
+            if not slot.usable:
+                continue
+            if pivot and slot.source_turn <= pivot:
+                blocked.add(slot.value)          # predates the customer's pivot
+            if slot.attribute in SINGLE_VALUED:
+                seen = latest.get(slot.attribute)
+                if seen is None or slot.source_turn >= seen[0]:
+                    if seen is not None and seen[1] != slot.value:
+                        blocked.add(seen[1])     # superseded by a newer value
+                    latest[slot.attribute] = (slot.source_turn, slot.value)
+                elif seen[1] != slot.value:
+                    blocked.add(slot.value)
+        return frozenset(blocked)
+
+    def _starved(self, state: dict, cfg: dict) -> bool:
+        """Thin evidence, not merely a quiet turn.
+
+        Widening trades MRR for recall, so it must fire only when recall is
+        actually the binding constraint: the customer has stalled AND the query
+        we would run is thin, or they explicitly asked to see more.
+        """
+        if not cfg["starved_candidates"]:
+            return False
+        stalled = state.get("dry_streak", 0) >= int(cfg["starved_after"])
+        if not (stalled or state.get("rotate_pending")):
+            return False
+        active = sum(1 for slot in state["slots"] if slot.usable)
+        return (len(state["terms"]) <= int(cfg["starved_max_terms"])
+                or active <= int(cfg["starved_max_slots"]))
+
+    def _overgeneral(self, pool: list[str], cfg: dict) -> tuple[bool, list[str]]:
+        """Is the pool too broad to rank, rather than merely unranked?
+
+        Truncating recommendations would be pure loss under this metric, so the
+        cutoff drives the QUESTION, not the result list: we stop trying to rank
+        an under-specified request and ask a structured one instead.
+        """
+        limit = int(cfg["overgeneral_cats"])
+        if not limit or not pool:
+            return False, []
+        head = pool[: max(2, int(cfg["pool_depth"]))]
+        counts: dict[str, int] = {}
+        for asin in head:
+            leaf = (self.cat.cats.get(asin, "").split(",")[-1] or "").strip()
+            if leaf:
+                counts[leaf] = counts.get(leaf, 0) + 1
+        if len(counts) < limit:
+            return False, []
+        top = [name for name, _ in sorted(counts.items(), key=lambda kv: -kv[1])[:3]]
+        return True, _distinguishing(top)
+
+    def _pool_attribute(self, state: dict, pool: list[str],
+                        cfg: dict | None = None) -> tuple[str, float, int]:
+        """Ask about whichever attribute best splits the live candidate pool."""
+        cfg = cfg or self.cfg
+        depth = max(2, int(cfg["pool_depth"]))
+        window = pool[:depth]
+        # Once the customer has gone quiet, a question they cannot answer costs
+        # a whole turn for nothing, so discount by how answerable it is.
+        weigh = state.get("dry_streak", 0) >= int(cfg["answerability_after"])
+        utility = bool(cfg["question_utility"])
+        best, best_bits, best_util = "other", 0.0, 0.0
+        for attribute, pattern in ATTR_VOCAB.items():
+            if attribute in state["asked"]:      # not_already_asked
+                continue
+            if utility:
+                # information_gain x catalog_coverage x answerability
+                #   - expected_dry_turn_cost
+                bits = self._pool_entropy(window, pattern, skip_missing=True)
+                coverage = self._facet_coverage(window, attribute)
+                answerable = ANSWERABILITY.get(attribute, 0.5)
+                util = (bits * coverage * answerable
+                        - cfg["question_dry_cost"] * (1.0 - coverage * answerable))
+            else:
+                bits = self._pool_entropy(window, pattern)
+                util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
+            if util > best_util:
+                best, best_bits, best_util = attribute, bits, util
+        # How much of the window actually STATES a value for the attribute we
+        # are about to ask about. _pool_entropy counts the empty string as a
+        # value, so a facet that most products are silent about scores as
+        # "the candidates disagree" when what they do is say nothing.
+        state["last_coverage"] = self._facet_coverage(window, best)
+        state["last_weighed"] = bool(weigh)
+        return best, best_bits, len(window)
+
+    def _facet_coverage(self, window: list[str], attribute: str) -> float:
+        """Share of the window carrying any value for `attribute`."""
+        pattern = ATTR_VOCAB.get(attribute)
+        if not pattern or not window:
+            return 0.0
+        seen = sum(1 for asin in window
+                   if pattern.search(self.cat.text.get(asin, "")))
+        return round(seen / len(window), 4)
+
+    def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
+        cfg = self._route_cfg(state)
+        policy = cfg["ask_policy"]
+        limit = cfg["ask_fallback_after"]
+        if policy in ("pool", "other_then_pool"):
+            if policy == "other_then_pool" and state["asked"].count("other") < 2:
+                return "other"
+            # A targeted question that yields nothing means our attribute
+            # taxonomy disagrees with the customer's. Stop guessing buckets and
+            # go open-ended rather than walking the whole list dry.
+            broad, options = self._overgeneral(pool or [], cfg)
+            state["broad_options"] = options
+            # A customer who cannot answer is not a customer with no preference:
+            # keep asking, but ask something easier, instead of falling back to
+            # the open-ended question they already failed to answer.
+            if state.get("uncertain_streak", 0) >= int(cfg["answerability_after"]):
+                easy = self._easiest_unasked(state)
+                if easy:
+                    state["last_bits"] = 0.0
+                    return easy
+            # An over-general pool is exactly when a targeted question pays, so
+            # the give-up guard is suspended while the request is still vague.
+            if not broad and state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
+                return "other"
+            attribute, bits, _ = self._pool_attribute(state, pool or [], cfg)
+            state["last_bits"] = bits
+            # No question discriminates the pool -> fall back to open-ended.
+            return attribute if bits >= 0.2 else "other"
+        if policy == "other" and limit and state.get("dry_others", 0) >= limit:
+            # The simulator is not answering "other": degrade to concrete attributes.
+            return next((a for a in PROBE_ORDER[:-1] if a not in state["asked"]), "other")
+        if policy == "probe_cycle":
+            return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
+        if policy == "other_then_cycle":
+            if state["asked"].count("other") < 2:
+                return "other"
+            return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
+        return "other"
+
+    def _rebuild_terms(self, state: dict, message: str, cfg: dict) -> None:
+        """Query terms come from accepted evidence, not from raw message tokens.
+
+        The legacy path appended every non-stopword token of any message the
+        noise filter let through, so "Hmm, hard to say really" contributed
+        hmm/hard/say/really to the BM25 query. On the clean simulator the two
+        paths agree exactly -- every message there is either a parsable template
+        or already filtered -- so this is free on the public set and only bites
+        when the customer says something the templates do not cover.
+        """
+        if not cfg["evidence_query"]:
+            for term in self._terms(message):
+                if term not in state["terms"]:
+                    state["terms"].append(term)
+            return
+        terms: list[str] = []
+        for term in self._terms(state["category"] or ""):
+            if term not in terms:
+                terms.append(term)
+        for slot in state["slots"]:
+            if not slot.usable:
+                continue
+            for term in slot.provenance:
+                if term not in terms:
+                    terms.append(term)
+        state["terms"] = terms
+
+    def _slot_override(self, state: dict, message: str) -> None:
+        """Selective rewrite: drop only the slots the customer just replaced.
+
+        "forget boots, I want running shoes" supersedes the use_case/category
+        slot and leaves an unrelated colour constraint standing. Slots in a
+        superseded attribute are deactivated along with the terms they
+        contributed; every other slot survives.
+        """
+        new_category, new_phrases = parse_message(message)
+        superseded = {slot_of(p) for p in new_phrases if len(_norm(p)) >= 3}
+        if new_category:
+            superseded.add("category")
+            state["category"] = new_category
+        if not superseded:
+            return
+        incoming = {_norm(p) for p in new_phrases}
+        dropped = False
+        for slot in state["slots"]:
+            if not slot.usable or slot.value in incoming:
+                continue                            # re-stated verbatim: not stale
+            if slot.attribute in superseded:
+                slot.active = False
+                slot.contradiction = "superseded"
+                dropped = True
+        if not dropped:
+            return
+        # Slots are the source of truth: deactivating one removes the terms it
+        # contributed, because the query is rebuilt from active evidence.
+        state["phrases"] = [sl.value for sl in state["slots"] if sl.usable]
+        survivors: set[str] = set(self._terms(state["category"] or ""))
+        for slot in state["slots"]:
+            if slot.usable:
+                survivors.update(slot.provenance)
+        state["terms"] = [t for t in state["terms"] if t in survivors]
+
+    # ---- customer-facing copy ----------------------------------------
+    # The evaluator only requires `message` to be a string; it drives the
+    # simulator entirely from `ask_attribute`. So the wording is free, and
+    # there is no reason for it to read like a form field.
+    ASK_COPY = {
+        "material": "what it should be made of",
+        "color": "which colours work for you",
+        "size": "what size you take",
+        "style": "the cut or style you prefer",
+        "feature": "any feature you can't do without",
+        "use_case": "where you'll mostly be using it",
+        "brand": "whether you lean towards a particular brand",
+        "budget": "roughly what you'd like to spend",
+        "category": "what kind of item you have in mind",
+        "other": "anything else that matters to you",
+    }
+
+    def _compose(self, attribute: str, state: dict, ranked: list[str],
+                 shown: list[str]) -> str:
+        if not shown:
+            return ("I haven't got a good match yet — could you tell me a bit more "
+                    "about what you're after?")
+        lead = ""
+        top = self.cat.title.get(shown[0], "")
+        # Prefer short attribute-like constraints; marketing prose lifted from a
+        # description reads badly when quoted back at the customer.
+        hits = [p for p in state["phrases"] if _norm(p) in self.cat.text.get(shown[0], "")]
+        matched = [_clean(p, 44) for p in sorted(hits, key=len) if len(p) <= 50][:2]
+        matched = [m for m in matched if m]
+        if top:
+            if matched:
+                lead = (f"Top of the list right now is {top} — it matches "
+                        f"{' and '.join(matched)}. ")
+            else:
+                lead = f"Top of the list right now is {top}. "
+        options = state.get("broad_options") or []
+        bits = state.get("last_bits", 0.0)
+        if options and len(options) >= 2:
+            listed = ", ".join(options[:-1]) + f" or {options[-1]}"
+            return (lead + f"That still spans quite a range — I'm seeing {listed}. "
+                    f"Which of those is closest to what you want?")
+        if attribute in ATTR_VOCAB and bits:
+            depth = min(len(ranked), max(2, int(self.cfg["pool_depth"])))
+            ask = (f"The {depth} closest options still disagree most on "
+                   f"{self.ASK_COPY.get(attribute, attribute)}, so that answer would "
+                   f"narrow things down fastest — any preference?")
+        else:
+            ask = f"To sharpen this, could you tell me {self.ASK_COPY.get(attribute, attribute)}?"
+        return lead + ask
+    # ---- protocol ----------------------------------------------------
+    @staticmethod
+    def _blank_state(profile: dict | None = None) -> dict:
+        return {
+            "terms": [], "asked": [], "phrases": [], "category": None,
+            "route": None, "profile": profile or {}, "dry_others": 0,
+            # phrase -> terms it contributed, so slot erasure can drop them too
+            "provenance": {}, "overrides": 0, "dry_streak": 0, "broad_options": [],
+            "slots": [], "outcome": "", "wants_more": 0, "shown": [],
+            "uncertain_streak": 0, "last_override_turn": 0, "rotate_pending": False,
+            "route_history": [],
+        }
