@@ -73,7 +73,12 @@ DEFAULTS = {
     # actually asked about has a value on only 56% of the window on clean and
     # 26% on uncooperative. Utility scores coverage and answerability
     # explicitly instead, and excludes the missing bucket from the entropy.
-    "question_utility": False,
+    # PHASE 3 DEFAULT. Selected as a near-score-neutral product/robustness
+    # trade-off, NOT as the highest public-score configuration: ask_policy=
+    # "other" still scores highest at 0.932167 against this at 0.932067. The
+    # 0.0001 is spent deliberately, to keep candidate-aware proactive
+    # guidance, a lower dry-question rate and coverage-aware behaviour.
+    "question_utility": True,
     "question_dry_cost": 0.35,    # penalty for a question likely to go dry
     "rotate_on_request": True,    # "show me more" rotates unseen candidates up
     "rotate_keep_top": 3,         # protect the confident head so MRR survives

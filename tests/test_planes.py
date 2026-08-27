@@ -499,8 +499,10 @@ class QuestionUtilityTest(PlaneTestBase):
             self.assertGreater(state["last_coverage"], 0.0,
                                "utility picked an attribute nothing in the pool states")
 
-    def test_the_flag_is_off_by_default(self) -> None:
-        self.assertFalse(A.DEFAULTS["question_utility"])
+    def test_utility_is_the_shipped_default(self) -> None:
+        # Adopted at Phase 3 close as a product/robustness trade-off, not as
+        # the highest-scoring configuration.
+        self.assertTrue(A.DEFAULTS["question_utility"])
 
     def test_utility_changes_which_question_is_asked(self) -> None:
         entropy_ag = self.agent(question_utility=False)
