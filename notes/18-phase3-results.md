@@ -133,6 +133,44 @@ PASS.
 adds no index; it reuses the existing window and vocabularies) · median pool
 reduction ≥20%: **UNMEASURABLE** — structurally 0 under the funnel, see above.
 
+## Default decision, stated honestly
+
+**`question_utility` = ON is adopted as the Phase 3 product default.**
+
+It is **not** the highest public-score configuration, and this note will not
+imply otherwise. The ranking on `clean` is:
+
+| config | clean score |
+|---|---|
+| A — `ask_policy="other"`, no pool awareness | **`0.932167`** ← best public score |
+| C — candidate-aware utility (adopted) | `0.932067` |
+| B — previous `other_then_pool` default | `0.931967` |
+
+> C is selected as a **near-score-neutral product/robustness trade-off, not as
+> the highest public-score configuration**. It accepts a `0.0001` public-score
+> difference versus `ask_policy="other"` to retain candidate-aware proactive
+> guidance, a lower dry-question rate, and better coverage-aware behaviour.
+
+What the 0.0001 buys: structured over-generality guidance on 9.5% of `clean`
+turns and 24.5% of `vague_start` turns, which arm A never produces at all;
+and question selection that stops maximising an entropy substantially composed
+of missing values — the attribute asked about carried a real value on 56.4% of
+the window under B, and the missing bucket is excluded outright under C.
+
+What it costs beyond the score: nothing measurable. C is at or above B on
+every recorded scenario except `contradiction`, where it is `−0.00002`.
+
+Two things this decision is explicitly **not** based on:
+
+* **Pool reduction.** The pre-registered product gate — median pool reduction
+  ≥ 20% after an answered question — turned out to be **unsatisfiable by any
+  question policy**. The funnel emits exactly `funnel_top = 100` candidates
+  every turn, so `pool_size_next_turn` is 100 regardless of what was asked and
+  the measured reduction is 0.0000 for every arm. That is a property of the
+  Phase 2 funnel, not of the clarification policy, and it is a defect in this
+  project's own pre-registration that only measurement exposed.
+* **Any supplementary gain.** Supplementary evidence is veto-only.
+
 ## Recommendation
 
 Adopt arm C. It is never worse, deterministically better on both deterministic
