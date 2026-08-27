@@ -229,6 +229,15 @@ DEFAULTS = {
     # ranking, question selection, slot mutation or personalization. Requires
     # trace=True, because there is nowhere else to put the result.
     "context_shadow": False,
+    # Phase 6B1 retrieval orchestration. Three states, not a boolean: "shadow"
+    # computes the new decision while the legacy path still controls, so the
+    # two can be compared per turn before anything is handed over.
+    #   off     legacy path, no decision computed
+    #   shadow  decision computed, legacy path controls
+    #   control decision controls depth and starvation
+    # "control" works with trace=False. Telemetry may depend on trace;
+    # orchestration may not.
+    "retrieval_context_mode": "off",
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -355,6 +364,7 @@ class Agent(RetrievalMixin, DialogueMixin):
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl",
                  config: dict | None = None) -> None:
         self.cfg = _load_config(config)
+        self._warned_modes: set[str] = set()
         extras = self.cfg.get("build_extras")
         if extras is None:
             extras = bool(self.cfg["w_pos"]) or bool(self.cfg["w_card"])
@@ -371,6 +381,22 @@ class Agent(RetrievalMixin, DialogueMixin):
         return terms_of(text, self.stop)
 
 
+
+    def _retrieval_mode(self, cfg: dict) -> str:
+        """Validated mode. An unrecognised value degrades to "off", loudly.
+
+        Never silently to "control": a typo must not hand a live decision
+        control of retrieval, and a silently void switch is the failure this
+        project has hit before with `"route": false`.
+        """
+        mode = str(cfg.get("retrieval_context_mode", "off"))
+        if mode in _context.RETRIEVAL_MODES:
+            return mode
+        if mode not in self._warned_modes:
+            self._warned_modes.add(mode)
+            print(f"[agent] warning: unknown retrieval_context_mode {mode!r}; "
+                  f"falling back to 'off'", file=sys.stderr)
+        return "off"
 
     def _shadow_context(self, state: dict, trace: dict, ranked: list[str],
                         turn: int, cfg: dict) -> None:
@@ -528,11 +554,33 @@ class Agent(RetrievalMixin, DialogueMixin):
                 state.setdefault("route_history", []).append(moved)
 
         top_k = min(int(top_k), 100)  # contract: recommendations maxItems 100
+        # Resolved ONCE and reused for the policy and for every downstream
+        # retrieval call, so the decision cannot be judged against a different
+        # configuration from the one that then runs.
         turn_cfg = self._route_cfg(state)
-        depth = turn_cfg["candidates"]
-        starved = self._starved(state, turn_cfg)
-        if starved:
-            depth = max(depth, int(turn_cfg["starved_candidates"]))
+        mode = self._retrieval_mode(turn_cfg)
+        decision = None
+        if mode != "off":
+            snapshot = _context.PreRetrievalSnapshot(
+                route=str(state.get("route") or "mixed"),
+                query_term_count=len(state["terms"]),
+                active_slot_count=sum(1 for sl in state["slots"] if sl.usable),
+                dry_streak=int(state.get("dry_streak") or 0),
+                rotate_pending=bool(state.get("rotate_pending")))
+            decision = _context.decide_retrieval(
+                snapshot, _context.policy_from(turn_cfg))
+        # TEMPORARY (Phase 6B1 measurement commit): the legacy rule is kept
+        # alongside the new one so shadow mode can compare them per turn. Two
+        # copies of a starvation rule is exactly the defect class this project
+        # has already paid for twice, and the adoption commit deletes this one.
+        legacy_starved = self._starved(state, turn_cfg)
+        legacy_depth = turn_cfg["candidates"]
+        if legacy_starved:
+            legacy_depth = max(legacy_depth, int(turn_cfg["starved_candidates"]))
+        if mode == "control" and decision is not None:
+            starved, depth = decision.starved, decision.candidate_depth
+        else:
+            starved, depth = legacy_starved, legacy_depth
         state["starved"] = bool(starved)
         limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
         cands, trace = self._candidates(state, turn_cfg, limit)
@@ -546,6 +594,20 @@ class Agent(RetrievalMixin, DialogueMixin):
             # Recorded AFTER ranking and read by nobody upstream of it. The
             # decision trace has to be able to explain a turn without being
             # able to change one.
+            if decision is not None:
+                # Telemetry only. Recording agreement depends on trace;
+                # deciding does not.
+                trace.update({
+                    "retrieval_mode_setting": mode,
+                    "decided_starved": decision.starved,
+                    "decided_depth": decision.candidate_depth,
+                    "decided_retrieval_mode": decision.retrieval_mode,
+                    "decided_reasons": [r.value for r in decision.reasons],
+                    "legacy_starved": legacy_starved,
+                    "legacy_depth": legacy_depth,
+                    "starved_agrees": decision.starved == legacy_starved,
+                    "depth_agrees": decision.candidate_depth == legacy_depth,
+                })
             trace.update({"turn": turn, "starved": bool(starved),
                           "route_history": list(state.get("route_history") or []),
                           "shown": len(ordered)})

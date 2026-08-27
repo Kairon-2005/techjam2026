@@ -227,6 +227,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
             [t.get("retrieval_ms", 0.0) for t in non], 0.95)
     out.update(_question_telemetry(agent))
     out.update(_shadow_telemetry(turns))
+    out.update(_retrieval_decision_telemetry(turns))
     # Route-topology evidence. The Pillar I claim rests on these and not on a
     # route label, so they are recorded for every arm including the ones with
     # no dense source at all.
@@ -263,6 +264,31 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
                     "recall_pool": round(hits["pool"] / scored, 4),
                     "recall_turns": scored})
     return out
+
+
+def _retrieval_decision_telemetry(turns: list) -> dict:
+    """Phase 6B1 agreement between the extracted rule and the legacy one.
+
+    Reported as COUNTS of disagreeing turns, not as a rate. The gate is total
+    agreement, and a rate of 0.9997 reads as a pass while naming three broken
+    turns; a count of 3 does not.
+    """
+    rows = [t for t in turns if "decided_starved" in t]
+    if not rows:
+        return {}
+    starved_bad = [t for t in rows if not t.get("starved_agrees")]
+    depth_bad = [t for t in rows if not t.get("depth_agrees")]
+    codes: dict[str, int] = {}
+    for trace in rows:
+        for code in trace.get("decided_reasons") or ():
+            codes[code] = codes.get(code, 0) + 1
+    return {
+        "decision_turns": len(rows),
+        "starved_disagreements": len(starved_bad),
+        "depth_disagreements": len(depth_bad),
+        "decision_agreement_total": bool(not starved_bad and not depth_bad),
+        "retrieval_reason_counts": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
+    }
 
 
 def _shadow_telemetry(turns: list) -> dict:

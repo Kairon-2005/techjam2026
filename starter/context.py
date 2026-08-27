@@ -348,3 +348,93 @@ def render(decision: ContextDecision) -> tuple[str, ...]:
     """Human-readable explanation. Separate from the enum on purpose: wording
     can change without invalidating telemetry recorded under the codes."""
     return tuple(_TEXT[code] for code in decision.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6B1: pre-retrieval context and the retrieval decision.
+#
+# This is a strictly EARLIER stage than ContextSnapshot above, which reads
+# pool_size, category_count and overgeneral -- all produced BY the retrieval it
+# would otherwise have to decide. Nothing post-retrieval may appear here.
+# ---------------------------------------------------------------------------
+
+RETRIEVAL_MODES = ("off", "shadow", "control")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PreRetrievalSnapshot:
+    """What the session IS at the insertion point. Observation only."""
+    route: str
+    query_term_count: int
+    active_slot_count: int
+    dry_streak: int
+    rotate_pending: bool
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RetrievalPolicy:
+    """What the configuration SAYS. Kept apart from the snapshot so that two
+    runs showing the same observation and different decisions have somewhere
+    to show why."""
+    candidates: int
+    starved_candidates: int
+    starved_after: int
+    starved_max_terms: int
+    starved_max_slots: int
+
+
+class RetrievalReason(str, Enum):
+    """ACTION codes, deliberately disjoint from the observation codes above.
+    Sharing an enum would let an observation code quietly acquire control."""
+    WIDEN_THIN_EVIDENCE = "WIDEN_THIN_EVIDENCE"
+    WIDEN_REQUEST_MORE = "WIDEN_REQUEST_MORE"
+    DEPTH_STANDARD = "DEPTH_STANDARD"
+    WIDEN_DISABLED = "WIDEN_DISABLED"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RetrievalDecision:
+    starved: bool
+    candidate_depth: int
+    retrieval_mode: str                  # "standard" | "widened"
+    reasons: tuple[RetrievalReason, ...]
+
+
+def policy_from(cfg: Mapping) -> RetrievalPolicy:
+    return RetrievalPolicy(
+        candidates=int(cfg["candidates"]),
+        starved_candidates=int(cfg["starved_candidates"]),
+        starved_after=int(cfg["starved_after"]),
+        starved_max_terms=int(cfg["starved_max_terms"]),
+        starved_max_slots=int(cfg["starved_max_slots"]))
+
+
+def decide_retrieval(snapshot: PreRetrievalSnapshot,
+                     policy: RetrievalPolicy) -> RetrievalDecision:
+    """Starvation and candidate depth, as one pure function.
+
+    This REPRODUCES the existing rule branch for branch rather than proposing
+    a new one: 6B1 relocates a decision, so any behavioural difference is a
+    defect and not a result.
+    """
+    def out(starved: bool, reason: RetrievalReason) -> RetrievalDecision:
+        depth = (max(policy.candidates, policy.starved_candidates)
+                 if starved else policy.candidates)
+        return RetrievalDecision(starved=starved, candidate_depth=depth,
+                                 retrieval_mode="widened" if starved else "standard",
+                                 reasons=(reason,))
+
+    if not policy.starved_candidates:
+        return out(False, RetrievalReason.WIDEN_DISABLED)
+    stalled = snapshot.dry_streak >= policy.starved_after
+    if not (stalled or snapshot.rotate_pending):
+        return out(False, RetrievalReason.DEPTH_STANDARD)
+    thin = (snapshot.query_term_count <= policy.starved_max_terms
+            or snapshot.active_slot_count <= policy.starved_max_slots)
+    if not thin:
+        return out(False, RetrievalReason.DEPTH_STANDARD)
+    # Attribution only. Both paths give the same verdict and the same depth;
+    # calling an explicit request for more options a "stall" would misdescribe
+    # the turn in telemetry and change nothing in behaviour.
+    return out(True, RetrievalReason.WIDEN_REQUEST_MORE if snapshot.rotate_pending
+               else RetrievalReason.WIDEN_THIN_EVIDENCE)

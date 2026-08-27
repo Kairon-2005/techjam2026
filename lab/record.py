@@ -187,7 +187,7 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
     # was asked, which is the whole point of recording it.
     for field in ("question_attribute_counts", "plane_counts", "fusion_counts",
                   "final_route_counts", "shadow_reason_counts",
-                  "shadow_mode_counts"):
+                  "shadow_mode_counts", "retrieval_reason_counts"):
         counts: dict[str, int] = {}
         for m in per_seed.values():
             for name, n in (m["telemetry"].get(field) or {}).items():
