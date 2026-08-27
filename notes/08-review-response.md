@@ -730,5 +730,18 @@ w_neg=0 与 2 得分完全相同（0.700124），即**未造成伤害**。
 
 前一轮 targeted-erasure 的关键数字是 dirty run（`agent_commit=worktree`,
 `code_dirty=true`）。按我们自己的纪律，那些数字**当时不可引用**。
-已在干净 commit 上重录，见下节表格与 `lab/results.jsonl` 中
-`tag=phase15b-clean-rerecord` 的 schema-2 行。
+已在干净 commit 上重录。**重录本身又抓到一个静默失效的开关**：
+`suppress_abandoned=False` 与默认同分（0.928308），因为 `_suppress_abandoned()`
+无视该开关照常运行，只有 `_rerank` 的 blocklist 受它控制——**消融的「关闭」臂
+其实从未关闭**。这与 `"route": false`、`term_cap` 读 `self.cfg` 属同一类缺陷。
+修好后的干净重录（seeds 7–11，`tag=phase15b-ablation-fixed`，schema 2，`code_dirty=false`）：
+
+| 策略 | override_category | clean |
+|---|---|---|
+| 不抑制 | 0.914603 ± 0.0067 | 0.928508 |
+| 仅抑制 soft-rescue | 0.924458 ± 0.0019 | 0.928508 |
+| **定向擦除（默认）** | **0.928308 ± 0.0000** | **0.928508** |
+| 全量擦除 `on_override="slot"` | 0.923723 | 0.925173 |
+
+结论不变且现在可引用：**定向擦除 > 仅抑制 soft-rescue > 不抑制**，
+且定向擦除对 clean 与三种 payload 改写零代价。
