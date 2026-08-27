@@ -171,6 +171,9 @@ DEFAULTS = {
     # the query fixed and vary nothing but the plane.
     "force_route": "",
     "trace": True,                # telemetry; must never change a ranking
+    # Records the candidate list itself. LAB ONLY: the harness uses it to
+    # compute Recall@N against ground truth, which the agent must never see.
+    "trace_candidates": False,
     # A facet may narrow the pool only if the catalog describes it often
     # enough for silence to be informative. Below this it can still score.
     "facet_min_coverage": 0.30,
@@ -1616,6 +1619,8 @@ class Agent:
         seen: set[str] = set()
         deduped = [(a, sc) for a, sc in cands if not (a in seen or seen.add(a))]
         trace["fused_unique"] = len(deduped)
+        if cfg["trace_candidates"]:
+            trace["candidates"] = [a for a, _ in deduped]
         trace["retrieval_ms"] = round((time.perf_counter() - started) * 1000, 3)
         if cfg["dual_plane"]:
             ids = self.cat.category_index.ids

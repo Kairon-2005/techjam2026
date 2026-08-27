@@ -134,7 +134,8 @@ def git_state(agent_module=None) -> dict:
 
 def _metrics(res: dict) -> dict:
     return {"score": res["recommended_technical_score"], "hr10": res["hit_rate_at_10"],
-            "mrr": res["mrr"], "mttc": res["mttc"]}
+            "mrr": res["mrr"], "mttc": res["mttc"],
+            "telemetry": res.get("telemetry") or {}}
 
 
 def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
@@ -161,6 +162,15 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
         vals = [m[key] for m in per_seed.values()]
         row[key] = statistics.fmean(vals)
         row[key + "_sd"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+    # Telemetry is averaged across seeds like everything else, but kept in its
+    # own block: it describes HOW a score was produced and must never be
+    # mistaken for the score.
+    keys = {k for m in per_seed.values() for k, v in m["telemetry"].items()
+            if isinstance(v, (int, float))}
+    row["telemetry"] = {
+        k: round(statistics.fmean([m["telemetry"][k] for m in per_seed.values()
+                                   if k in m["telemetry"]]), 4)
+        for k in sorted(keys)}
     # Under a lease the row is journalled, not written: provenance is not
     # established until the lease has verified, after the last cell, that
     # nothing moved and that the matrix actually finished. The journal is a
@@ -183,7 +193,9 @@ def matrix(scenario_names, configs: dict[str, dict], seeds: tuple[int, ...],
     data = data or S.load()
     rows = []
     for name in scenario_names:
-        use = (0,) if name == "clean" else seeds     # clean is deterministic
+        # Every clean* scenario is deterministic: no reply, mutate or init
+        # hook, so the seed cannot change anything.
+        use = (0,) if name.startswith("clean") else seeds
         print(f"\n=== {name}  (seeds={list(use)}) ===")
         print(f"  {'config':<22}{'score':>10}{'sd':>8}{'HR@10':>8}{'MRR':>8}{'MTTC':>7}")
         for label, cfg in configs.items():

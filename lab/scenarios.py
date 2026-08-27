@@ -98,8 +98,11 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
 
     E.initial_message, E.customer_reply, E.materialize_hidden_fields = (
         initial_message, customer_reply, materialize)
+    agent = A.Agent(CATALOG, config=config)
     try:
-        return E.evaluate(A.Agent(CATALOG, config=config), work, ids, cats, prods)
+        result = E.evaluate(agent, work, ids, cats, prods)
+        result["telemetry"] = _telemetry(agent, work)
+        return result
     finally:
         E.initial_message, E.customer_reply, E.materialize_hidden_fields = (
             orig_init, orig_reply, orig_mat)
@@ -108,6 +111,73 @@ def run(scenario: Scenario, config: dict, samples, ids, cats, prods, seed: int =
 # ---------------------------------------------------------------------------
 # Scenario library
 # ---------------------------------------------------------------------------
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, int(round(pct * (len(ordered) - 1))))
+    return round(ordered[idx], 3)
+
+
+def _telemetry(agent, samples) -> dict:
+    """Aggregate the per-turn decision traces the agent recorded.
+
+    Recall is computed HERE, not in the agent: it needs the ground-truth asin,
+    which the agent must never see. The agent only records which candidates it
+    generated; whether the right one was among them is the harness's question.
+    """
+    truth = {s["sample_id"]: str(s["ground_truth"]["parent_asin"]) for s in samples}
+    turns, latency = [], []
+    hits = {50: 0, 100: 0, "pool": 0}
+    scored = 0
+    for sid, state in getattr(agent, "_sessions", {}).items():
+        target = truth.get(sid)
+        for trace in state.get("trace_log") or []:
+            turns.append(trace)
+            latency.append(trace.get("retrieval_ms", 0.0))
+            cands = trace.get("candidates")
+            if cands is None or target is None:
+                continue
+            scored += 1
+            if target in cands[:50]:
+                hits[50] += 1
+            if target in cands[:100]:
+                hits[100] += 1
+            if target in cands:
+                hits["pool"] += 1
+    if not turns:
+        return {}
+
+    def mean(key, default=0.0):
+        vals = [t.get(key, default) for t in turns if t.get(key) is not None]
+        return round(sum(vals) / len(vals), 4) if vals else 0.0
+
+    covered = [t["category_coverage"] for t in turns if t.get("category_coverage")]
+    rescued = [t for t in turns if t.get("rescue_carried") is not None]
+    out = {
+        "turns": len(turns),
+        "pool_size": mean("fused_unique"),
+        "category_pool": mean("category_pool"),
+        "categories": round(sum(c["categories"] for c in covered) / len(covered), 3)
+                      if covered else 0.0,
+        "category_entropy": round(sum(c["entropy"] for c in covered) / len(covered), 4)
+                            if covered else 0.0,
+        "exclusion_rate": mean("exclusion_rate"),
+        "rescue_carried": round(sum(t["rescue_carried"] for t in rescued) / len(rescued), 2)
+                          if rescued else 0.0,
+        "rescue_needed_rate": round(sum(1 for t in rescued if t.get("rescue_needed"))
+                                    / len(rescued), 4) if rescued else 0.0,
+        "latency_p50": _percentile(latency, 0.50),
+        "latency_p95": _percentile(latency, 0.95),
+    }
+    if scored:
+        out.update({"recall50": round(hits[50] / scored, 4),
+                    "recall100": round(hits[100] / scored, 4),
+                    "recall_pool": round(hits["pool"] / scored, 4),
+                    "recall_turns": scored})
+    return out
+
 
 def _foreign_constraint(sample, prods, rng, donors, card) -> str:
     """A hard constraint belonging to somebody else's product."""
