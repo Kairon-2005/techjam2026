@@ -334,14 +334,22 @@ class ShadowIntegrationTest(unittest.TestCase):
         self.assertEqual(state["asked"], ["material", chosen])
 
     def test_the_shadow_runs_before_pick_attribute(self) -> None:
+        # The invariant: the shadow snapshot is built BEFORE the question is
+        # chosen, so state["asked"] and the last_* fields hold prior-turn
+        # history and this turn's question cannot leak in. Both the adapter and
+        # the staged controller are instrumented, because which one fires now
+        # depends on question_context_mode and the invariant is about neither.
         ag = self.agent()
         order = []
-        s_orig, p_orig = ag._shadow_context, ag._pick_attribute
+        s_orig, p_orig, d_orig = (ag._shadow_context, ag._pick_attribute,
+                                  ag._decide_question)
         ag._shadow_context = lambda *a, _o=s_orig, **k: (order.append("shadow"), _o(*a, **k))[1]
-        ag._pick_attribute = lambda *a, _o=p_orig, **k: (order.append("pick"), _o(*a, **k))[1]
+        ag._pick_attribute = lambda *a, _o=p_orig, **k: (order.append("question"), _o(*a, **k))[1]
+        ag._decide_question = lambda *a, _o=d_orig, **k: (order.append("question"), _o(*a, **k))[1]
         ag.reset("s", {})
         ag.respond("s", "I'm looking for Clothing Women Dresses, but I'm still exploring.", 1, 5)
-        self.assertEqual(order, ["shadow", "pick"])
+        self.assertEqual(order[0], "shadow", "the snapshot saw this turn's question")
+        self.assertIn("question", order[1:])
 
     def test_the_trace_carries_the_decision_and_its_size(self) -> None:
         ag = self.agent()

@@ -15,6 +15,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 import starter.agent as A
+import starter.context as C
 from evaluator.local_evaluator import ALLOWED_ATTRIBUTES
 
 PRODUCTS = [
@@ -284,8 +285,11 @@ class PoolAskerTest(unittest.TestCase):
     def test_entropy_is_zero_when_the_pool_agrees(self) -> None:
         A.clear_catalog_cache()
         ag = A.Agent(self.catalog, config={"ask_policy": "pool"})
-        self.assertEqual(ag._pool_entropy(["P1"], A.ATTR_VOCAB["color"]), 0.0)
-        self.assertGreater(ag._pool_entropy(["P1", "P2", "P3"], A.ATTR_VOCAB["color"]), 0.0)
+        # Through _facet_pass: _pool_entropy was retired with _pool_attribute
+        # in Phase 6B2-R2, and this is the one walk that computes entropy now.
+        plan = C.FacetScanPlan(attributes=("color",))
+        self.assertEqual(ag._facet_pass(["P1"], "color", plan).bits, 0.0)
+        self.assertGreater(ag._facet_pass(["P1", "P2", "P3"], "color", plan).bits, 0.0)
 
     def test_pool_policy_returns_a_legal_attribute(self) -> None:
         A.clear_catalog_cache()
@@ -449,7 +453,11 @@ class Phase1StateTest(unittest.TestCase):
         state = ag._sessions["s"]
         state["asked"] = ["other", "other"]
         state["uncertain_streak"] = 2
-        self.assertEqual(ag._easiest_unasked(state), "use_case")
+        # Agent._easiest_unasked was retired in Phase 6B2-R2; the staged
+        # controller's takes its vocabularies as arguments instead of self.
+        self.assertEqual(
+            C._easiest_unasked(state["asked"], A.ANSWERABILITY, A.ATTR_VOCAB),
+            "use_case")
 
 class OverrideDetectionTest(unittest.TestCase):
     """A bare "forget" is not an override; adding a requirement is not either."""

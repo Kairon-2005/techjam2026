@@ -70,6 +70,19 @@ SHARDS: dict[str, Shard] = {
     "p6b2r2-supplementary": Shard(
         scenarios=("supplementary_dev",), configs=MODES,
         note="supplementary_dev, three modes; 1,000 sessions, run alone"),
+    # Post-adoption. The default is now "control", so these run with NO
+    # question_context_mode set at all: the check is that an unconfigured agent
+    # reproduces the measured control rows exactly. It catches a default that
+    # was flipped to the wrong value, or flipped in DEFAULTS but read from
+    # somewhere else -- which is the shape of the `"route": false` defect.
+    "p6b2r2-adoption": Shard(
+        scenarios=SHADOW_SCENARIOS, configs={"default": dict(_TRACE)},
+        note="adoption: seven scenarios on the shipped default, no mode set"),
+    "p6b2r2-adoption-anchor": Shard(
+        scenarios=("clean",),
+        configs={"compat_anchor_default": {k: v for k, v in COMPAT_ANCHOR.items()
+                                           if k != "question_context_mode"}},
+        note="adoption: the 0.928708 anchor with the mode left at its default"),
     "p6b2r2-robustness": Shard(
         scenarios=ROBUSTNESS_SCENARIOS, configs=MODES,
         note="five stochastic scenarios, three modes, five seeds"),

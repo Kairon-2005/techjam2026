@@ -68,7 +68,21 @@ class ShardTest(unittest.TestCase):
         for name, shard in SH.SHARDS.items():
             self.assertEqual(shard.cells,
                              len(shard.scenarios) * len(shard.configs), name)
-        self.assertEqual(sum(s.cells for s in SH.SHARDS.values()), 29)
+
+    def test_the_pre_adoption_comparison_is_twenty_nine_cells(self) -> None:
+        # The number quoted in notes/36. Asserting the TOTAL across all shards
+        # would just be a tripwire on adding one, which is not a defect.
+        pre = ("p6b2r2-shadow", "p6b2r2-official", "p6b2r2-supplementary",
+               "p6b2r2-robustness")
+        self.assertEqual(sum(SH.SHARDS[n].cells for n in pre), 29)
+
+    def test_the_adoption_shards_set_no_question_mode_at_all(self) -> None:
+        # The point of the adoption check is that an UNCONFIGURED agent
+        # reproduces the measured control rows. Setting the mode explicitly
+        # would test the flag, not the default.
+        for name in ("p6b2r2-adoption", "p6b2r2-adoption-anchor"):
+            for label, cfg in SH.SHARDS[name].configs.items():
+                self.assertNotIn("question_context_mode", cfg, f"{name}/{label}")
 
     def test_supplementary_runs_alone(self) -> None:
         # 1,000 sessions across three arms. Chaining it behind other shards is

@@ -76,25 +76,6 @@ class DialogueMixin:
                 return "browsing"
         return route
 
-    def _pool_entropy(self, asins: list[str], pattern: "re.Pattern[str]",
-                      skip_missing: bool = False) -> float:
-        """Shannon entropy (bits) of one attribute's values across the pool.
-
-        A question is worth asking only if the surviving candidates actually
-        disagree on it: if every candidate is black, "what colour?" buys nothing.
-        """
-        counts: dict[str, int] = {}
-        for asin in asins:
-            match = pattern.search(self.cat.text.get(asin, ""))
-            if match is None and skip_missing:
-                # Silence is not an answer the customer can give. Counting it
-                # as a value makes a sparsely-described attribute look like the
-                # most discriminating question in the pool.
-                continue
-            value = match.group(1).lower() if match else ""
-            counts[value] = counts.get(value, 0) + 1
-        return self._entropy_of(counts)
-
     @staticmethod
     def _entropy_of(counts: dict[str, int]) -> float:
         """Shared kernel. _facet_pass buckets the same values in one walk with
@@ -106,13 +87,6 @@ class DialogueMixin:
         if total < 2 or len(counts) < 2:
             return 0.0
         return -sum((c / total) * math.log2(c / total) for c in counts.values() if c)
-
-    def _easiest_unasked(self, state: dict) -> str:
-        """The most answerable facet not yet asked, ignoring pool entropy."""
-        asked = set(state["asked"])
-        options = [(score, name) for name, score in ANSWERABILITY.items()
-                   if name not in asked and name in ATTR_VOCAB]
-        return max(options)[1] if options else ""
 
     def _suppress_abandoned(self, state: dict, message: str, cfg: dict) -> None:
         """Bar soft-rescue for exactly what the customer named as abandoned.
@@ -240,41 +214,6 @@ class DialogueMixin:
             return False, []
         top = [name for name, _ in sorted(counts.items(), key=lambda kv: -kv[1])[:3]]
         return True, _distinguishing(top)
-
-    def _pool_attribute(self, state: dict, pool: list[str],
-                        cfg: dict | None = None) -> tuple[str, float, int]:
-        """Ask about whichever attribute best splits the live candidate pool."""
-        cfg = cfg or self.cfg
-        depth = max(2, int(cfg["pool_depth"]))
-        window = pool[:depth]
-        # Once the customer has gone quiet, a question they cannot answer costs
-        # a whole turn for nothing, so discount by how answerable it is.
-        weigh = state.get("dry_streak", 0) >= int(cfg["answerability_after"])
-        utility = bool(cfg["question_utility"])
-        best, best_bits, best_util = "other", 0.0, 0.0
-        for attribute, pattern in ATTR_VOCAB.items():
-            if attribute in state["asked"]:      # not_already_asked
-                continue
-            if utility:
-                # information_gain x catalog_coverage x answerability
-                #   - expected_dry_turn_cost
-                bits = self._pool_entropy(window, pattern, skip_missing=True)
-                coverage = self._facet_coverage(window, attribute)
-                answerable = ANSWERABILITY.get(attribute, 0.5)
-                util = (bits * coverage * answerable
-                        - cfg["question_dry_cost"] * (1.0 - coverage * answerable))
-            else:
-                bits = self._pool_entropy(window, pattern)
-                util = bits * ANSWERABILITY.get(attribute, 0.5) if weigh else bits
-            if util > best_util:
-                best, best_bits, best_util = attribute, bits, util
-        # How much of the window actually STATES a value for the attribute we
-        # are about to ask about. _pool_entropy counts the empty string as a
-        # value, so a facet that most products are silent about scores as
-        # "the candidates disagree" when what they do is say nothing.
-        state["last_coverage"] = self._facet_coverage(window, best)
-        state["last_weighed"] = bool(weigh)
-        return best, best_bits, len(window)
 
     def _facet_coverage(self, window: list[str], attribute: str) -> float:
         """Share of the window carrying any value for `attribute`."""
@@ -415,43 +354,28 @@ class DialogueMixin:
             state[field] = list(value) if field == "broad_options" else value
 
     def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
+        """Thin adapter. The rule itself lives in the staged controller.
+
+        Phase 6B2-R2 relocated this decision into staged pure functions so the
+        scan topology could be tested per branch rather than described, and so
+        the cost of each branch could be measured on its own. What is left here
+        is an adapter, kept because tests and older call sites name it.
+
+        There is deliberately ONE copy of the rule. The measurement commit held
+        two side by side to compare them across 8,483 turns; keeping them after
+        that would have been the same defect this project has already paid for
+        three times -- the void suppress_abandoned switch, the inert
+        route_overrides patch, and _starved's own duplicate before 6B1.
+
+        BECAUSE this delegates, `question_context_mode="shadow"` now compares a
+        value with itself. Its agreement telemetry is diagnostic from here on
+        and is not evidence of anything. The valid evidence is the pre-adoption
+        8,483-turn comparison at tag p6b2r2-shadow.
+        """
         cfg = self._route_cfg(state)
-        policy = cfg["ask_policy"]
-        limit = cfg["ask_fallback_after"]
-        if policy in ("pool", "other_then_pool"):
-            if policy == "other_then_pool" and state["asked"].count("other") < 2:
-                return "other"
-            # A targeted question that yields nothing means our attribute
-            # taxonomy disagrees with the customer's. Stop guessing buckets and
-            # go open-ended rather than walking the whole list dry.
-            broad, options = self._overgeneral(pool or [], cfg)
-            state["broad_options"] = options
-            # A customer who cannot answer is not a customer with no preference:
-            # keep asking, but ask something easier, instead of falling back to
-            # the open-ended question they already failed to answer.
-            if state.get("uncertain_streak", 0) >= int(cfg["answerability_after"]):
-                easy = self._easiest_unasked(state)
-                if easy:
-                    state["last_bits"] = 0.0
-                    return easy
-            # An over-general pool is exactly when a targeted question pays, so
-            # the give-up guard is suspended while the request is still vague.
-            if not broad and state.get("dry_streak", 0) >= cfg["pool_give_up_after"]:
-                return "other"
-            attribute, bits, _ = self._pool_attribute(state, pool or [], cfg)
-            state["last_bits"] = bits
-            # No question discriminates the pool -> fall back to open-ended.
-            return attribute if bits >= 0.2 else "other"
-        if policy == "other" and limit and state.get("dry_others", 0) >= limit:
-            # The simulator is not answering "other": degrade to concrete attributes.
-            return next((a for a in PROBE_ORDER[:-1] if a not in state["asked"]), "other")
-        if policy == "probe_cycle":
-            return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
-        if policy == "other_then_cycle":
-            if state["asked"].count("other") < 2:
-                return "other"
-            return next((a for a in PROBE_ORDER if a not in state["asked"]), "other")
-        return "other"
+        decision = self._decide_question(state, pool or [], cfg)
+        self._apply_question_patch(state, decision.patch)
+        return decision.attribute
 
     def _rebuild_terms(self, state: dict, message: str, cfg: dict) -> None:
         """Query terms come from accepted evidence, not from raw message tokens.

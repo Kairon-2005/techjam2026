@@ -208,9 +208,9 @@ class ScanTopologyTest(unittest.TestCase):
         _overgeneral reads cat.cats (short leaf strings); the other three read
         cat.text (~1.1kB per candidate) and are what actually costs.
         """
-        counts = {"category": 0, "facet_pass": 0, "coverage": 0, "entropy": 0}
+        counts = {"category": 0, "facet_pass": 0, "coverage": 0}
         names = {"_overgeneral": "category", "_facet_pass": "facet_pass",
-                 "_facet_coverage": "coverage", "_pool_entropy": "entropy"}
+                 "_facet_coverage": "coverage"}
         saved = {n: getattr(self.agent, n) for n in names}
         saved_cfg = self.agent.cfg
         try:
@@ -257,7 +257,7 @@ class ScanTopologyTest(unittest.TestCase):
             with self.subTest(branch=name):
                 self.assertEqual(self.staged(state, **cfg),
                                  {"category": 0, "facet_pass": 0,
-                                  "coverage": 0, "entropy": 0})
+                                  "coverage": 0})
 
     def test_needs_candidates_agrees_with_what_the_stages_do(self) -> None:
         for asked, policy, expected in ((["other"], "other_then_pool", False),
@@ -280,14 +280,14 @@ class ScanTopologyTest(unittest.TestCase):
         counts = self.staged(self.state(asked=["other", "other"], uncertain_streak=3),
                              ask_policy="pool", answerability_after=1)
         self.assertEqual(counts, {"category": 1, "facet_pass": 0,
-                                  "coverage": 0, "entropy": 0})
+                                  "coverage": 0})
 
     def test_the_give_up_branch_reads_categories_and_no_facet(self) -> None:
         counts = self.staged(self.state(asked=["other", "other"], dry_streak=3),
                              ask_policy="pool", pool_give_up_after=1,
                              overgeneral_cats=0)
         self.assertEqual(counts, {"category": 1, "facet_pass": 0,
-                                  "coverage": 0, "entropy": 0})
+                                  "coverage": 0})
 
     # ---- pool selection -------------------------------------------------
     def test_utility_on_is_one_combined_pass_per_unasked_facet(self) -> None:
@@ -298,13 +298,13 @@ class ScanTopologyTest(unittest.TestCase):
                 counts = self.staged(self.state(asked=list(asked)),
                                      ask_policy="pool", question_utility=True)
                 self.assertEqual(counts, {"category": 1, "facet_pass": unasked,
-                                          "coverage": 0, "entropy": 0})
+                                          "coverage": 0})
 
     def test_utility_off_is_one_entropy_pass_plus_the_winner_s_coverage(self) -> None:
         counts = self.staged(self.state(asked=["other", "other"]),
                              ask_policy="pool", question_utility=False)
         self.assertEqual(counts, {"category": 1, "facet_pass": len(A.ATTR_VOCAB),
-                                  "coverage": 1, "entropy": 0})
+                                  "coverage": 1})
 
     def test_no_winner_needs_no_coverage_scan_at_all(self) -> None:
         # An empty pool leaves every facet at 0.0 bits, so the winner is
@@ -354,35 +354,49 @@ class ScanTopologyTest(unittest.TestCase):
             vocab=A.ATTR_VOCAB)
         self.assertEqual(list(plan.attributes), list(A.ATTR_VOCAB))
 
-    # ---- the comparison the whole phase is about ------------------------
-    def test_the_staged_path_does_strictly_less_text_scanning_than_legacy(self) -> None:
+    # ---- the topology the whole phase is about --------------------------
+    def test_the_live_path_walks_the_window_once_per_unasked_facet(self) -> None:
         """The claim in one assertion, on the shipped configuration.
 
-        utility ON, five unasked facets: legacy walks the window 11 times over
-        cat.text -- five entropies, five coverages, and the winner's coverage
-        again -- because it computes them in separate loops. Staged walks it
-        five times, because entropy and coverage come from the same
-        pattern.search per candidate.
+        BEFORE ADOPTION this compared the two implementations: legacy walked
+        cat.text 11 times with utility ON -- five entropies, five coverages,
+        and the winner's coverage again, in separate loops -- and staged walked
+        it 5, because entropy and coverage come from the same pattern.search
+        per candidate. That comparison cannot be made here any more:
+        _pick_attribute is an adapter over this same controller, so both arms
+        would report 5. The evidence for 11-vs-5 is the pre-adoption record --
+        tag p6b2-eager-control and notes/34 -- not this test.
+
+        What survives, and what actually holds the line, is the ABSOLUTE
+        topology: one walk per unasked facet with utility ON, one per unasked
+        facet plus the winner's with it OFF.
         """
         def text_passes(counts):
-            return counts["facet_pass"] + counts["coverage"] + counts["entropy"]
+            return counts["facet_pass"] + counts["coverage"]
 
-        for utility, legacy_text, staged_text in ((True, 11, 5), (False, 6, 6)):
+        for utility, expected in ((True, 5), (False, 6)):
             state = self.state(asked=["other", "other"])
-            got_legacy = self.legacy(dict(state), ask_policy="pool",
-                                     question_utility=utility)
-            got_staged = self.staged(dict(state), ask_policy="pool",
-                                     question_utility=utility)
+            got = self.staged(dict(state), ask_policy="pool",
+                              question_utility=utility)
             with self.subTest(question_utility=utility):
-                self.assertEqual(text_passes(got_legacy), legacy_text)
-                self.assertEqual(text_passes(got_staged), staged_text)
-                self.assertEqual(got_legacy["category"], got_staged["category"], 1)
-                self.assertLessEqual(text_passes(got_staged), text_passes(got_legacy))
+                self.assertEqual(text_passes(got), expected)
+                self.assertEqual(got["category"], 1)
+                self.assertEqual(text_passes(got), len(A.ATTR_VOCAB) + (0 if utility else 1))
 
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_adapter_holds_no_second_copy_of_the_rule(self) -> None:
+        # _pick_attribute is an adapter now. If its body ever reacquires the
+        # rule, patching the staged entry point would stop changing what it
+        # returns -- which is how a "relocation" quietly becomes a fork.
+        original = C.question_without_candidates
+        try:
+            C.question_without_candidates = lambda *a, **k: C._finish(
+                a[0], "sentinel-attribute", "fallback", C.QuestionPatch(),
+                C.QuestionReason.FALLBACK_OTHER)
+            got = self.agent._pick_attribute(self.state(asked=["other"]), self.pool)
+            self.assertEqual(got, "sentinel-attribute",
+                             "_pick_attribute did not go through the staged controller")
+        finally:
+            C.question_without_candidates = original
 
 
 class EquivalenceGridTest(unittest.TestCase):
@@ -554,14 +568,21 @@ class QuestionModeTest(unittest.TestCase):
                         "but I'm still exploring.", 1, 5)
         return len(legacy), len(pure)
 
-    def test_the_default_is_off(self) -> None:
-        self.assertEqual(A.DEFAULTS["question_context_mode"], "off")
+    def test_the_default_is_control(self) -> None:
+        self.assertEqual(A.DEFAULTS["question_context_mode"], "control")
 
-    def test_off_runs_legacy_once_and_pure_never(self) -> None:
-        self.assertEqual(self.counts(question_context_mode="off"), (1, 0))
+    def test_off_reaches_the_rule_once_through_the_adapter(self) -> None:
+        # AFTER ADOPTION "off" means the adapter plus no orchestration
+        # telemetry. It is no longer an independent legacy implementation and
+        # must not be described as one: _pick_attribute delegates, so the one
+        # rule still runs exactly once.
+        self.assertEqual(self.counts(question_context_mode="off"), (1, 1))
 
-    def test_shadow_runs_both_once(self) -> None:
-        self.assertEqual(self.counts(question_context_mode="shadow"), (1, 1))
+    def test_shadow_computes_the_decision_and_asks_the_adapter_too(self) -> None:
+        # Deliberate, and deliberately tautological: shadow takes the decision
+        # directly AND goes through the adapter, which takes it again. Two
+        # executions of the same function comparing their identical results.
+        self.assertEqual(self.counts(question_context_mode="shadow"), (1, 2))
 
     def test_control_runs_pure_only(self) -> None:
         self.assertEqual(self.counts(question_context_mode="control"), (0, 1))
@@ -614,6 +635,32 @@ class QuestionModeTest(unittest.TestCase):
             seen.append([(r["recommendations"], r["ask_attribute"], r["message"]) for r in out])
         self.assertEqual(seen[0], seen[1])
         self.assertEqual(seen[0], seen[2], "control diverged from legacy")
+
+    def test_the_question_path_builds_no_index_that_legacy_did_not(self) -> None:
+        """The hard gate, as a test rather than a manual check.
+
+        Phase 6B2 verified this by inspection and wrote the result in a note.
+        The falsifiable form is not "these three are None" -- CategoryIndex is
+        built by RETRIEVAL under deep_funnel in every mode, so asserting None
+        would fail for a reason that has nothing to do with the question path.
+        The gate is that the question path ADDS nothing: the set of built
+        indexes must be identical across all three modes.
+        """
+        built = {}
+        for mode in ("off", "shadow", "control"):
+            A.clear_catalog_cache()
+            ag = A.Agent(self.path, config={"question_context_mode": mode})
+            ag.reset("s", {})
+            ag.respond("s", "I'm looking for Clothing Women Dresses, "
+                            "but I'm still exploring.", 1, 5)
+            ag.respond("s", "Hmm, hard to say really.", 2, 5)
+            built[mode] = {name: getattr(ag.cat, name) is not None
+                           for name in ("_cat_index", "_facet_index", "_dense_index")}
+        self.assertEqual(built["off"], built["shadow"])
+        self.assertEqual(built["off"], built["control"],
+                         "the question path built an index legacy did not")
+        self.assertFalse(built["control"]["_facet_index"])
+        self.assertFalse(built["control"]["_dense_index"])
 
     def test_a_route_pool_depth_override_leaves_the_message_bit_exact(self) -> None:
         # Selection uses route turn_cfg; _compose reads BASE self.cfg. That

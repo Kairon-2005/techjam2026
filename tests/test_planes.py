@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 
 import starter.agent as A
+import starter.context as C
 from tests.test_indexes import PRODUCTS, _catalog_file   # noqa: F401
 import json
 import tempfile
@@ -475,9 +476,10 @@ class QuestionUtilityTest(PlaneTestBase):
     def test_missing_values_do_not_count_as_agreement_or_disagreement(self) -> None:
         ag = self.agent()
         pool = list(ag.cat.category_index.asins)
-        material = A.ATTR_VOCAB["material"]
-        with_missing = ag._pool_entropy(pool, material, skip_missing=False)
-        without = ag._pool_entropy(pool, material, skip_missing=True)
+        with_missing = ag._facet_pass(
+            pool, "material", C.FacetScanPlan(skip_missing=False)).bits
+        without = ag._facet_pass(
+            pool, "material", C.FacetScanPlan(skip_missing=True)).bits
         self.assertNotEqual(with_missing, without,
                             "the missing bucket was not contributing entropy")
         self.assertLess(without, with_missing)
@@ -487,17 +489,33 @@ class QuestionUtilityTest(PlaneTestBase):
         # like a pool that disagrees.
         ag = self.agent(question_utility=True)
         self.assertEqual(ag._facet_coverage(["Q1"], "material"), 0.0)
-        self.assertEqual(ag._pool_entropy(["Q1"], A.ATTR_VOCAB["material"],
-                                          skip_missing=True), 0.0)
+        self.assertEqual(ag._facet_pass(["Q1"], "material",
+                                        C.FacetScanPlan(skip_missing=True)).bits, 0.0)
+
+    @staticmethod
+    def _select(ag, pool):
+        """_pool_attribute's selection, through the staged controller.
+
+        Driven directly rather than through _decide_question, because these
+        tests are about which attribute utility PICKS, not about which branch
+        routes to the pick -- a blank state would take first-two-other and
+        never reach the pool at all.
+        """
+        policy = A.Agent._question_policy(ag.cfg)
+        snapshot = C.QuestionSnapshot()
+        plan = C.facet_scan_plan(snapshot, policy, vocab=A.ATTR_VOCAB)
+        samples = ag._facet_samples(ag._question_window(pool, ag.cfg), plan)
+        return C.select_pool_attribute(snapshot, policy, samples)
 
     def test_utility_prefers_the_better_covered_attribute(self) -> None:
         ag = self.agent(question_utility=True)
-        state = ag._blank_state()
         pool = list(ag.cat.category_index.asins)
-        chosen, bits, _ = ag._pool_attribute(state, pool, ag.cfg)
-        if chosen != "other":
-            self.assertGreater(state["last_coverage"], 0.0,
+        pick = self._select(ag, pool)
+        if pick.attribute != "other":
+            self.assertGreater(pick.coverage, 0.0,
                                "utility picked an attribute nothing in the pool states")
+            self.assertTrue(pick.coverage_known,
+                            "utility needs coverage; it must arrive with the sample")
 
     def test_utility_is_the_shipped_default(self) -> None:
         # Adopted at Phase 3 close as a product/robustness trade-off, not as
@@ -508,10 +526,8 @@ class QuestionUtilityTest(PlaneTestBase):
         entropy_ag = self.agent(question_utility=False)
         utility_ag = self.agent(question_utility=True)
         pool = list(entropy_ag.cat.category_index.asins)
-        picked = []
-        for ag in (entropy_ag, utility_ag):
-            state = ag._blank_state()
-            picked.append(ag._pool_attribute(state, pool, ag.cfg)[0])
+        picked = [self._select(ag, pool).attribute
+                  for ag in (entropy_ag, utility_ag)]
         self.assertEqual(len(picked), 2)   # both produce a legal attribute
         for name in picked:
             self.assertIn(name, set(A.ATTR_VOCAB) | {"other"})
