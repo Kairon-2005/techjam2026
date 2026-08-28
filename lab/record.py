@@ -144,8 +144,15 @@ def _metrics(res: dict) -> dict:
 
 
 def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
-         data, tag: str = "") -> dict:
-    """Run one (scenario, config) over `seeds` and return a recorded row."""
+         data, tag: str = "", label: str = "") -> dict:
+    """Run one (scenario, config) over `seeds` and return a recorded row.
+
+    `label` is the caller's name for this config, and it is a parameter rather
+    than something the caller stamps on afterwards because this function
+    serialises and writes the row BEFORE it returns. matrix() used to set
+    row["config_label"] on the returned dict, so the label reached the caller
+    and never the ledger.
+    """
     samples, ids, cats, prods = data
     scenario = S.BY_NAME[scenario_name]
     started = time.time()
@@ -155,6 +162,10 @@ def cell(scenario_name: str, config: dict, seeds: tuple[int, ...],
     row = {
         "schema_version": SCHEMA_VERSION,
         "tag": tag, "scenario": scenario_name, "config": config,
+        # Omitted entirely when unset: every row recorded before this existed
+        # has no config_label, and report.py:_label() already falls back to a
+        # config-derived string, so an empty one would be noise in the ledger.
+        **({"config_label": label} if label else {}),
         "seeds": list(seeds),
         "per_seed": {str(k): v for k, v in per_seed.items()},
         "n_seeds": len(seeds),
@@ -232,8 +243,7 @@ def matrix(scenario_names, configs: dict[str, dict], seeds: tuple[int, ...],
         print(f"\n=== {name}  (seeds={list(use)}) ===")
         print(f"  {'config':<22}{'score':>10}{'sd':>8}{'HR@10':>8}{'MRR':>8}{'MTTC':>7}")
         for label, cfg in configs.items():
-            row = cell(name, cfg, use, data, tag=tag or label)
-            row["config_label"] = label
+            row = cell(name, cfg, use, data, tag=tag or label, label=label)
             print(f"  {label:<22}{row['score']:>10.6f}{row['score_sd']:>8.4f}"
                   f"{row['hr10']:>8.3f}{row['mrr']:>8.3f}{row['mttc']:>7.2f}", flush=True)
             rows.append(row)
