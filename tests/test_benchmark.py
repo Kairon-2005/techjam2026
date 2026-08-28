@@ -230,15 +230,89 @@ class GateTest(unittest.TestCase):
         self.assertEqual(len(bad), 1)
         self.assertFalse(bad[0]["passes"])
 
-    def test_a_no_scan_fixture_is_gated_on_overhead_not_ratio(self) -> None:
-        # A ratio against a sub-microsecond baseline is arithmetic on noise:
-        # 0.0007ms -> 0.0009ms is a "ratio of 1.29" and means nothing.
+    def test_a_sub_floor_ratio_is_diagnostic_and_still_printed(self) -> None:
+        # R2.1: below a 0.10ms legacy median the ratio is arithmetic on noise
+        # -- 0.0007ms -> 0.0009ms is a "ratio of 1.29" and means nothing -- but
+        # a check that did not run must be VISIBLE as withheld, not absent.
         fx = _fixtures(1.0, 1.05)
         fx["first_two_other"].update({"legacy_ms": 0.0007, "pure_ms": 0.0009,
                                       "overhead_ms": 0.0002, "ratio": 1.2857})
-        verdicts = BR.evaluate(BR.per_branch([_row(0, fixtures=fx)]))
-        metrics = {v["metric"] for v in verdicts if v["fixture"] == "first_two_other"}
-        self.assertEqual(metrics, {"overhead_ms"})
+        rows = [_row(0, fixtures=fx)]
+        verdicts = {v["metric"]: v for v in BR.evaluate(BR.per_branch(rows))
+                    if v["fixture"] == "first_two_other"}
+        self.assertEqual(set(verdicts), {"overhead_ms", "ratio"})
+        self.assertTrue(verdicts["ratio"]["diagnostic"])
+        self.assertTrue(verdicts["ratio"]["passes"], "a diagnostic cannot fail")
+        self.assertFalse(verdicts["overhead_ms"]["diagnostic"])
+        self.assertIn("DIAGNOSTIC ONLY", BR.report(tag="t", rows=rows))
+
+    def test_the_floor_is_not_an_exemption_the_micro_budget_still_binds(self) -> None:
+        # The failure mode a floor invites: "small baseline" becoming "no gate".
+        # Below the floor the requirement is the TIGHTEST budget in the table.
+        fx = _fixtures(1.0, 1.05)
+        fx["pool_empty"].update({"legacy_ms": 0.05, "pure_ms": 0.55,
+                                 "overhead_ms": 0.50, "ratio": 11.0})
+        verdicts = {v["metric"]: v for v in
+                    BR.evaluate(BR.per_branch([_row(0, fixtures=fx)]))
+                    if v["fixture"] == "pool_empty"}
+        self.assertEqual(verdicts["overhead_ms"]["limit"],
+                         BR.MICRO_PATH_MAX_OVERHEAD_MS)
+        self.assertFalse(verdicts["overhead_ms"]["passes"],
+                         "+0.50ms under the floor must fail the 0.10ms budget")
+
+    def test_below_the_floor_the_category_budget_tightens(self) -> None:
+        # R2.1 is not uniformly permissive: category-only goes from 0.25ms to
+        # 0.10ms below the floor. An overhead of 0.20ms passes above it and
+        # fails below it.
+        fx = _fixtures(1.0, 1.05)
+        fx["easier"].update({"legacy_ms": 0.02, "pure_ms": 0.22,
+                             "overhead_ms": 0.20, "ratio": 11.0})
+        under = {v["metric"]: v for v in BR.evaluate(BR.per_branch([_row(0, fixtures=fx)]))
+                 if v["fixture"] == "easier"}
+        self.assertFalse(under["overhead_ms"]["passes"])
+        fx["easier"].update({"legacy_ms": 1.0, "pure_ms": 1.20, "ratio": 1.2})
+        over = {v["metric"]: v for v in BR.evaluate(BR.per_branch([_row(0, fixtures=fx)]))
+                if v["fixture"] == "easier"}
+        self.assertTrue(over["overhead_ms"]["passes"])
+        self.assertEqual(over["overhead_ms"]["limit"], 0.25)
+
+
+class GateRevisionFalsificationTest(unittest.TestCase):
+    """R2.1 was written after seeing the result it changes the verdict on.
+
+    A correction like that is worth nothing unless it still REJECTS the
+    implementation the gate existed to reject. If an edit to the floor ever
+    starts admitting the eager 6B2 arm, this breaks the build -- which is the
+    only reason to believe the floor is a specification fix rather than a knob.
+    """
+
+    def rows(self) -> list[dict]:
+        rows = [r for r in P.load(B.LOG)
+                if r.get("tag") == "p6b2-eager-control" and r.get("kind") == "benchmark"]
+        if not rows:
+            self.skipTest("no p6b2-eager-control rows in this checkout")
+        return rows
+
+    def test_the_eager_implementation_still_fails_under_r2_1(self) -> None:
+        agg = BR.aggregate(self.rows())
+        failed = {v["fixture"] for v in agg["verdicts"]
+                  if not v["passes"] and not v["diagnostic"]}
+        # The four micro-paths: eager scans every facet to decide branches that
+        # read none of them, at +16.7ms against a 0.10ms budget.
+        for name in ("first_two_other", "probe_cycle", "easier", "give_up"):
+            self.assertIn(name, failed, name)
+        self.assertIn("pool_utility_on_none_asked", failed)
+        self.assertGreaterEqual(len(failed), 5)
+        self.assertFalse(agg["weighted_passes"],
+                         "the live-weighted aggregate must still reject eager")
+        self.assertGreater(agg["weighted_overhead_ms"], BR.AGGREGATE_GATE_MS * 10)
+
+    def test_the_floor_changes_exactly_one_eager_verdict(self) -> None:
+        # The claim in notes/35, checked rather than asserted in prose.
+        verdicts = BR.aggregate(self.rows())["verdicts"]
+        withheld = [v for v in verdicts if v["diagnostic"] and v["actual"] > v["limit"]]
+        self.assertEqual([v["fixture"] for v in withheld if v["branch_class"] == F.POOL],
+                         ["pool_empty"])
 
     def test_the_overhead_median_is_paired_not_a_difference_of_medians(self) -> None:
         rows = []

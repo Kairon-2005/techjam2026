@@ -28,14 +28,32 @@ from lab import benchfixtures as F
 from lab import benchweights as W
 from lab import provenance as P
 
-# Pre-registered in notes/33-phase6b2-r2-prereg.md, frozen before R2 was
-# implemented. `ratio` is None where a ratio against a sub-microsecond baseline
-# would be arithmetic on noise.
+# Gate revision R2.1, notes/35-phase6b2-r2-gate-revision.md. A POST-RESULT
+# SPECIFICATION CORRECTION: written after seeing the measurement it changes the
+# verdict on. notes/33's original rule stands unedited, and the row it stopped
+# (p6b2r2-screen) keeps its verdict; R2.1 is a new rule applied to new runs.
+GATE_REVISION = "R2.1 (notes/35, post-result correction)"
+
+# Absolute overhead budget per branch class, ABOVE the micro-path floor.
 GATES: dict[str, dict] = {
-    F.NO_SCAN:       {"max_overhead_ms": 0.10, "max_ratio": None},
-    F.CATEGORY_ONLY: {"max_overhead_ms": 0.25, "max_ratio": None},
+    F.NO_SCAN:       {"max_overhead_ms": 0.10, "max_ratio": 1.10},
+    F.CATEGORY_ONLY: {"max_overhead_ms": 0.25, "max_ratio": 1.10},
     F.POOL:          {"max_overhead_ms": 0.50, "max_ratio": 1.10},
 }
+
+# Below this legacy median, the ratio is DIAGNOSTIC ONLY and the requirement is
+# an absolute overhead of MICRO_PATH_MAX_OVERHEAD_MS -- the tightest budget in
+# the table. A dispatch already under the tightest absolute budget the project
+# cares about is one whose absolute gate has already declared its variation
+# irrelevant; a ratio of it can only re-describe that variation as a large
+# number. pool_empty's 4.9us baseline is the case that exposed this, but it is
+# not named here: notes/33 hand-assigned max_ratio=None to two of three
+# classes, and this floor deletes that hand-assignment rather than adding a
+# third exception. Note it also TIGHTENS the category-only class from 0.25ms to
+# 0.10ms below the floor -- the correction is not uniformly permissive.
+RATIO_BASELINE_FLOOR_MS = 0.10
+MICRO_PATH_MAX_OVERHEAD_MS = 0.10
+
 AGGREGATE_GATE_MS = 0.50           # live branch-weighted median overhead
 FEASIBILITY_SLACK = 1.20           # a screen stops R2 at >20% over any gate
 
@@ -77,19 +95,28 @@ def per_branch(rows: list[dict]) -> dict[str, dict]:
 
 
 def evaluate(branches: dict[str, dict]) -> list[dict]:
-    """One verdict per fixture against its branch class's gate."""
+    """One verdict per fixture under R2.1.
+
+    Below the floor the ratio is recorded with `diagnostic=True` and is not a
+    verdict -- it still appears in the report, because a check that did not run
+    must be visible as withheld rather than absent.
+    """
     verdicts = []
     for name, got in branches.items():
         gate = GATES[got["branch_class"]]
-        checks = [("overhead_ms", got["overhead_ms"], gate["max_overhead_ms"])]
-        if gate["max_ratio"] is not None and got["ratio"] is not None:
-            checks.append(("ratio", got["ratio"], gate["max_ratio"]))
-        for metric, actual, limit in checks:
+        micro = got["legacy_ms"] < RATIO_BASELINE_FLOOR_MS
+        limit = MICRO_PATH_MAX_OVERHEAD_MS if micro else gate["max_overhead_ms"]
+        checks = [("overhead_ms", got["overhead_ms"], limit, False)]
+        if got["ratio"] is not None:
+            checks.append(("ratio", got["ratio"], gate["max_ratio"], micro))
+        for metric, actual, limit, diagnostic in checks:
             verdicts.append({
                 "fixture": name, "branch_class": got["branch_class"],
                 "metric": metric, "actual": actual, "limit": limit,
-                "passes": actual <= limit,
-                "excess": (actual / limit) if limit else None,
+                "legacy_ms": got["legacy_ms"], "diagnostic": diagnostic,
+                "micro_path": micro,
+                "passes": True if diagnostic else actual <= limit,
+                "excess": None if diagnostic or not limit else actual / limit,
             })
     return verdicts
 
@@ -185,11 +212,17 @@ def report(tag: str | None = None, required_reps: int | None = None,
         out.append(f"  {name:<32}{got['branch_class']:<15}{got['n']:>3}"
                    f"{got['legacy_ms']:>10.4f}{got['pure_ms']:>10.4f}"
                    f"{got['overhead_ms']:>+10.4f}{ratio:>8}")
-    out += ["", "  gates"]
+    out += ["", f"  gates -- {GATE_REVISION}"]
     for v in agg["verdicts"]:
+        if v["diagnostic"]:
+            out.append(f"    ....  {v['fixture']:<32}{v['metric']:<12}"
+                       f"{v['actual']:>10.4f}    DIAGNOSTIC ONLY: legacy median "
+                       f"{v['legacy_ms']:.4f} ms < {RATIO_BASELINE_FLOOR_MS} ms")
+            continue
         mark = "PASS" if v["passes"] else "FAIL"
+        micro = "  (micro-path budget)" if v["micro_path"] else ""
         out.append(f"    {mark}  {v['fixture']:<32}{v['metric']:<12}"
-                   f"{v['actual']:>10.4f} <= {v['limit']}")
+                   f"{v['actual']:>10.4f} <= {v['limit']}{micro}")
     if agg["weighted_overhead_ms"] is None:
         out.append(f"    ----  weighted aggregate: {agg['weighted_note']}")
     else:
