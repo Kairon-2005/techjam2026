@@ -109,6 +109,36 @@ not pass; it failed to resolve.** Default `control` is therefore accepted by
 It is **not** accepted on the basis that the original gate resolved. Recording
 it as a clean pass would misstate what the measurement showed.
 
+## Post-cleanup revalidation
+
+The cleanup commit is bit-exact against the adopted `89e6f12` behaviour,
+leased and isolated at `2da7134`:
+
+| scenario | adopted | post-cleanup | Δ | row key |
+|---|---|---|---|---|
+| clean | 0.932067 | 0.932067 | `+0.000000000` | `ae20d3c2f5425aa4` |
+| uncooperative | 0.831926 | 0.831926 | `+0.000000000` | `195c9534ef879337` |
+| supplementary_dev | 0.441608 | 0.441608 | `+0.000000000` | `a87e3c3746a2b67c` |
+| compat anchor | — | 0.928708 | exact | `738f22c3e9674d7e` |
+
+All four official slices identical.
+
+### A telemetry defect the revalidation caught
+
+Removing the duplicate call also removed `starved_agrees` from control turns —
+control uses the decision directly and never computes a comparison. The
+aggregation still tested `not t.get("starved_agrees")`, so a **missing** field
+read as a disagreement and every control turn was reported broken: 559.6 of
+559.6 on `uncooperative`.
+
+**The agent was correct throughout; the aggregate was not.** Agreement is now
+computed only over turns that carry a comparison, with `compared_turns`
+reported beside `decision_turns` so the two cannot be confused. The first
+`p6b1-cleanup` rows are marked **non-citable** rather than edited — their
+scores were correct and were verified bit-exact before the defect surfaced,
+but their agreement fields are wrong — and the run was re-recorded as
+`p6b1-cleanup-v2`.
+
 ## One rule, not two
 
 The measurement commit deliberately held both rules so shadow mode could
