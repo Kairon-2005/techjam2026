@@ -276,19 +276,29 @@ def _retrieval_decision_telemetry(turns: list) -> dict:
     rows = [t for t in turns if "decided_starved" in t]
     if not rows:
         return {}
-    starved_bad = [t for t in rows if not t.get("starved_agrees")]
-    depth_bad = [t for t in rows if not t.get("depth_agrees")]
+    # Only SHADOW turns carry a comparison. Control uses the decision directly
+    # and never computes one, so `.get("starved_agrees")` returns None there --
+    # which a truthiness test counts as a disagreement, reporting every control
+    # turn as broken. Compare only where a comparison exists.
+    compared = [t for t in rows if "starved_agrees" in t]
+    starved_bad = [t for t in compared if not t["starved_agrees"]]
+    depth_bad = [t for t in compared if not t["depth_agrees"]]
     codes: dict[str, int] = {}
     for trace in rows:
         for code in trace.get("decided_reasons") or ():
             codes[code] = codes.get(code, 0) + 1
-    return {
+    out = {
         "decision_turns": len(rows),
-        "starved_disagreements": len(starved_bad),
-        "depth_disagreements": len(depth_bad),
-        "decision_agreement_total": bool(not starved_bad and not depth_bad),
+        "compared_turns": len(compared),
         "retrieval_reason_counts": dict(sorted(codes.items(), key=lambda kv: -kv[1])),
     }
+    if compared:
+        out.update({
+            "starved_disagreements": len(starved_bad),
+            "depth_disagreements": len(depth_bad),
+            "decision_agreement_total": bool(not starved_bad and not depth_bad),
+        })
+    return out
 
 
 def _shadow_telemetry(turns: list) -> dict:

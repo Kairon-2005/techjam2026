@@ -321,3 +321,28 @@ class DecisionCallCountTest(unittest.TestCase):
         self.assertIn("decided_starved", trace)
         self.assertNotIn("starved_agrees", trace,
                          "control reported an agreement it never computed")
+
+
+class AgreementAggregationTest(unittest.TestCase):
+    """Agreement is only defined where a comparison was made."""
+
+    def test_control_turns_are_not_counted_as_disagreements(self) -> None:
+        from lab.scenarios import _retrieval_decision_telemetry
+        control = [{"decided_starved": True, "decided_reasons": ["DEPTH_STANDARD"]}] * 5
+        out = _retrieval_decision_telemetry(control)
+        self.assertEqual(out["decision_turns"], 5)
+        self.assertEqual(out["compared_turns"], 0)
+        # The bug this replaces reported 5 disagreements here, because a
+        # missing starved_agrees is falsy.
+        self.assertNotIn("starved_disagreements", out)
+
+    def test_shadow_turns_are_compared(self) -> None:
+        from lab.scenarios import _retrieval_decision_telemetry
+        shadow = [{"decided_starved": True, "decided_reasons": [],
+                   "starved_agrees": True, "depth_agrees": True},
+                  {"decided_starved": False, "decided_reasons": [],
+                   "starved_agrees": False, "depth_agrees": True}]
+        out = _retrieval_decision_telemetry(shadow)
+        self.assertEqual(out["compared_turns"], 2)
+        self.assertEqual(out["starved_disagreements"], 1)
+        self.assertFalse(out["decision_agreement_total"])
