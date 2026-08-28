@@ -101,23 +101,40 @@ class ApplyPatchTest(unittest.TestCase):
 class RenderModeTest(unittest.TestCase):
     """render_mode is len(effective_options) >= 2, not `overgeneral`."""
 
-    def decide(self, snapshot, **cfg) -> C.QuestionDecision:
+    def decide(self, snapshot, *, category=None, samples=(), **cfg) -> C.QuestionDecision:
+        """The host's stage sequence, in miniature.
+
+        Written out rather than calling Agent._decide_question because these
+        cases are about rendering from injected summaries, with no catalog to
+        scan -- but the ORDER is the host's order, so a stage that stopped
+        returning early would fail here too.
+        """
         merged = {**A.DEFAULTS, "ask_policy": "pool", **cfg}
-        stats = cfg.pop("_stats", None) or C.CandidateStats(window_size=30)
-        return C.decide_question(snapshot, A.Agent._question_policy(merged), stats,
-                                 answerability=A.ANSWERABILITY, vocab=A.ATTR_VOCAB,
-                                 probe_order=A.PROBE_ORDER)
+        policy = A.Agent._question_policy(merged)
+        category = category if category is not None else C.QuestionCategorySummary()
+        decision = C.question_without_candidates(snapshot, policy,
+                                                 probe_order=A.PROBE_ORDER)
+        if decision is not None:
+            return decision
+        decision = C.question_from_category(snapshot, policy, category,
+                                            answerability=A.ANSWERABILITY,
+                                            vocab=A.ATTR_VOCAB)
+        if decision is not None:
+            return decision
+        pick = C.select_pool_attribute(snapshot, policy, samples)
+        coverage = pick.coverage if pick.coverage_known else 0.0
+        return C.question_from_pool(snapshot, policy, category, pick, coverage)
 
     def test_one_option_renders_open_even_when_overgeneral(self) -> None:
-        stats = C.CandidateStats(window_size=30, overgeneral=True, options=("dresses",))
-        d = self.decide(C.QuestionSnapshot(), _stats=stats)
+        category = C.QuestionCategorySummary(overgeneral=True, options=("dresses",))
+        d = self.decide(C.QuestionSnapshot(), category=category)
         self.assertEqual(d.effective_options, ("dresses",))
         self.assertEqual(d.render_mode, "open")
 
     def test_two_options_render_structured(self) -> None:
-        stats = C.CandidateStats(window_size=30, overgeneral=True,
-                                 options=("dresses", "skirts"))
-        self.assertEqual(self.decide(C.QuestionSnapshot(), _stats=stats).render_mode,
+        category = C.QuestionCategorySummary(overgeneral=True,
+                                             options=("dresses", "skirts"))
+        self.assertEqual(self.decide(C.QuestionSnapshot(), category=category).render_mode,
                          "structured")
 
     def test_stale_options_render_structured_on_a_no_write_branch(self) -> None:
@@ -142,16 +159,226 @@ class RenderModeTest(unittest.TestCase):
         # The case revision 1 could not express: broad_options is written
         # before the uncertain branch is tested, so selection is "easier" while
         # rendering is "structured".
-        stats = C.CandidateStats(window_size=30, overgeneral=True,
-                                 options=("dresses", "skirts", "tops"))
+        category = C.QuestionCategorySummary(
+            overgeneral=True, options=("dresses", "skirts", "tops"))
         snap = C.QuestionSnapshot(asked=("other", "other"), uncertain_streak=3)
-        d = self.decide(snap, ask_policy="other_then_pool", _stats=stats)
+        d = self.decide(snap, ask_policy="other_then_pool", category=category)
         self.assertEqual(d.selection_mode, "easier")
         self.assertEqual(d.render_mode, "structured")
         self.assertEqual(d.primary_reason, C.QuestionReason.EASIER_AFTER_UNCERTAIN)
         self.assertIn(C.QuestionModifier.STRUCTURED_CLARIFICATION_DUE, d.modifiers)
         self.assertEqual(d.patch.writes(), ("broad_options", "last_bits"))
         self.assertEqual(d.patch.last_bits, 0.0)
+
+
+class ScanTopologyTest(unittest.TestCase):
+    """The pre-registered scan topology, asserted rather than described.
+
+    Phase 6B2's defect was invisible at unit level: every branch returned the
+    right answer, every write set matched, 8,483 turns agreed exactly -- and
+    only the clock said the first-two-`other` branch had scanned all five
+    facets to decide something that reads none of them. A correctness suite
+    that cannot see wasted work will pass a design that does nothing but waste
+    it. So the scan COUNT is part of the contract here, per branch, against
+    notes/33-phase6b2-r2-prereg.md.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        A.clear_catalog_cache()
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.path = _catalog_file(Path(cls._tmp.name))
+        cls.agent = A.Agent(cls.path)
+        cls.pool = list(cls.agent.cat.cats)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        A.clear_catalog_cache()
+        cls._tmp.cleanup()
+
+    def state(self, **kw) -> dict:
+        base = {"asked": [], "dry_streak": 0, "dry_others": 0, "uncertain_streak": 0,
+                "broad_options": [], "last_bits": 0.0, "last_coverage": 0.0,
+                "last_weighed": False, "route": "buying", "slots": [], "terms": []}
+        return {**base, **kw}
+
+    def counted(self, run, **cfg) -> dict:
+        """Scans performed by `run`, by kind.
+
+        _overgeneral reads cat.cats (short leaf strings); the other three read
+        cat.text (~1.1kB per candidate) and are what actually costs.
+        """
+        counts = {"category": 0, "facet_pass": 0, "coverage": 0, "entropy": 0}
+        names = {"_overgeneral": "category", "_facet_pass": "facet_pass",
+                 "_facet_coverage": "coverage", "_pool_entropy": "entropy"}
+        saved = {n: getattr(self.agent, n) for n in names}
+        saved_cfg = self.agent.cfg
+        try:
+            for name, key in names.items():
+                def wrap(*a, _o=saved[name], _k=key, **k):
+                    counts[_k] += 1
+                    return _o(*a, **k)
+                setattr(self.agent, name, wrap)
+            self.agent.cfg = {**saved_cfg, **cfg}
+            run(self.agent.cfg)
+        finally:
+            for name, original in saved.items():
+                setattr(self.agent, name, original)
+            self.agent.cfg = saved_cfg
+        return counts
+
+    def staged(self, state: dict, pool=None, **cfg) -> dict:
+        return self.counted(
+            lambda c: self.agent._decide_question(state, self.pool if pool is None
+                                                  else pool, c), **cfg)
+
+    def legacy(self, state: dict, pool=None, **cfg) -> dict:
+        return self.counted(
+            lambda c: self.agent._pick_attribute(state, self.pool if pool is None
+                                                 else pool), **cfg)
+
+    # ---- zero candidate scans ------------------------------------------
+    def test_the_no_evidence_branches_touch_nothing(self) -> None:
+        cases = {
+            "first_two_other": (self.state(asked=["other"]),
+                                {"ask_policy": "other_then_pool"}),
+            "probe_cycle": (self.state(asked=["other", "other"]),
+                            {"ask_policy": "probe_cycle"}),
+            "other_then_cycle_first_two": (self.state(asked=["other"]),
+                                           {"ask_policy": "other_then_cycle"}),
+            "other_then_cycle_after": (self.state(asked=["other", "other"]),
+                                       {"ask_policy": "other_then_cycle"}),
+            "other_dry_degrade": (self.state(asked=["other"], dry_others=5),
+                                  {"ask_policy": "other", "ask_fallback_after": 2}),
+            "fallback": (self.state(), {"ask_policy": "other",
+                                        "ask_fallback_after": 0}),
+        }
+        for name, (state, cfg) in cases.items():
+            with self.subTest(branch=name):
+                self.assertEqual(self.staged(state, **cfg),
+                                 {"category": 0, "facet_pass": 0,
+                                  "coverage": 0, "entropy": 0})
+
+    def test_needs_candidates_agrees_with_what_the_stages_do(self) -> None:
+        for asked, policy, expected in ((["other"], "other_then_pool", False),
+                                        (["other", "other"], "other_then_pool", True),
+                                        ([], "pool", True),
+                                        ([], "probe_cycle", False),
+                                        ([], "other", False)):
+            snapshot = C.QuestionSnapshot(asked=tuple(asked))
+            got = C.needs_candidates(
+                snapshot, A.Agent._question_policy({**A.DEFAULTS,
+                                                    "ask_policy": policy}))
+            with self.subTest(policy=policy, asked=tuple(asked)):
+                self.assertEqual(got, expected)
+                counts = self.staged(self.state(asked=list(asked)),
+                                     ask_policy=policy)
+                self.assertEqual(sum(counts.values()) > 0, expected)
+
+    # ---- category summary only -----------------------------------------
+    def test_the_easier_branch_reads_categories_and_no_facet(self) -> None:
+        counts = self.staged(self.state(asked=["other", "other"], uncertain_streak=3),
+                             ask_policy="pool", answerability_after=1)
+        self.assertEqual(counts, {"category": 1, "facet_pass": 0,
+                                  "coverage": 0, "entropy": 0})
+
+    def test_the_give_up_branch_reads_categories_and_no_facet(self) -> None:
+        counts = self.staged(self.state(asked=["other", "other"], dry_streak=3),
+                             ask_policy="pool", pool_give_up_after=1,
+                             overgeneral_cats=0)
+        self.assertEqual(counts, {"category": 1, "facet_pass": 0,
+                                  "coverage": 0, "entropy": 0})
+
+    # ---- pool selection -------------------------------------------------
+    def test_utility_on_is_one_combined_pass_per_unasked_facet(self) -> None:
+        for asked, unasked in ((["other", "other"], len(A.ATTR_VOCAB)),
+                               (["other", "other", "material", "color"],
+                                len(A.ATTR_VOCAB) - 2)):
+            with self.subTest(asked=len(asked)):
+                counts = self.staged(self.state(asked=list(asked)),
+                                     ask_policy="pool", question_utility=True)
+                self.assertEqual(counts, {"category": 1, "facet_pass": unasked,
+                                          "coverage": 0, "entropy": 0})
+
+    def test_utility_off_is_one_entropy_pass_plus_the_winner_s_coverage(self) -> None:
+        counts = self.staged(self.state(asked=["other", "other"]),
+                             ask_policy="pool", question_utility=False)
+        self.assertEqual(counts, {"category": 1, "facet_pass": len(A.ATTR_VOCAB),
+                                  "coverage": 1, "entropy": 0})
+
+    def test_no_winner_needs_no_coverage_scan_at_all(self) -> None:
+        # An empty pool leaves every facet at 0.0 bits, so the winner is
+        # "other" -- and _facet_coverage(window, "other") is 0.0 by definition,
+        # because ATTR_VOCAB has no such key. Scanning for it would be one
+        # wasted pass on exactly the turns that have nothing to scan.
+        counts = self.staged(self.state(asked=["other", "other"]), pool=[],
+                             ask_policy="pool", question_utility=False)
+        self.assertEqual(counts["coverage"], 0)
+
+    def test_an_already_asked_facet_is_never_scanned(self) -> None:
+        plan = C.facet_scan_plan(
+            C.QuestionSnapshot(asked=("other", "material", "color")),
+            A.Agent._question_policy({**A.DEFAULTS, "ask_policy": "pool"}),
+            vocab=A.ATTR_VOCAB)
+        self.assertNotIn("material", plan.attributes)
+        self.assertNotIn("color", plan.attributes)
+        self.assertEqual(list(plan.attributes),
+                         [a for a in A.ATTR_VOCAB if a not in ("material", "color")])
+
+    def test_the_plan_ties_the_entropy_variant_to_the_utility_setting(self) -> None:
+        # skip_missing and with_coverage are not two decisions. Utility needs
+        # the skip-missing entropy AND coverage; the other arm needs neither.
+        for utility in (True, False):
+            plan = C.facet_scan_plan(
+                C.QuestionSnapshot(),
+                A.Agent._question_policy({**A.DEFAULTS, "ask_policy": "pool",
+                                          "question_utility": utility}),
+                vocab=A.ATTR_VOCAB)
+            with self.subTest(question_utility=utility):
+                self.assertEqual(plan.skip_missing, utility)
+                self.assertEqual(plan.with_coverage, utility)
+
+    def test_utility_on_with_coverage_less_samples_raises(self) -> None:
+        policy = A.Agent._question_policy({**A.DEFAULTS, "ask_policy": "pool",
+                                           "question_utility": True})
+        samples = (C.FacetSample(attribute="color", bits=1.0, answerability=0.75),)
+        with self.assertRaises(ValueError):
+            C.select_pool_attribute(C.QuestionSnapshot(), policy, samples)
+
+    def test_the_scan_plan_preserves_attr_vocab_insertion_order(self) -> None:
+        # Selection breaks ties with a strict `>`, so the first attribute at a
+        # given utility wins and the order decides the answer, not just the
+        # traversal.
+        plan = C.facet_scan_plan(
+            C.QuestionSnapshot(), A.Agent._question_policy(A.DEFAULTS),
+            vocab=A.ATTR_VOCAB)
+        self.assertEqual(list(plan.attributes), list(A.ATTR_VOCAB))
+
+    # ---- the comparison the whole phase is about ------------------------
+    def test_the_staged_path_does_strictly_less_text_scanning_than_legacy(self) -> None:
+        """The claim in one assertion, on the shipped configuration.
+
+        utility ON, five unasked facets: legacy walks the window 11 times over
+        cat.text -- five entropies, five coverages, and the winner's coverage
+        again -- because it computes them in separate loops. Staged walks it
+        five times, because entropy and coverage come from the same
+        pattern.search per candidate.
+        """
+        def text_passes(counts):
+            return counts["facet_pass"] + counts["coverage"] + counts["entropy"]
+
+        for utility, legacy_text, staged_text in ((True, 11, 5), (False, 6, 6)):
+            state = self.state(asked=["other", "other"])
+            got_legacy = self.legacy(dict(state), ask_policy="pool",
+                                     question_utility=utility)
+            got_staged = self.staged(dict(state), ask_policy="pool",
+                                     question_utility=utility)
+            with self.subTest(question_utility=utility):
+                self.assertEqual(text_passes(got_legacy), legacy_text)
+                self.assertEqual(text_passes(got_staged), staged_text)
+                self.assertEqual(got_legacy["category"], got_staged["category"], 1)
+                self.assertLessEqual(text_passes(got_staged), text_passes(got_legacy))
+
 
 
 if __name__ == "__main__":
@@ -317,15 +544,14 @@ class QuestionModeTest(unittest.TestCase):
         ag = A.Agent(self.path, config=cfg)
         ag.reset("s", {})
         legacy, pure = [], []
-        legacy_original = ag._pick_attribute
-        pure_original = C.decide_question
+        legacy_original, pure_original = ag._pick_attribute, ag._decide_question
         ag._pick_attribute = lambda *a, _o=legacy_original, **k: (legacy.append(1), _o(*a, **k))[1]
-        C.decide_question = lambda *a, _o=pure_original, **k: (pure.append(1), _o(*a, **k))[1]
-        try:
-            ag.respond("s", "I'm looking for Clothing Women Dresses, "
-                            "but I'm still exploring.", 1, 5)
-        finally:
-            C.decide_question = pure_original
+        # The staged controller has no single pure entry point to count, and
+        # counting a stage would count a branch rather than a dispatch. The
+        # unit gate D cares about is one COMPLETE decision per control turn.
+        ag._decide_question = lambda *a, _o=pure_original, **k: (pure.append(1), _o(*a, **k))[1]
+        ag.respond("s", "I'm looking for Clothing Women Dresses, "
+                        "but I'm still exploring.", 1, 5)
         return len(legacy), len(pure)
 
     def test_the_default_is_off(self) -> None:

@@ -93,6 +93,15 @@ class DialogueMixin:
                 continue
             value = match.group(1).lower() if match else ""
             counts[value] = counts.get(value, 0) + 1
+        return self._entropy_of(counts)
+
+    @staticmethod
+    def _entropy_of(counts: dict[str, int]) -> float:
+        """Shared kernel. _facet_pass buckets the same values in one walk with
+        coverage, and both must agree to the last bit -- so there is one
+        expression, not two that look alike. Insertion order is identical
+        because both walk the same window in the same direction, which is what
+        makes the float summation order identical too."""
         total = sum(counts.values())
         if total < 2 or len(counts) < 2:
             return 0.0
@@ -276,30 +285,56 @@ class DialogueMixin:
                    if pattern.search(self.cat.text.get(asin, "")))
         return round(seen / len(window), 4)
 
-    # ---- Phase 6B2: question decision extraction -----------------------
+    # ---- Phase 6B2-R2: staged question decision -------------------------
 
-    def _candidate_stats(self, pool: list[str], cfg: dict) -> "_context.CandidateStats":
-        """Per-facet statistics over the bounded ranked window.
+    def _question_window(self, pool: list[str], cfg: dict) -> list[str]:
+        """ranked[:max(2, pool_depth)] -- the one expression _overgeneral and
+        _pool_attribute both use. NOT ranked[:pool_depth]."""
+        return pool[: max(2, int(cfg["pool_depth"]))]
 
-        The window is ranked[:max(2, pool_depth)] -- the same expression both
-        _overgeneral and _pool_attribute use. Reads cat.text and cat.cats,
-        which are always resident, and never CategoryIndex, FacetIndex or
-        DenseIndex.
-        """
-        window = pool[: max(2, int(cfg["pool_depth"]))]
-        facets = tuple(
-            _context.FacetStat(
-                attribute=attribute,
-                bits_with_missing=self._pool_entropy(window, pattern),
-                bits_skip_missing=self._pool_entropy(window, pattern, skip_missing=True),
-                coverage=self._facet_coverage(window, attribute),
-                answerability=ANSWERABILITY.get(attribute, 0.5))
-            # ATTR_VOCAB insertion order, preserved: selection breaks ties with
-            # a strict `>`, so the order decides which attribute wins.
-            for attribute, pattern in ATTR_VOCAB.items())
+    def _question_category(self, pool: list[str],
+                           cfg: dict) -> "_context.QuestionCategorySummary":
+        """Stage 3: one bounded pass over cat.cats. Never a lazy index."""
         broad, options = self._overgeneral(pool, cfg)
-        return _context.CandidateStats(window_size=len(window), facets=facets,
-                                       overgeneral=broad, options=tuple(options))
+        return _context.QuestionCategorySummary(overgeneral=broad,
+                                                options=tuple(options))
+
+    def _facet_pass(self, window: list[str], attribute: str,
+                    plan: "_context.FacetScanPlan") -> "_context.FacetSample":
+        """One pass over the window for one facet: exactly what the plan asked.
+
+        Entropy and coverage are the same walk. Both need
+        `pattern.search(text)` for every candidate -- coverage counts the
+        matches, entropy buckets their values -- so when the plan wants both,
+        one loop produces both and the second search is not performed at all.
+        Legacy calls _pool_entropy and then _facet_coverage, walking the window
+        twice; this is where the utility-ON path gets CHEAPER than legacy
+        rather than merely no dearer.
+        """
+        pattern = ATTR_VOCAB[attribute]
+        counts: dict[str, int] = {}
+        seen = 0
+        for asin in window:
+            match = pattern.search(self.cat.text.get(asin, ""))
+            if match is not None:
+                seen += 1
+            elif plan.skip_missing:
+                # Silence is not an answer the customer can give.
+                continue
+            value = match.group(1).lower() if match else ""
+            counts[value] = counts.get(value, 0) + 1
+        return _context.FacetSample(
+            attribute=attribute, bits=self._entropy_of(counts),
+            answerability=ANSWERABILITY.get(attribute, 0.5),
+            coverage=(round(seen / len(window), 4) if window else 0.0)
+                     if plan.with_coverage else 0.0,
+            coverage_known=bool(plan.with_coverage))
+
+    def _facet_samples(self, window: list[str],
+                       plan: "_context.FacetScanPlan") -> tuple:
+        """The host's half of stage 5: the plan's scans, in the plan's order."""
+        return tuple(self._facet_pass(window, attribute, plan)
+                     for attribute in plan.attributes)
 
     def _question_snapshot(self, state: dict) -> "_context.QuestionSnapshot":
         return _context.QuestionSnapshot(
@@ -327,10 +362,43 @@ class DialogueMixin:
 
     def _decide_question(self, state: dict, pool: list[str],
                          cfg: dict) -> "_context.QuestionDecision":
-        return _context.decide_question(
-            self._question_snapshot(state), self._question_policy(cfg),
-            self._candidate_stats(pool, cfg),
-            answerability=ANSWERABILITY, vocab=ATTR_VOCAB, probe_order=PROBE_ORDER)
+        """Drive the staged controller, scanning only between stages.
+
+        The order of these five blocks IS the pre-registered scan topology
+        (notes/33-phase6b2-r2-prereg.md). Every early return is a scan not
+        performed: a first-two-`other` turn -- 45% of live turns -- reaches
+        neither cat.cats nor cat.text, and an easier or give-up turn reaches
+        cat.cats once and cat.text never.
+
+        Nothing below is handed an Agent, a session dict, a catalog or a lazy
+        index. The staged functions receive tuples of primitives; the scans
+        happen HERE, in the host, in plain sight.
+        """
+        snapshot = self._question_snapshot(state)
+        policy = self._question_policy(cfg)
+        decision = _context.question_without_candidates(
+            snapshot, policy, probe_order=PROBE_ORDER)
+        if decision is not None:
+            return decision
+
+        category = self._question_category(pool, cfg)          # 1 cat.cats pass
+        decision = _context.question_from_category(
+            snapshot, policy, category, answerability=ANSWERABILITY,
+            vocab=ATTR_VOCAB)
+        if decision is not None:
+            return decision
+
+        plan = _context.facet_scan_plan(snapshot, policy, vocab=ATTR_VOCAB)
+        window = self._question_window(pool, cfg)
+        pick = _context.select_pool_attribute(
+            snapshot, policy, self._facet_samples(window, plan))
+        # With utility ON the winner's coverage came back in its own pass; with
+        # it OFF legacy takes coverage for the winner ALONE, after selecting,
+        # so exactly one more scan happens here and only here.
+        coverage = (pick.coverage if pick.coverage_known
+                    else self._facet_coverage(window, pick.attribute))
+        return _context.question_from_pool(snapshot, policy, category, pick,
+                                           coverage)
 
     @staticmethod
     def _apply_question_patch(state: dict, patch: "_context.QuestionPatch") -> None:

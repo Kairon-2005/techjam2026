@@ -441,13 +441,32 @@ def decide_retrieval(snapshot: PreRetrievalSnapshot,
 
 
 # ---------------------------------------------------------------------------
-# Phase 6B2: clarification / question selection.
+# Phase 6B2-R2: clarification / question selection, in stages.
 #
 # Selection and RENDERING are different questions, and one field cannot hold
 # both. _pick_attribute writes broad_options BEFORE testing the uncertain
 # branch, so a turn can select via the "easier" path while _compose renders the
 # structured message from options the same call just wrote. Both facts are
 # represented.
+#
+# STAGED, because 6B2 was not. Revision 1 built a frozen, fully-populated
+# CandidateStats -- every facet, both entropy variants, every coverage --
+# before entering the decision, and paid 15 passes over cat.text on every
+# dispatch including the 45% of live turns that take the first-two-`other`
+# branch and read none of them. It measured 1.40x legacy and was NOT ADOPTED.
+#
+# The fix is not to weaken purity. A pure function must already hold what it
+# READS; it does not have to hold everything it MIGHT read. So the decision is
+# split into stages, each a pure function over bounded primitive summaries, and
+# the host runs a scan between stages only when the previous stage could not
+# decide without it.
+#
+# There is deliberately no lazy statistics object holding an Agent, a catalog
+# or a callback. That would move the scans out of sight: the cost would still
+# be paid, it would fire from inside a function documented as pure, and no test
+# could say which branch paid it. The boundary is explicit instead -- these
+# functions receive tuples of floats and strings, and the host is told exactly
+# which facets to scan and which entropy variant to compute.
 # ---------------------------------------------------------------------------
 
 QUESTION_MODES = ("off", "shadow", "control")
@@ -547,20 +566,67 @@ class QuestionPolicy:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class FacetStat:
-    attribute: str
-    bits_with_missing: float
-    bits_skip_missing: float
-    coverage: float
-    answerability: float
+class QuestionCategorySummary:
+    """Stage 3's result: one bounded pass over the window's leaf categories.
+
+    Distinct from CandidateCategorySummary above, which the Phase 6A shadow
+    snapshot builds with its own entropy and its own over-generality rule. This
+    one reproduces _overgeneral exactly, and nothing else.
+
+    Cheap -- it reads cat.cats, which holds short category strings, not the
+    ~1.1kB of product text each facet pass scans. Two branches need it and
+    nothing else, which is why it is its own stage rather than being folded in
+    with the facet work.
+    """
+    overgeneral: bool = False
+    options: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class CandidateStats:
-    window_size: int
-    facets: tuple[FacetStat, ...] = ()
-    overgeneral: bool = False
-    options: tuple[str, ...] = ()
+class FacetScanPlan:
+    """Exactly what the host must scan, and nothing more.
+
+    `attributes` is in ATTR_VOCAB insertion order with already-asked facets
+    removed -- order matters because selection breaks ties with a strict `>`,
+    so the first attribute at a given utility wins.
+
+    One entropy variant, not both: `question_utility` decides which, and
+    computing the other is 5 window passes spent on a number no branch reads.
+    That, multiplied across every dispatch, is most of what 6B2 paid.
+    """
+    attributes: tuple[str, ...] = ()
+    skip_missing: bool = False
+    with_coverage: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class FacetSample:
+    """One facet's statistics -- the variant the plan asked for, and no other.
+
+    `coverage_known` is not a nicety. With utility ON, coverage arrives free in
+    the same pass as the entropy and the winner's is already in hand; with it
+    OFF, legacy takes coverage for the WINNER ALONE, after selecting, so the
+    field is genuinely absent here and the host must be asked for exactly one
+    more scan. A default of 0.0 with no flag would silently record "no
+    coverage" as "zero coverage" and change last_coverage on every
+    utility-OFF turn.
+    """
+    attribute: str
+    bits: float
+    answerability: float
+    coverage: float = 0.0
+    coverage_known: bool = False
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PoolPick:
+    """Stage 5's result: who won, and whether their coverage is already known."""
+    attribute: str
+    bits: float
+    utility: float
+    weighed: bool
+    coverage: float = 0.0
+    coverage_known: bool = False
 
 
 class QuestionReason(str, Enum):
@@ -597,6 +663,78 @@ class QuestionDecision:
         return self.effective_render_state.broad_options
 
 
+POOL_POLICIES = ("pool", "other_then_pool")
+
+
+def needs_candidates(snapshot: QuestionSnapshot, policy: QuestionPolicy) -> bool:
+    """Will this turn look at the candidates at all? Pure, and free.
+
+    Stage 2 answers the same question by returning a decision or None; this is
+    the predicate on its own, so a caller can assert the topology without
+    running the decision.
+    """
+    if policy.ask_policy not in POOL_POLICIES:
+        return False
+    return not (policy.ask_policy == "other_then_pool"
+                and snapshot.other_asked_count < 2)
+
+
+def _finish(snapshot: QuestionSnapshot, attribute: str, selection_mode: str,
+            patch: QuestionPatch, reason: QuestionReason, bits: float = 0.0,
+            coverage: float = 0.0, utility: float = 0.0) -> QuestionDecision:
+    """Every stage returns through here, so render_mode is derived one way."""
+    effective = apply_patch(snapshot.prior, patch)
+    # _compose renders the structured message on len(options) >= 2 -- NOT on
+    # `overgeneral`. A single distinguishing option renders open, and stale
+    # options from an earlier turn render structured on a branch that wrote
+    # nothing.
+    structured = len(effective.broad_options) >= 2
+    return QuestionDecision(
+        attribute=attribute, selection_mode=selection_mode,
+        render_mode="structured" if structured else "open",
+        effective_render_state=effective, selected_bits=bits,
+        selected_coverage=coverage, selected_utility=utility,
+        primary_reason=reason,
+        modifiers=(QuestionModifier.STRUCTURED_CLARIFICATION_DUE,) if structured else (),
+        patch=patch)
+
+
+# ---- stage 2: every branch that needs no candidate evidence ---------------
+
+def question_without_candidates(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                                *, probe_order) -> QuestionDecision | None:
+    """The five branches that never look at a candidate. None -> pool path.
+
+    Returns for: first-two-`other` under `other_then_pool`, the `other` policy's
+    dry degrade, `probe_cycle`, `other_then_cycle` in both of its cases, and the
+    fallback. Zero passes over cat.cats or cat.text -- and 45% of live turns
+    stop here, which is the whole reason the stage exists.
+    """
+    pol = policy.ask_policy
+    if pol in POOL_POLICIES:
+        if pol == "other_then_pool" and snapshot.other_asked_count < 2:
+            return _finish(snapshot, "other", "first_two_other", QuestionPatch(),
+                           QuestionReason.FIRST_TWO_OTHER)
+        return None
+    if pol == "other" and policy.ask_fallback_after and \
+            snapshot.dry_others >= policy.ask_fallback_after:
+        nxt = next((a for a in probe_order[:-1] if a not in snapshot.asked), "other")
+        return _finish(snapshot, nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    if pol == "probe_cycle":
+        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
+        return _finish(snapshot, nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    if pol == "other_then_cycle":
+        if snapshot.other_asked_count < 2:
+            return _finish(snapshot, "other", "first_two_other", QuestionPatch(),
+                           QuestionReason.FIRST_TWO_OTHER)
+        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
+        return _finish(snapshot, nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    return _finish(snapshot, "other", "fallback", QuestionPatch(),
+                   QuestionReason.FALLBACK_OTHER)
+
+
+# ---- stage 4: what the category summary alone can decide ------------------
+
 def _easiest_unasked(asked, answerability, vocab) -> str:
     """Most answerable facet not yet asked. Reproduces _easiest_unasked."""
     seen = set(asked)
@@ -605,100 +743,112 @@ def _easiest_unasked(asked, answerability, vocab) -> str:
     return max(options)[1] if options else ""
 
 
-def _select_from_pool(snapshot: QuestionSnapshot, policy: QuestionPolicy,
-                      stats: CandidateStats) -> tuple[str, float, float, float, bool]:
-    """Reproduces _pool_attribute: (attribute, bits, coverage, utility, weighed).
+def question_from_category(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                           category: QuestionCategorySummary, *, answerability,
+                           vocab) -> QuestionDecision | None:
+    """The easier and dry-give-up branches. None -> pool selection is required.
+
+    Both write `broad_options` from the category summary, and neither reads a
+    single facet statistic. Legacy's ORDER is preserved exactly: the easier
+    branch BEATS over-generality, and the give-up guard is SUPPRESSED by it.
+    """
+    # broad_options is written HERE, before the uncertain branch is tested --
+    # which is what lets a turn select "easier" and still render "structured".
+    options = QuestionPatch(broad_options=category.options)
+    if snapshot.uncertain_streak >= policy.answerability_after:
+        easy = _easiest_unasked(snapshot.asked, answerability, vocab)
+        if easy:
+            return _finish(snapshot, easy, "easier",
+                           QuestionPatch(broad_options=category.options,
+                                         last_bits=0.0),
+                           QuestionReason.EASIER_AFTER_UNCERTAIN)
+    # An over-general pool is exactly when a targeted question pays, so the
+    # give-up guard is suspended while the request is still vague.
+    if not category.overgeneral and snapshot.dry_streak >= policy.pool_give_up_after:
+        return _finish(snapshot, "other", "give_up", options,
+                       QuestionReason.GIVE_UP_AFTER_DRY)
+    return None
+
+
+# ---- stage 5: sparse facet statistics, then selection ---------------------
+
+def facet_scan_plan(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                    *, vocab) -> FacetScanPlan:
+    """Which facets to scan, which entropy variant, and whether coverage rides
+    along. Pure; the host performs exactly this and nothing else.
+
+    With utility ON, entropy and coverage come from the same `pattern.search`
+    per candidate, so asking for both costs one pass rather than legacy's two.
+    With it OFF, coverage is needed for the winner alone and is not requested
+    here at all.
+    """
+    return FacetScanPlan(
+        attributes=tuple(a for a in vocab if a not in snapshot.asked),
+        skip_missing=policy.question_utility,
+        with_coverage=policy.question_utility)
+
+
+def select_pool_attribute(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                          samples: tuple[FacetSample, ...]) -> PoolPick:
+    """Reproduces _pool_attribute's selection loop over the sampled facets.
 
     `util > best_util` is STRICTLY greater, so equal utility keeps the first
-    attribute in ATTR_VOCAB order -- which is why `stats.facets` must preserve
-    that order rather than being sorted or built from a set.
+    attribute in ATTR_VOCAB order -- which is why the scan plan preserves that
+    order rather than sorting or building from a set.
+
+    Already-asked facets are absent from `samples` because the plan removed
+    them; the loop does not re-filter, so a host that scanned an asked facet
+    would change the outcome. That is asserted in the equivalence grid rather
+    than defended here, because the plan is the single place the rule lives.
     """
+    if policy.question_utility and samples and not samples[0].coverage_known:
+        # The utility formula multiplies by coverage, so samples without it
+        # would silently score every facet at -question_dry_cost and pick the
+        # first one. One check per dispatch against five ~1.1ms window passes;
+        # a wrong answer that looks like a right one is the expensive outcome.
+        raise ValueError("question_utility is on but the samples carry no "
+                         "coverage; facet_scan_plan ties the two together")
     weigh = snapshot.dry_streak >= policy.answerability_after
     best, best_bits, best_util = "other", 0.0, 0.0
-    for facet in stats.facets:
-        if facet.attribute in snapshot.asked:
-            continue
+    winner: FacetSample | None = None
+    for sample in samples:
         if policy.question_utility:
-            bits = facet.bits_skip_missing
-            util = (bits * facet.coverage * facet.answerability
-                    - policy.question_dry_cost * (1.0 - facet.coverage * facet.answerability))
+            util = (sample.bits * sample.coverage * sample.answerability
+                    - policy.question_dry_cost
+                    * (1.0 - sample.coverage * sample.answerability))
         else:
-            bits = facet.bits_with_missing
-            util = bits * facet.answerability if weigh else bits
+            util = sample.bits * sample.answerability if weigh else sample.bits
         if util > best_util:
-            best, best_bits, best_util = facet.attribute, bits, util
-    # _pool_attribute always writes last_coverage for the WINNER; when the
-    # winner is "other" that is 0.0, because ATTR_VOCAB has no such key.
-    chosen = next((f for f in stats.facets if f.attribute == best), None)
-    coverage = chosen.coverage if chosen is not None else 0.0
-    return best, best_bits, coverage, best_util, weigh
+            best, best_bits, best_util, winner = (sample.attribute, sample.bits,
+                                                  util, sample)
+    if winner is None:
+        # No facet beat 0.0, so the winner is "other". _pool_attribute still
+        # writes last_coverage, as _facet_coverage(window, "other") -- and
+        # ATTR_VOCAB has no "other", so that is 0.0 with no scan.
+        return PoolPick(attribute=best, bits=best_bits, utility=best_util,
+                        weighed=weigh, coverage=0.0, coverage_known=True)
+    return PoolPick(attribute=best, bits=best_bits, utility=best_util,
+                    weighed=weigh, coverage=winner.coverage,
+                    coverage_known=winner.coverage_known)
 
 
-def decide_question(snapshot: QuestionSnapshot, policy: QuestionPolicy,
-                    stats: CandidateStats, *, answerability, vocab,
-                    probe_order) -> QuestionDecision:
-    """Pure. Reproduces _pick_attribute branch for branch.
+def question_from_pool(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                       category: QuestionCategorySummary, pick: PoolPick,
+                       coverage: float) -> QuestionDecision:
+    """Stage 6: the pool-selection branches, and the only four-field patch.
 
-    Receives no Agent, no session dict, no catalog and no lazy index; the
-    vocabularies arrive as arguments so this module keeps importing nothing
-    from the package.
+    `coverage` is passed in rather than read off `pick` because with utility
+    OFF the host had to scan for it after the winner was known. Passing it
+    explicitly keeps that one extra scan visible at the call site instead of
+    hiding it behind an attribute that is sometimes populated.
     """
-    def finish(attribute: str, selection_mode: str, patch: QuestionPatch,
-               reason: QuestionReason, bits: float = 0.0, coverage: float = 0.0,
-               utility: float = 0.0) -> QuestionDecision:
-        effective = apply_patch(snapshot.prior, patch)
-        # _compose renders the structured message on len(options) >= 2 -- NOT
-        # on `overgeneral`. A single distinguishing option renders open, and
-        # stale options from an earlier turn render structured on a branch that
-        # wrote nothing.
-        structured = len(effective.broad_options) >= 2
-        return QuestionDecision(
-            attribute=attribute, selection_mode=selection_mode,
-            render_mode="structured" if structured else "open",
-            effective_render_state=effective, selected_bits=bits,
-            selected_coverage=coverage, selected_utility=utility,
-            primary_reason=reason,
-            modifiers=(QuestionModifier.STRUCTURED_CLARIFICATION_DUE,) if structured else (),
-            patch=patch)
-
-    pol = policy.ask_policy
-    if pol in ("pool", "other_then_pool"):
-        if pol == "other_then_pool" and snapshot.other_asked_count < 2:
-            return finish("other", "first_two_other", QuestionPatch(),
-                          QuestionReason.FIRST_TWO_OTHER)
-        # broad_options is written HERE, before the uncertain branch is tested.
-        patch_options = QuestionPatch(broad_options=tuple(stats.options))
-        if snapshot.uncertain_streak >= policy.answerability_after:
-            easy = _easiest_unasked(snapshot.asked, answerability, vocab)
-            if easy:
-                return finish(easy, "easier",
-                              QuestionPatch(broad_options=tuple(stats.options),
-                                            last_bits=0.0),
-                              QuestionReason.EASIER_AFTER_UNCERTAIN)
-        if not stats.overgeneral and snapshot.dry_streak >= policy.pool_give_up_after:
-            return finish("other", "give_up", patch_options,
-                          QuestionReason.GIVE_UP_AFTER_DRY)
-        attribute, bits, coverage, utility, weighed = _select_from_pool(
-            snapshot, policy, stats)
-        patch = QuestionPatch(broad_options=tuple(stats.options), last_bits=bits,
-                              last_coverage=coverage, last_weighed=weighed)
-        if bits >= 0.2:
-            return finish(attribute, "pool_selection", patch,
-                          QuestionReason.POOL_ATTRIBUTE_SELECTED, bits, coverage, utility)
-        return finish("other", "pool_selection", patch,
-                      QuestionReason.NO_DISCRIMINATING_FACET, bits, coverage, utility)
-
-    if pol == "other" and policy.ask_fallback_after and \
-            snapshot.dry_others >= policy.ask_fallback_after:
-        nxt = next((a for a in probe_order[:-1] if a not in snapshot.asked), "other")
-        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
-    if pol == "probe_cycle":
-        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
-        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
-    if pol == "other_then_cycle":
-        if snapshot.other_asked_count < 2:
-            return finish("other", "first_two_other", QuestionPatch(),
-                          QuestionReason.FIRST_TWO_OTHER)
-        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
-        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
-    return finish("other", "fallback", QuestionPatch(), QuestionReason.FALLBACK_OTHER)
+    patch = QuestionPatch(broad_options=category.options, last_bits=pick.bits,
+                          last_coverage=coverage, last_weighed=pick.weighed)
+    if pick.bits >= 0.2:
+        return _finish(snapshot, pick.attribute, "pool_selection", patch,
+                       QuestionReason.POOL_ATTRIBUTE_SELECTED,
+                       pick.bits, coverage, pick.utility)
+    # No question discriminates the pool -> fall back to open-ended.
+    return _finish(snapshot, "other", "pool_selection", patch,
+                   QuestionReason.NO_DISCRIMINATING_FACET,
+                   pick.bits, coverage, pick.utility)

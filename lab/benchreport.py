@@ -94,7 +94,19 @@ def evaluate(branches: dict[str, dict]) -> list[dict]:
     return verdicts
 
 
-def aggregate(rows: list[dict], required_reps: int) -> dict:
+def registered_reps(rows: list[dict], default: int = 7) -> int:
+    """How many repetitions the run itself said it would do.
+
+    Taken from the rows rather than from the caller, so "four of seven" is
+    reported as four of SEVEN even when whoever reads the ledger has forgotten
+    what was registered. A caller that could choose this number could choose
+    the one its evidence happens to satisfy.
+    """
+    declared = [int((r.get("config") or {}).get("reps") or 0) for r in rows]
+    return max(declared) if any(declared) else default
+
+
+def aggregate(rows: list[dict], required_reps: int | None = None) -> dict:
     """The live branch-weighted median overhead -- or a refusal to form one.
 
     `sufficient` is False when fewer than `required_reps` citable, completed
@@ -102,6 +114,7 @@ def aggregate(rows: list[dict], required_reps: int) -> dict:
     would be its own kind of dishonesty, but every caller must decide what to
     do with `sufficient=False` and `report()` prints them as diagnostic.
     """
+    required_reps = registered_reps(rows) if required_reps is None else required_reps
     usable = _completed(rows)
     branches = per_branch(usable)
     by_branch_overhead = {}
@@ -148,7 +161,7 @@ def screen(rows: list[dict]) -> dict:
                                  for v in blown))}
 
 
-def report(tag: str | None = None, required_reps: int = 7,
+def report(tag: str | None = None, required_reps: int | None = None,
            show_excluded: bool = False, rows: list[dict] | None = None) -> str:
     from lab import benchmark as B
     rows = P.load(B.LOG) if rows is None else rows
@@ -160,7 +173,7 @@ def report(tag: str | None = None, required_reps: int = 7,
     agg = aggregate(rows, required_reps)
     out = [f"\n=== benchmark: {tag or 'all tags'} ===",
            f"  rows {agg['n_rows']}, citable+completed {agg['n_citable_completed']}, "
-           f"pre-registered repetitions {required_reps}"]
+           f"repetitions this run registered {agg['required_reps']}"]
     if not agg["sufficient"]:
         out += ["", "  *** NOT SUFFICIENT: " + agg["reason"] + " ***",
                 "  The table below is DIAGNOSTIC. It is not the pre-registered",

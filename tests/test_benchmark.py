@@ -170,6 +170,15 @@ class WeightsTest(unittest.TestCase):
 class SufficiencyTest(unittest.TestCase):
     """The four-of-seven guard: the reason this module exists."""
 
+    def test_the_registered_count_comes_from_the_rows_not_the_caller(self) -> None:
+        # A caller that could choose this number could choose the one its
+        # evidence happens to satisfy.
+        rows = [_row(i, fixtures=_fixtures(1.0, 1.05), config={"reps": 7})
+                for i in range(4)]
+        agg = BR.aggregate(rows)
+        self.assertEqual(agg["required_reps"], 7)
+        self.assertFalse(agg["sufficient"])
+
     def test_four_of_seven_is_reported_as_not_sufficient(self) -> None:
         rows = [_row(i, fixtures=_fixtures(1.0, 1.05)) for i in range(4)]
         agg = BR.aggregate(rows, required_reps=7)
