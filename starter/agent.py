@@ -569,17 +569,19 @@ class Agent(RetrievalMixin, DialogueMixin):
                 rotate_pending=bool(state.get("rotate_pending")))
             decision = _context.decide_retrieval(
                 snapshot, _context.policy_from(turn_cfg))
-        # After adoption there is one rule: _starved() is a thin wrapper over
-        # the same decide_retrieval() call, so these two paths cannot diverge.
-        # The name is kept because shadow mode still reports a comparison, and
-        # because tests and older call sites use it.
-        legacy_starved = self._starved(state, turn_cfg)
-        legacy_depth = turn_cfg["candidates"]
-        if legacy_starved:
-            legacy_depth = max(legacy_depth, int(turn_cfg["starved_candidates"]))
+        legacy_starved = legacy_depth = None
         if mode == "control" and decision is not None:
+            # The decision is used directly. Calling _starved() here as well
+            # would run decide_retrieval a SECOND time on every turn, because
+            # the adapter now delegates to it -- which is what the first
+            # version of this dispatch did, and why the component benchmark
+            # described half the real path.
             starved, depth = decision.starved, decision.candidate_depth
         else:
+            legacy_starved = self._starved(state, turn_cfg)
+            legacy_depth = turn_cfg["candidates"]
+            if legacy_starved:
+                legacy_depth = max(legacy_depth, int(turn_cfg["starved_candidates"]))
             starved, depth = legacy_starved, legacy_depth
         state["starved"] = bool(starved)
         limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
@@ -595,19 +597,27 @@ class Agent(RetrievalMixin, DialogueMixin):
             # decision trace has to be able to explain a turn without being
             # able to change one.
             if decision is not None:
-                # Telemetry only. Recording agreement depends on trace;
-                # deciding does not.
+                # Telemetry only. Recording depends on trace; deciding does not.
                 trace.update({
                     "retrieval_mode_setting": mode,
                     "decided_starved": decision.starved,
                     "decided_depth": decision.candidate_depth,
                     "decided_retrieval_mode": decision.retrieval_mode,
                     "decided_reasons": [r.value for r in decision.reasons],
-                    "legacy_starved": legacy_starved,
-                    "legacy_depth": legacy_depth,
-                    "starved_agrees": decision.starved == legacy_starved,
-                    "depth_agrees": decision.candidate_depth == legacy_depth,
                 })
+                if legacy_starved is not None:
+                    # Shadow only, and DIAGNOSTIC after adoption: _starved()
+                    # now delegates to the same decide_retrieval(), so this
+                    # compares a value with itself. It is retained because the
+                    # comparison is what proved the relocation before
+                    # adoption; it is no longer evidence of independence and
+                    # must not be quoted as such.
+                    trace.update({
+                        "legacy_starved": legacy_starved,
+                        "legacy_depth": legacy_depth,
+                        "starved_agrees": decision.starved == legacy_starved,
+                        "depth_agrees": decision.candidate_depth == legacy_depth,
+                    })
             trace.update({"turn": turn, "starved": bool(starved),
                           "route_history": list(state.get("route_history") or []),
                           "shown": len(ordered)})

@@ -3,11 +3,14 @@
 Two commits, as contracted. Measurement at `36cc7fd`/`af2cc44`, adoption at
 `89e6f12`. All rows leased, isolated, `matrix_complete`, `citable()`.
 
-## Verdict: **adopted.** `retrieval_context_mode = "control"` is the default.
+## Verdict: **adopted**, by documented human override.
 
-Every agreement, bit-exactness and performance gate passed, so the
-pre-registered promotion rule applies: shipping a verified controller in
-`"off"` would be building the thing and declining to use it.
+`retrieval_context_mode = "control"` is the default. Every agreement and
+bit-exactness gate passed. **The pre-registered end-to-end performance gate
+did not pass — it was inconclusive**, because the measurement noise floor
+exceeded the threshold it was meant to test. Adoption therefore rests on
+explicit engineering review rather than on the promotion rule firing
+automatically. See *Performance* below.
 
 `context_shadow` stays `False`.
 
@@ -46,9 +49,10 @@ All four official slices identical throughout. The adoption commit was
 anchored against **measured C**, not only against the historical baseline, so
 the wrapper is verified against what was actually measured.
 
-## Performance — the gate needed a different instrument
+## Performance — the pre-registered gate was INCONCLUSIVE
 
-End-to-end p95, three repetitions:
+**The end-to-end p95 gate did not resolve, in either direction.** It is not
+recorded as passed.
 
 | rep | off p95 | control p95 | delta |
 |---|---|---|---|
@@ -56,18 +60,54 @@ End-to-end p95, three repetitions:
 | 2 | 34.698 ms | 35.229 ms | +0.531 |
 | 3 | 34.815 ms | 35.141 ms | +0.326 |
 
-**Identical configurations varied by 0.452 ms run to run.** The noise floor is
-larger than the 0.2 ms gate, so end-to-end p95 cannot decide it in either
-direction — and a single sample could have been quoted as a comfortable pass
-or a clear failure depending on which one was taken.
+Identical configurations varied by **0.452 ms** run to run. The observed noise
+floor is larger than the 0.2 ms threshold, so this instrument cannot decide
+the gate, and any single sample could have been quoted as a comfortable pass
+or a clear failure. What it does support is the weaker, honest claim: **no
+measurable evidence of regression.**
 
-Timing the added work directly instead — snapshot construction, `policy_from`
-and `decide_retrieval`, 200,000 iterations:
+### The component benchmark did not describe the full path
 
-**1.852 µs per turn = 0.00185 ms, 108× inside the 0.2 ms gate.**
+A direct benchmark of one snapshot + policy + decision execution was first
+reported as **1.852 µs**. That figure was wrong as a description of the
+shipped path, for a reason review caught and this note records rather than
+quietly fixing: **the control dispatch executed the rule twice per turn.** It
+computed the decision explicitly and then called `_starved()`, whose adopted
+adapter computes it again.
 
-That is the figure the decision rests on. It measures the quantity the gate is
-about, at a resolution appropriate to it.
+After the cleanup commit, remeasured — median of five runs of 100,000
+iterations each:
+
+| | median | range |
+|---|---|---|
+| one execution (current control dispatch) | **3.671 µs** | 3.632 – 3.752 |
+| two executions (the path as shipped in `89e6f12`) | 7.374 µs | 7.341 – 7.423 |
+
+The cleanup removes ~3.70 µs per turn from the control path.
+
+The earlier 1.852 µs is **not reproducible under the current measurement** and
+is superseded rather than reconciled; both figures are far below anything the
+end-to-end instrument can see, which is precisely why the end-to-end gate
+could not adjudicate them.
+
+Call counts are now asserted by test: control runs the rule **once** with
+trace on and once with trace off; `off` runs it once through the adapter;
+`shadow` runs it twice, which is deliberate and diagnostic.
+
+### Default `control` is a documented human override
+
+The promotion rule was pre-registered as "all agreement, bit-exactness and
+performance gates pass → default becomes control". **The performance gate did
+not pass; it failed to resolve.** Default `control` is therefore accepted by
+**explicit engineering review**, on:
+
+* bit-exactness across every scenario, slice and anchor;
+* zero disagreements across 8,483 turns;
+* a direct component cost of 3.671 µs per turn;
+* no measurable evidence of end-to-end regression.
+
+It is **not** accepted on the basis that the original gate resolved. Recording
+it as a clean pass would misstate what the measurement showed.
 
 ## One rule, not two
 

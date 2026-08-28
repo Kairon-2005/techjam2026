@@ -262,3 +262,62 @@ class ModeTest(unittest.TestCase):
         trace = ag._sessions["s"]["trace_log"][-1]
         self.assertEqual(trace["decided_depth"], trace["legacy_depth"])
         self.assertEqual(trace["decided_depth"], 250)
+
+
+class DecisionCallCountTest(unittest.TestCase):
+    """How many times the rule actually runs per turn.
+
+    The first version of the dispatch computed the decision explicitly AND
+    called _starved(), whose adapter computes it again -- so control ran the
+    rule twice per turn and the component benchmark described half the path.
+    """
+
+    def setUp(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = _catalog_file(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        A.clear_catalog_cache()
+        self._tmp.cleanup()
+
+    def calls(self, **cfg) -> int:
+        ag = A.Agent(self.path, config=cfg)
+        ag.reset("s", {})
+        original, count = C.decide_retrieval, []
+
+        def counting(snapshot, policy, _o=original):
+            count.append(1)
+            return _o(snapshot, policy)
+
+        C.decide_retrieval = counting
+        try:
+            ag.respond("s", "I'm looking for Clothing Women Dresses, "
+                            "but I'm still exploring.", 1, 5)
+        finally:
+            C.decide_retrieval = original
+        return len(count)
+
+    def test_control_runs_the_rule_once_with_trace_on(self) -> None:
+        self.assertEqual(self.calls(retrieval_context_mode="control", trace=True), 1)
+
+    def test_control_runs_the_rule_once_with_trace_off(self) -> None:
+        self.assertEqual(self.calls(retrieval_context_mode="control", trace=False), 1)
+
+    def test_off_runs_the_rule_once_through_the_adapter(self) -> None:
+        self.assertEqual(self.calls(retrieval_context_mode="off"), 1)
+
+    def test_shadow_runs_it_twice_and_that_is_diagnostic(self) -> None:
+        # Deliberate: shadow computes the decision AND asks the adapter, to
+        # report a comparison. After adoption both go through the same
+        # function, so the comparison is no longer evidence of independence.
+        self.assertEqual(self.calls(retrieval_context_mode="shadow"), 2)
+
+    def test_control_records_no_agreement_fields(self) -> None:
+        ag = A.Agent(self.path, config={"retrieval_context_mode": "control"})
+        ag.reset("s", {})
+        ag.respond("s", "I'm looking for Clothing Women Dresses, but I'm still exploring.", 1, 5)
+        trace = ag._sessions["s"]["trace_log"][-1]
+        self.assertIn("decided_starved", trace)
+        self.assertNotIn("starved_agrees", trace,
+                         "control reported an agreement it never computed")
