@@ -64,6 +64,13 @@ WATCHED = (
     "starter/agent.py",
     "lab/scenarios.py",
     "lab/record.py",
+    # The benchmark runner, its fixtures and its frozen weights decide what a
+    # timing MEANS as surely as the agent decides what it costs. A run that
+    # edited its own fixtures halfway through would otherwise report two
+    # different experiments under one tag.
+    "lab/benchmark.py",
+    "lab/benchfixtures.py",
+    "lab/benchweights.py",
     "evaluator/local_evaluator.py",
     "data/public_set.jsonl",
     "data/catalog.jsonl",
@@ -72,8 +79,9 @@ WATCHED = (
 # Ledgers churn by definition -- appending a row, or an invalidation for one,
 # dirties the tree -- so they are excluded from the fingerprint's dirty set.
 # invalidations.jsonl was missing here, so recording an aborted run made the
-# lease refuse to start the re-run of that same experiment.
-LEDGER_PREFIXES = ("lab/results", "lab/invalidations")
+# lease refuse to start the re-run of that same experiment. benchmarks.jsonl is
+# here for the same reason and was added with it, not after being caught by it.
+LEDGER_PREFIXES = ("lab/results", "lab/invalidations", "lab/benchmarks")
 JOURNAL_ENV = "LAB_JOURNAL"
 
 
