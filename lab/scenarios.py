@@ -228,6 +228,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
     out.update(_question_telemetry(agent))
     out.update(_shadow_telemetry(turns))
     out.update(_retrieval_decision_telemetry(turns))
+    out.update(_question_decision_telemetry(turns))
     # Route-topology evidence. The Pillar I claim rests on these and not on a
     # route label, so they are recorded for every arm including the ones with
     # no dense source at all.
@@ -263,6 +264,38 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
                     "recall100": round(hits[100] / scored, 4),
                     "recall_pool": round(hits["pool"] / scored, 4),
                     "recall_turns": scored})
+    return out
+
+
+def _question_decision_telemetry(turns: list) -> dict:
+    """Phase 6B2 shadow agreement, as raw counts.
+
+    Only SHADOW turns carry a comparison; control uses the decision directly
+    and never computes one. Counting a missing field as a disagreement is the
+    exact defect that reported every control turn as broken in 6B1.
+    """
+    rows = [t for t in turns if "q_attribute" in t]
+    if not rows:
+        return {}
+    compared = [t for t in rows if "q_attribute_agrees" in t]
+    reasons: dict[str, int] = {}
+    modes: dict[str, int] = {}
+    for trace in rows:
+        reasons[trace["q_primary_reason"]] = reasons.get(trace["q_primary_reason"], 0) + 1
+        key = f"{trace.get('q_selection_mode')}/{trace.get('q_render_mode')}"
+        modes[key] = modes.get(key, 0) + 1
+    out = {
+        "question_decision_turns": len(rows),
+        "question_compared_turns": len(compared),
+        "question_reason_counts": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+        "question_mode_pair_counts": dict(sorted(modes.items(), key=lambda kv: -kv[1])),
+    }
+    if compared:
+        out.update({
+            "q_attribute_disagreements": sum(1 for t in compared if not t["q_attribute_agrees"]),
+            "q_state_disagreements": sum(1 for t in compared if not t["q_state_agrees"]),
+            "q_message_disagreements": sum(1 for t in compared if not t["q_message_agrees"]),
+        })
     return out
 
 

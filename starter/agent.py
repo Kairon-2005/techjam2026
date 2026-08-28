@@ -388,6 +388,41 @@ class Agent(RetrievalMixin, DialogueMixin):
 
 
 
+    def _compare_question(self, state: dict, before: dict, question, legacy_attribute: str,
+                          ranked: list[str], ordered: list[str], trace: dict,
+                          cfg: dict) -> None:
+        """Shadow comparison, built from `before` and never from mutated state.
+
+        The write SET is proven at unit level by the 4,320-cell grid, which can
+        instrument assignment. Here the comparison is behavioural: the state
+        the customer's message is rendered from, the attribute, and the message
+        itself.
+        """
+        predicted = dict(before)
+        self._apply_question_patch(predicted, question.patch)
+        actual = {f: state.get(f) for f in _context.PATCH_FIELDS}
+        actual["broad_options"] = list(actual.get("broad_options") or [])
+        predicted["broad_options"] = list(predicted.get("broad_options") or [])
+        state_agrees = predicted == actual
+
+        # Render both messages from their own states, at the same logical point.
+        saved = {f: state.get(f) for f in _context.PATCH_FIELDS}
+        try:
+            for field, value in predicted.items():
+                state[field] = value
+            predicted_message = self._compose(question.attribute, state, ranked, ordered)
+        finally:
+            for field, value in saved.items():
+                state[field] = value
+        legacy_message = self._compose(legacy_attribute, state, ranked, ordered)
+        if cfg["trace"]:
+            trace.update({
+                "q_attribute_agrees": question.attribute == legacy_attribute,
+                "q_state_agrees": state_agrees,
+                "q_message_agrees": predicted_message == legacy_message,
+                "q_legacy_attribute": legacy_attribute,
+            })
+
     def _question_mode(self, cfg: dict) -> str:
         """Validated mode; an unrecognised value degrades to "off", loudly."""
         mode = str(cfg.get("question_context_mode", "off"))
@@ -654,7 +689,12 @@ class Agent(RetrievalMixin, DialogueMixin):
         # candidates that actually survived.
         q_mode = self._question_mode(turn_cfg)
         question = None
+        q_before = None
         if q_mode != "off":
+            # state_before, captured for the shadow comparison. The predicted
+            # path must never read state after legacy has mutated it.
+            q_before = {f: state.get(f) for f in _context.PATCH_FIELDS}
+            q_before["broad_options"] = list(q_before.get("broad_options") or [])
             # BEFORE legacy runs. Every input comes from state as it stands
             # now, so the prediction cannot read anything legacy wrote.
             question = self._decide_question(state, ranked, turn_cfg)
@@ -663,6 +703,9 @@ class Agent(RetrievalMixin, DialogueMixin):
             attribute = question.attribute
         else:
             attribute = self._pick_attribute(state, ranked)
+            if q_mode == "shadow" and question is not None:
+                self._compare_question(state, q_before, question, attribute,
+                                       ranked, ordered, trace, turn_cfg)
         state["asked"].append(attribute)
         if turn_cfg["trace"]:
             # Question telemetry. Bounded: scalars for this turn only, appended
