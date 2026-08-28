@@ -62,7 +62,7 @@ SHARDS: dict[str, Shard] = {
     # comparison compares a value with itself and is tautological.
     "p6b2r2-shadow": Shard(
         scenarios=SHADOW_SCENARIOS, configs={"shadow": MODES["shadow"]},
-        note="8,483-turn shadow comparison, seven scenarios"),
+        note="shadow comparison: 18,597 raw comparisons / 8,483.4 seed-normalised"),
     "p6b2r2-official": Shard(
         scenarios=("clean",),
         configs={**MODES, "compat_anchor": COMPAT_ANCHOR},

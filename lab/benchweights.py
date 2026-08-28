@@ -1,7 +1,7 @@
 """The frozen live branch mix, and the one place a weighted aggregate is formed.
 
 FROZEN 2026-08-28, from the completed Phase 6B2 shadow matrix (tag
-`p6b2b-shadow`, seven scenarios, 8,483 turns), BEFORE any Phase 6B2-R2
+`p6b2b-shadow`, seven scenarios), BEFORE any Phase 6B2-R2
 implementation existed and therefore before any R2 timing could influence them.
 `derive()` recomputes them from the ledger so the constants below can be
 checked against their source; it is a verification path, not the value the
@@ -12,9 +12,16 @@ across seeds, and the scenarios do not share a seed count -- `clean` and
 `supplementary_dev` are deterministic and run once, the other five run five
 seeds. Summing raw counts would weight `contradiction` five times as heavily as
 `clean` for no reason but the seed schedule, so each scenario's counts are
-divided by its own `n_seeds` first. That reproduces the 8,483-turn total the
-6B2 results document reports, which is the check that the normalisation is the
-one that document's turn counts were built from.
+divided by its own `n_seeds` first. That reproduces the 8,483.4 seed-normalised
+total the 6B2 results document reports, which is the check that the
+normalisation is the one that document's turn counts were built from.
+
+The comparator actually executed 18,597 raw turn-comparisons. The normalised
+figure is the right basis for WEIGHTS specifically -- a mix is a rate, and a
+rate must not weight `contradiction` five times as heavily as `clean` because
+of the seed schedule -- while 18,597 is the right count for "how many
+comparisons found zero disagreements". Both appear in notes/36; this module
+needs the normalised one.
 
 WHY THESE ARE FROZEN. A branch-weighted aggregate whose weights are chosen
 after the per-branch numbers are known is not a measurement, it is a knob: the
@@ -29,7 +36,7 @@ import collections
 
 SOURCE_TAG = "p6b2b-shadow"
 FROZEN_TS = "2026-08-28"
-FROZEN_TURNS = 8483.4          # per-seed-normalised turns behind the weights
+FROZEN_TURNS = 8483.4          # seed-normalised; 18,597 raw comparisons
 
 # selection_mode -> share of live turns. Sums to 1.0.
 #

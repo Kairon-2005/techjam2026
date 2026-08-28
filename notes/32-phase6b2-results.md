@@ -74,6 +74,33 @@ statement, and the only one this document supports, is:
 Nothing here promotes 6B2 or changes its gate. **The verdict remains NOT
 ADOPTED**, for the same reason and with the same default.
 
+## Correction 3 — what "8,483 turns" counts, and the phase's final status
+
+*Recorded 2026-08-29, when Phase 6B2-R2 closed the phase.*
+
+**The turn count.** "8,483" in this document is the **seed-normalised
+equivalent**, not the number of comparisons performed. The comparator executed
+**18,597 raw turn-comparisons**; dividing each scenario by its own `n_seeds`
+before summing — five of the seven scenarios run five seeds, `clean` and
+`supplementary_dev` run one — gives **8,483.4**. Both are correct statistics of
+different things: 18,597 is the denominator for "zero disagreements", 8,483.4
+is the basis for a per-turn rate or a branch mix. The unqualified phrase reads
+as the former while being the latter, which understates the work done. **The
+tables below are not edited** — results are not rewritten — and the same
+relationship holds for the identically-shaped figure in `notes/30`.
+
+**Final status of this phase.** Three verdicts, which must not be conflated:
+
+| subject | status |
+|---|---|
+| this document's **eager** design (`CandidateStats`, `7e66115`) | **REJECTED / NOT ADOPTED** |
+| **Phase 6B2-R2**, staged design (`027eb6f`, adopted `669e303`) | **ADOPTED** |
+| **Phase 6B2 overall** | **CLOSED THROUGH R2** |
+
+"Closed through R2" does not rehabilitate the design recorded here. R2 is a
+different design that re-ran gates A, B and C from scratch and measured D on a
+committed harness that did not exist when this phase ran. See `notes/36`.
+
 ## A — pure-function correctness
 
 A **4,320-cell** equivalence grid crosses five ask policies, four asked

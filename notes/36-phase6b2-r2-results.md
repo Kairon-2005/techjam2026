@@ -9,14 +9,32 @@ Harness `ba85207`. All comparison rows leased, isolated, `matrix_complete`,
 | gate | result | evidence |
 |---|---|---|
 | A — pure-function correctness | **PASS** | 4,320-cell grid, 362 tests |
-| B — shadow agreement | **PASS**, 8,483 turns, zero disagreements | `p6b2r2-shadow`, 7/7 citable |
+| B — shadow agreement | **PASS**, 18,597 raw turn-comparisons, zero disagreements | `p6b2r2-shadow`, 7/7 citable |
 | C — behaviour preservation | **PASS**, bit-exact | 29 cells, four leases, all valid |
 | D — performance (R2.1) | **PASS**, 7/7 repetitions | `p6b2r2-perf-2` |
 | hard gate — no lazy index construction | **PASS** | now a test, not an inspection |
 
-**Phase 6B2 is still NOT ADOPTED.** R2 inherited none of its evidence and does
-not rehabilitate it. 6B2's eager design failed, was recorded as failing, and
-this is a different design measured from scratch.
+## Phase status — three distinct verdicts, not one
+
+These get conflated, so they are stated separately and should be quoted
+separately:
+
+| subject | status |
+|---|---|
+| **Phase 6B2, original eager design** (`CandidateStats`, commit `7e66115`) | **REJECTED / NOT ADOPTED** |
+| **Phase 6B2-R2, staged design** (commit `027eb6f`, adopted `669e303`) | **ADOPTED** |
+| **Phase 6B2 overall** | **CLOSED THROUGH R2** |
+
+"Closed through R2" means: the phase's objective — relocating the clarification
+decision into an explicitly-programmed controller without changing behaviour —
+was met, by R2, on R2's own evidence. It does **not** mean the eager design was
+retroactively accepted, and it does **not** mean R2 inherited 6B2's gates. R2
+re-ran A, B and C from scratch against the staged implementation and measured D
+on a committed harness that did not exist when 6B2 ran.
+
+The eager design failed, was recorded as failing in `notes/32`, and that record
+stands. Nothing in R2 rehabilitates it — and R2.1's falsification test exists
+precisely to keep it failing.
 
 ## Read these three corrections before quoting anything here
 
@@ -59,7 +77,7 @@ compared had changed.
 
 New in R2, and the test 6B2 did not have: **`ScanTopologyTest` asserts the scan
 count per branch.** 6B2's defect was invisible at unit level — every branch
-returned the right answer, all 8,483 turns agreed, and only the clock said the
+returned the right answer, every turn-comparison agreed, and only the clock said the
 first-two-`other` path had scanned five facets to decide something that reads
 none of them. A correctness suite that cannot see wasted work will pass a
 design that does nothing but waste it.
@@ -74,16 +92,36 @@ design that does nothing but waste it.
 
 ## B — shadow agreement, the only pre-adoption independent evidence
 
-| scenario | turns | compared | attribute | state | message |
-|---|---|---|---|---|---|
-| clean | 411 | 411 | 0 | 0 | 0 |
-| vague_start | 503 | 503 | 0 | 0 | 0 |
-| uncooperative | 560 | 560 | 0 | 0 | 0 |
-| override_genuine | 421 | 421 | 0 | 0 | 0 |
-| override_category | 413 | 413 | 0 | 0 | 0 |
-| contradiction | 632 | 632 | 0 | 0 | 0 |
-| supplementary_dev | 5,544 | 5,544 | 0 | 0 | 0 |
-| **total** | **8,483** | **8,483** | **0** | **0** | **0** |
+**18,597 raw turn-comparisons / 8,483.4 seed-normalised equivalent turns, zero
+disagreements.** Both numbers, because one of them alone misleads.
+
+Five of the seven scenarios are stochastic and run five seeds; `clean` and
+`supplementary_dev` are deterministic and run once. **18,597** is what the
+comparator actually executed and compared — the honest count of independent
+turn-level checks, and the right denominator for "zero disagreements".
+**8,483.4** divides each scenario by its own `n_seeds` before summing, so no
+scenario is weighted five times as heavily as another purely by the seed
+schedule; it is the right basis for a per-turn *rate* or a branch mix, and it
+is what `lab/benchweights.py` froze the live weights from.
+
+Writing "8,483 turns" unqualified — as earlier drafts of this phase's notes did
+— reads as 8,483 raw comparisons. It was never wrong, but it was imprecise in
+the direction that understates the work done. The same relationship holds for
+the identically-shaped figure in `notes/30-phase6b1-results.md`; that document
+is a closed record and is **not** edited here.
+
+| scenario | seeds | raw comparisons | per-seed | attribute | state | message |
+|---|---|---|---|---|---|---|
+| clean | 1 | 411 | 411.0 | 0 | 0 | 0 |
+| vague_start | 5 | 2,515 | 503.0 | 0 | 0 | 0 |
+| uncooperative | 5 | 2,798 | 559.6 | 0 | 0 | 0 |
+| override_genuine | 5 | 2,105 | 421.0 | 0 | 0 | 0 |
+| override_category | 5 | 2,065 | 413.0 | 0 | 0 | 0 |
+| contradiction | 5 | 3,159 | 631.8 | 0 | 0 | 0 |
+| supplementary_dev | 1 | 5,544 | 5,544.0 | 0 | 0 | 0 |
+| **total** | | **18,597** | **8,483.4** | **0** | **0** | **0** |
+
+Every turn that carried a comparison was compared; none was skipped.
 
 The observed branch mix reproduces the frozen weights turn for turn:
 `first_two_other/open` 3,838.8, `pool_selection/structured` 3,596.2,
@@ -195,13 +233,28 @@ eager arm still fails ten gates under it, including the weighted aggregate at
 +11.30 ms — is a committed test, so a later edit to the floor that started
 admitting the eager arm breaks the build.
 
-**Six repetitions were lost to host starvation.** Every one left the process
-facts 6B2's four-hour stall never had: state `R`, 3–34% of a core, CPU
-accumulating, and a parent whose own 900 s deadline fired 400 s late. That is
-not a diagnosis of what throttled them and none is claimed — but it is enough
-to rule out a hang in the measured code, which is exactly the question 6B2
-could not answer. The re-run was held awake with `caffeinate`, and all seven
-landed within 493–507 s of a 493–496 s projection.
+**Six repetitions were lost, on evidence consistent with host scheduling
+starvation.** Every one left the process facts 6B2's four-hour stall never had:
+state `R`, 3–34% of a core, CPU accumulating, and a parent whose own 900 s
+deadline fired 400 s late.
+
+Stated precisely, because the previous draft of this paragraph overreached:
+
+> The captured facts are **consistent with host scheduling starvation**. There
+> is **no evidence of deadlock** — the children were runnable and accumulating
+> CPU throughout, and the parent's own timer was late by the same kind of
+> factor, which is not what a blocked measured thread looks like. The **exact
+> cause is undiagnosed.**
+
+That is weaker than "rules out a hang", which is what this section said first
+and could not support: a process that is runnable and slow is *unlikely* to be
+deadlocked, but nothing here excludes livelock, lock convoying, or a stall
+inside a dependency that still burns CPU. The honest claim is the absence of
+positive evidence for a hang, not its exclusion.
+
+The re-run was held awake with `caffeinate -dimsu`, and all seven landed within
+493–507 s of a 493–496 s projection. That mitigation is empirical and its
+mechanism is not diagnosed either.
 
 ## What must not be quoted
 
