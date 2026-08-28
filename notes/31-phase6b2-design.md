@@ -1,7 +1,6 @@
 # Phase 6B2 design & pre-registration — clarification decision extraction
 
-**Revision 2. For review before implementation. No code written.** Recorded at
-`638e2f3`, 264 tests passing, `retrieval_context_mode="control"`,
+**Revision 3. Approved for implementation.** Recorded at `df7315c`, 264 tests passing, `retrieval_context_mode="control"`,
 `context_shadow=False`, dense OFF.
 
 Revision 2 fixes ten defects found in review. The largest: revision 1's single
@@ -330,3 +329,137 @@ Personalization, profile weights, dense retrieval, reranking, category logic,
 scoring parameters, and the `pool_depth` config asymmetry. **Phase 6C**
 (profile credibility shadow evaluation) follows, then the score-oriented
 reranker phase.
+
+
+---
+
+# Revision 3 — frozen protocol
+
+Conditionally approved at revision 2. This section fixes the comparison
+protocol, the sentinel contract, the call counts, the branch grid, the
+decision-field semantics, the experiment matrix and the benchmark procedure
+**before** any code is written. Implementation proceeds directly after this.
+
+## 1. Causally independent shadow comparison
+
+The predicted path must **never read `state` after legacy has mutated it**.
+Frozen sequence, per turn:
+
+1. capture `state_before`;
+2. build `QuestionSnapshot`, `PriorRenderState` and `CandidateStats`
+   **exclusively** from `state_before` and the pre-question ranked window;
+3. run `decide_question()`, retain the decision;
+4. run legacy `_pick_attribute()` through the write-tracking mapping;
+5. build `predicted_state` from a **fresh copy of `state_before`**, applying
+   only the pure patch;
+6. apply `asked.append(predicted_attribute)` to the predicted copy at the same
+   logical point production does;
+7. construct actual legacy state independently;
+8. render predicted and legacy messages from their **respective** states;
+9. compare write set, written values, effective render state, attribute,
+   message.
+
+**Negative control.** A test deliberately forces the pure decision or patch to
+disagree and asserts the comparator reports it. A comparator that always
+reports agreement fails this test. Without it, "zero disagreements" could mean
+the comparator is broken rather than the code correct.
+
+## 2. Write-tracker scope
+
+Records **only** top-level assignments to `broad_options`, `last_bits`,
+`last_coverage`, `last_weighed`, and only during the legacy controller call.
+Tracking starts and stops explicitly around it. It must **not** record the
+host's later `asked.append()`.
+
+## 3. Sentinel contract
+
+Not `float | _UNSET` with a bare object. A **private sentinel type with one
+singleton instance**:
+
+* immutable;
+* deterministic equality;
+* canonical `repr` for telemetry and tests;
+* **never written into session state**;
+* patch application **rejects unknown keys and unknown types**.
+
+## 4. Call counts, frozen
+
+**Measurement commit**
+
+| mode | legacy calls | pure calls |
+|---|---:|---:|
+| off | 1 | 0 |
+| shadow | 1 | 1 |
+| control | 0 | 1 |
+
+**Adoption commit**
+
+| mode | adapter/pure executions |
+|---|---:|
+| off | 1 |
+| control | 1 |
+| shadow | 2 — diagnostic and tautological |
+
+All six asserted, including `control` with `trace=False`. An unknown mode warns
+**once** and falls back to `off`; it must never silently enter `control`.
+
+## 5. Complete branch grid
+
+Beyond the revision-2 thresholds, explicit cases for:
+
+uncertain threshold reached but every easy facet already asked ·
+`PROBE_ORDER` exhausted · `PROBE_ORDER[:-1]` exhausted · empty pool ·
+one-item pool · `ask_fallback_after=0` · `overgeneral_cats=0` ·
+`question_utility` True and False · dry weighting before and exactly at
+`answerability_after` · all utilities zero · equal positive utilities ·
+stale options on a no-write branch · stale `last_bits` on a no-write branch ·
+route `pool_depth` differing from base `self.cfg["pool_depth"]`.
+
+## 6. Decision-field semantics
+
+`selected_bits`, `selected_coverage`, `selected_utility` are **current-selection
+diagnostics only**.
+
+Every customer-visible and trace-visible value derives from
+`effective_render_state` after applying the partial patch. A no-write branch
+may therefore expose **stale** effective bits and coverage while the current
+selection produced none — that is the behaviour being preserved, not a defect.
+
+## 7. Frozen experiment matrix
+
+Measurement commit, one leased matrix:
+
+* **A** `question_context_mode="off"` · **B** `"shadow"` · **C** `"control"`
+* `trace=True` for the leased comparison matrix
+* a **separate** unit/integration anchor for `control` with `trace=False`
+* scenarios: `clean`, `vague_start`, `uncooperative`, `override_genuine`,
+  `override_category`, `contradiction`, `supplementary_dev`
+* seeds **7–11**
+* all four official slices emitted from `clean`
+* compat anchor recorded separately
+* A/B/C share one agent blob, scenario hash, dataset hash and catalog hash
+* **B is the only pre-adoption independent shadow-agreement evidence**
+
+The adoption anchor compares the adoption commit against **measured C**.
+
+## 8. Benchmark protocol
+
+* 1,000 warm-up executions per arm
+* 10,000 measured complete dispatches per arm per repetition
+* **7 paired repetitions**, alternating legacy-first / pure-first
+* identical frozen candidate window and session fixtures
+* complete dispatch: stats + decision + patch application
+* report every repetition, median, range, ratio, absolute per-turn delta
+* **ratio ≤ 1.20 and absolute median overhead ≤ 0.10 ms must both pass**
+* **call-count assertions pass before any timing is quoted**
+* end-to-end p50/p95 diagnostic only
+
+## Unchanged
+
+No change to thresholds, behaviour, score policy, profile, retrieval,
+reranker, or the `_compose()` config asymmetry.
+
+## Stop conditions
+
+Stop immediately on: one disagreement · any score movement · shadow mutation ·
+lazy-index construction · performance-gate failure.
