@@ -238,6 +238,12 @@ DEFAULTS = {
     # "control" works with trace=False. Telemetry may depend on trace;
     # orchestration may not.
     "retrieval_context_mode": "control",
+    # Phase 6B2 clarification orchestration. Same three states as retrieval.
+    #   off     legacy controller, no decision computed
+    #   shadow  decision computed BEFORE legacy runs, legacy controls
+    #   control decision controls; the host applies its partial patch
+    # "control" works with trace=False.
+    "question_context_mode": "off",
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -381,6 +387,18 @@ class Agent(RetrievalMixin, DialogueMixin):
         return terms_of(text, self.stop)
 
 
+
+    def _question_mode(self, cfg: dict) -> str:
+        """Validated mode; an unrecognised value degrades to "off", loudly."""
+        mode = str(cfg.get("question_context_mode", "off"))
+        if mode in _context.QUESTION_MODES:
+            return mode
+        key = f"question:{mode}"
+        if key not in self._warned_modes:
+            self._warned_modes.add(key)
+            print(f"[agent] warning: unknown question_context_mode {mode!r}; "
+                  f"falling back to 'off'", file=sys.stderr)
+        return "off"
 
     def _retrieval_mode(self, cfg: dict) -> str:
         """Validated mode. An unrecognised value degrades to "off", loudly.
@@ -634,7 +652,17 @@ class Agent(RetrievalMixin, DialogueMixin):
 
         # The question is chosen AFTER retrieval so it can be conditioned on the
         # candidates that actually survived.
-        attribute = self._pick_attribute(state, ranked)
+        q_mode = self._question_mode(turn_cfg)
+        question = None
+        if q_mode != "off":
+            # BEFORE legacy runs. Every input comes from state as it stands
+            # now, so the prediction cannot read anything legacy wrote.
+            question = self._decide_question(state, ranked, turn_cfg)
+        if q_mode == "control" and question is not None:
+            self._apply_question_patch(state, question.patch)
+            attribute = question.attribute
+        else:
+            attribute = self._pick_attribute(state, ranked)
         state["asked"].append(attribute)
         if turn_cfg["trace"]:
             # Question telemetry. Bounded: scalars for this turn only, appended
@@ -650,6 +678,17 @@ class Agent(RetrievalMixin, DialogueMixin):
                 "reply_outcome": state.get("outcome") or "",
                 "slots_active": sum(1 for sl in state["slots"] if sl.usable),
             })
+            if question is not None:
+                trace.update({
+                    "question_mode_setting": q_mode,
+                    "q_attribute": question.attribute,
+                    "q_selection_mode": question.selection_mode,
+                    "q_render_mode": question.render_mode,
+                    "q_primary_reason": question.primary_reason.value,
+                    "q_modifiers": [m.value for m in question.modifiers],
+                    "q_writes": list(question.patch.writes()),
+                    "q_effective_options": len(question.effective_options),
+                })
 
         return {
             "message": self._compose(attribute, state, ranked, ordered),

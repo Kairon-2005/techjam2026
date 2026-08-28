@@ -438,3 +438,267 @@ def decide_retrieval(snapshot: PreRetrievalSnapshot,
     # the turn in telemetry and change nothing in behaviour.
     return out(True, RetrievalReason.WIDEN_REQUEST_MORE if snapshot.rotate_pending
                else RetrievalReason.WIDEN_THIN_EVIDENCE)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6B2: clarification / question selection.
+#
+# Selection and RENDERING are different questions, and one field cannot hold
+# both. _pick_attribute writes broad_options BEFORE testing the uncertain
+# branch, so a turn can select via the "easier" path while _compose renders the
+# structured message from options the same call just wrote. Both facts are
+# represented.
+# ---------------------------------------------------------------------------
+
+QUESTION_MODES = ("off", "shadow", "control")
+PATCH_FIELDS = ("broad_options", "last_bits", "last_coverage", "last_weighed")
+
+
+class _Unset:
+    """Singleton 'this key was not written'.
+
+    A plain dict cannot distinguish "not written" from "written with the value
+    it already held", and the legacy oracle depends on that difference. This is
+    a type with one instance so equality is deterministic and its repr is
+    canonical in telemetry. It is never written into session state.
+    """
+    __slots__ = ()
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+UNSET = _Unset()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuestionPatch:
+    """Exactly the fields the matching legacy branch writes -- no more.
+
+    Three of the ten branches write nothing at all, and _compose reads two of
+    these fields, so a patch that always wrote all four would render a
+    different message on later turns while looking obviously equivalent.
+    """
+    broad_options: object = UNSET
+    last_bits: object = UNSET
+    last_coverage: object = UNSET
+    last_weighed: object = UNSET
+
+    def writes(self) -> tuple[str, ...]:
+        return tuple(f for f in PATCH_FIELDS if getattr(self, f) is not UNSET)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PriorRenderState:
+    """What the previous turn left behind, and what _compose will read."""
+    broad_options: tuple[str, ...] = ()
+    last_bits: float = 0.0
+    last_coverage: float = 0.0
+    last_weighed: bool = False
+
+
+def apply_patch(prior: PriorRenderState, patch: QuestionPatch) -> PriorRenderState:
+    """prior + partial patch -> effective render state. Pure."""
+    if not isinstance(patch, QuestionPatch):
+        raise TypeError(f"expected QuestionPatch, got {type(patch).__name__}")
+    values = {}
+    for field in PATCH_FIELDS:
+        got = getattr(patch, field)
+        values[field] = getattr(prior, field) if got is UNSET else got
+    if not isinstance(values["broad_options"], tuple):
+        values["broad_options"] = tuple(values["broad_options"])
+    return PriorRenderState(**values)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuestionSnapshot:
+    asked: tuple[str, ...] = ()
+    dry_streak: int = 0
+    dry_others: int = 0
+    uncertain_streak: int = 0
+    prior: PriorRenderState = dataclasses.field(default_factory=PriorRenderState)
+
+    @property
+    def other_asked_count(self) -> int:
+        # Derived, not carried: both legacy call sites use asked.count("other")
+        # and a stored copy would be a second source of truth.
+        return self.asked.count("other")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuestionPolicy:
+    ask_policy: str
+    ask_fallback_after: int
+    answerability_after: int
+    pool_give_up_after: int
+    pool_depth: int
+    overgeneral_cats: int
+    question_utility: bool
+    question_dry_cost: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class FacetStat:
+    attribute: str
+    bits_with_missing: float
+    bits_skip_missing: float
+    coverage: float
+    answerability: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CandidateStats:
+    window_size: int
+    facets: tuple[FacetStat, ...] = ()
+    overgeneral: bool = False
+    options: tuple[str, ...] = ()
+
+
+class QuestionReason(str, Enum):
+    FIRST_TWO_OTHER = "FIRST_TWO_OTHER"
+    EASIER_AFTER_UNCERTAIN = "EASIER_AFTER_UNCERTAIN"
+    GIVE_UP_AFTER_DRY = "GIVE_UP_AFTER_DRY"
+    POOL_ATTRIBUTE_SELECTED = "POOL_ATTRIBUTE_SELECTED"
+    NO_DISCRIMINATING_FACET = "NO_DISCRIMINATING_FACET"
+    PROBE_CYCLE = "PROBE_CYCLE"
+    FALLBACK_OTHER = "FALLBACK_OTHER"
+
+
+class QuestionModifier(str, Enum):
+    # A modifier, not a competing primary reason: structured rendering can be a
+    # consequence of inherited state rather than of the branch that fired.
+    STRUCTURED_CLARIFICATION_DUE = "STRUCTURED_CLARIFICATION_DUE"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class QuestionDecision:
+    attribute: str
+    selection_mode: str
+    render_mode: str
+    effective_render_state: PriorRenderState
+    selected_bits: float                 # diagnostics for THIS selection only
+    selected_coverage: float
+    selected_utility: float
+    primary_reason: QuestionReason
+    modifiers: tuple[QuestionModifier, ...]
+    patch: QuestionPatch
+
+    @property
+    def effective_options(self) -> tuple[str, ...]:
+        return self.effective_render_state.broad_options
+
+
+def _easiest_unasked(asked, answerability, vocab) -> str:
+    """Most answerable facet not yet asked. Reproduces _easiest_unasked."""
+    seen = set(asked)
+    options = [(score, name) for name, score in answerability.items()
+               if name not in seen and name in vocab]
+    return max(options)[1] if options else ""
+
+
+def _select_from_pool(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                      stats: CandidateStats) -> tuple[str, float, float, float, bool]:
+    """Reproduces _pool_attribute: (attribute, bits, coverage, utility, weighed).
+
+    `util > best_util` is STRICTLY greater, so equal utility keeps the first
+    attribute in ATTR_VOCAB order -- which is why `stats.facets` must preserve
+    that order rather than being sorted or built from a set.
+    """
+    weigh = snapshot.dry_streak >= policy.answerability_after
+    best, best_bits, best_util = "other", 0.0, 0.0
+    for facet in stats.facets:
+        if facet.attribute in snapshot.asked:
+            continue
+        if policy.question_utility:
+            bits = facet.bits_skip_missing
+            util = (bits * facet.coverage * facet.answerability
+                    - policy.question_dry_cost * (1.0 - facet.coverage * facet.answerability))
+        else:
+            bits = facet.bits_with_missing
+            util = bits * facet.answerability if weigh else bits
+        if util > best_util:
+            best, best_bits, best_util = facet.attribute, bits, util
+    # _pool_attribute always writes last_coverage for the WINNER; when the
+    # winner is "other" that is 0.0, because ATTR_VOCAB has no such key.
+    chosen = next((f for f in stats.facets if f.attribute == best), None)
+    coverage = chosen.coverage if chosen is not None else 0.0
+    return best, best_bits, coverage, best_util, weigh
+
+
+def decide_question(snapshot: QuestionSnapshot, policy: QuestionPolicy,
+                    stats: CandidateStats, *, answerability, vocab,
+                    probe_order) -> QuestionDecision:
+    """Pure. Reproduces _pick_attribute branch for branch.
+
+    Receives no Agent, no session dict, no catalog and no lazy index; the
+    vocabularies arrive as arguments so this module keeps importing nothing
+    from the package.
+    """
+    def finish(attribute: str, selection_mode: str, patch: QuestionPatch,
+               reason: QuestionReason, bits: float = 0.0, coverage: float = 0.0,
+               utility: float = 0.0) -> QuestionDecision:
+        effective = apply_patch(snapshot.prior, patch)
+        # _compose renders the structured message on len(options) >= 2 -- NOT
+        # on `overgeneral`. A single distinguishing option renders open, and
+        # stale options from an earlier turn render structured on a branch that
+        # wrote nothing.
+        structured = len(effective.broad_options) >= 2
+        return QuestionDecision(
+            attribute=attribute, selection_mode=selection_mode,
+            render_mode="structured" if structured else "open",
+            effective_render_state=effective, selected_bits=bits,
+            selected_coverage=coverage, selected_utility=utility,
+            primary_reason=reason,
+            modifiers=(QuestionModifier.STRUCTURED_CLARIFICATION_DUE,) if structured else (),
+            patch=patch)
+
+    pol = policy.ask_policy
+    if pol in ("pool", "other_then_pool"):
+        if pol == "other_then_pool" and snapshot.other_asked_count < 2:
+            return finish("other", "first_two_other", QuestionPatch(),
+                          QuestionReason.FIRST_TWO_OTHER)
+        # broad_options is written HERE, before the uncertain branch is tested.
+        patch_options = QuestionPatch(broad_options=tuple(stats.options))
+        if snapshot.uncertain_streak >= policy.answerability_after:
+            easy = _easiest_unasked(snapshot.asked, answerability, vocab)
+            if easy:
+                return finish(easy, "easier",
+                              QuestionPatch(broad_options=tuple(stats.options),
+                                            last_bits=0.0),
+                              QuestionReason.EASIER_AFTER_UNCERTAIN)
+        if not stats.overgeneral and snapshot.dry_streak >= policy.pool_give_up_after:
+            return finish("other", "give_up", patch_options,
+                          QuestionReason.GIVE_UP_AFTER_DRY)
+        attribute, bits, coverage, utility, weighed = _select_from_pool(
+            snapshot, policy, stats)
+        patch = QuestionPatch(broad_options=tuple(stats.options), last_bits=bits,
+                              last_coverage=coverage, last_weighed=weighed)
+        if bits >= 0.2:
+            return finish(attribute, "pool_selection", patch,
+                          QuestionReason.POOL_ATTRIBUTE_SELECTED, bits, coverage, utility)
+        return finish("other", "pool_selection", patch,
+                      QuestionReason.NO_DISCRIMINATING_FACET, bits, coverage, utility)
+
+    if pol == "other" and policy.ask_fallback_after and \
+            snapshot.dry_others >= policy.ask_fallback_after:
+        nxt = next((a for a in probe_order[:-1] if a not in snapshot.asked), "other")
+        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    if pol == "probe_cycle":
+        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
+        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    if pol == "other_then_cycle":
+        if snapshot.other_asked_count < 2:
+            return finish("other", "first_two_other", QuestionPatch(),
+                          QuestionReason.FIRST_TWO_OTHER)
+        nxt = next((a for a in probe_order if a not in snapshot.asked), "other")
+        return finish(nxt, "cycle", QuestionPatch(), QuestionReason.PROBE_CYCLE)
+    return finish("other", "fallback", QuestionPatch(), QuestionReason.FALLBACK_OTHER)

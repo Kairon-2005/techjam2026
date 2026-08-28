@@ -276,6 +276,76 @@ class DialogueMixin:
                    if pattern.search(self.cat.text.get(asin, "")))
         return round(seen / len(window), 4)
 
+    # ---- Phase 6B2: question decision extraction -----------------------
+
+    def _candidate_stats(self, pool: list[str], cfg: dict) -> "_context.CandidateStats":
+        """Per-facet statistics over the bounded ranked window.
+
+        The window is ranked[:max(2, pool_depth)] -- the same expression both
+        _overgeneral and _pool_attribute use. Reads cat.text and cat.cats,
+        which are always resident, and never CategoryIndex, FacetIndex or
+        DenseIndex.
+        """
+        window = pool[: max(2, int(cfg["pool_depth"]))]
+        facets = tuple(
+            _context.FacetStat(
+                attribute=attribute,
+                bits_with_missing=self._pool_entropy(window, pattern),
+                bits_skip_missing=self._pool_entropy(window, pattern, skip_missing=True),
+                coverage=self._facet_coverage(window, attribute),
+                answerability=ANSWERABILITY.get(attribute, 0.5))
+            # ATTR_VOCAB insertion order, preserved: selection breaks ties with
+            # a strict `>`, so the order decides which attribute wins.
+            for attribute, pattern in ATTR_VOCAB.items())
+        broad, options = self._overgeneral(pool, cfg)
+        return _context.CandidateStats(window_size=len(window), facets=facets,
+                                       overgeneral=broad, options=tuple(options))
+
+    def _question_snapshot(self, state: dict) -> "_context.QuestionSnapshot":
+        return _context.QuestionSnapshot(
+            asked=tuple(state.get("asked") or ()),
+            dry_streak=int(state.get("dry_streak") or 0),
+            dry_others=int(state.get("dry_others") or 0),
+            uncertain_streak=int(state.get("uncertain_streak") or 0),
+            prior=_context.PriorRenderState(
+                broad_options=tuple(state.get("broad_options") or ()),
+                last_bits=float(state.get("last_bits") or 0.0),
+                last_coverage=float(state.get("last_coverage") or 0.0),
+                last_weighed=bool(state.get("last_weighed"))))
+
+    @staticmethod
+    def _question_policy(cfg: dict) -> "_context.QuestionPolicy":
+        return _context.QuestionPolicy(
+            ask_policy=cfg["ask_policy"],
+            ask_fallback_after=int(cfg["ask_fallback_after"] or 0),
+            answerability_after=int(cfg["answerability_after"]),
+            pool_give_up_after=int(cfg["pool_give_up_after"]),
+            pool_depth=int(cfg["pool_depth"]),
+            overgeneral_cats=int(cfg["overgeneral_cats"]),
+            question_utility=bool(cfg["question_utility"]),
+            question_dry_cost=float(cfg["question_dry_cost"]))
+
+    def _decide_question(self, state: dict, pool: list[str],
+                         cfg: dict) -> "_context.QuestionDecision":
+        return _context.decide_question(
+            self._question_snapshot(state), self._question_policy(cfg),
+            self._candidate_stats(pool, cfg),
+            answerability=ANSWERABILITY, vocab=ATTR_VOCAB, probe_order=PROBE_ORDER)
+
+    @staticmethod
+    def _apply_question_patch(state: dict, patch: "_context.QuestionPatch") -> None:
+        """Write exactly the keys the patch marks as written -- no more.
+
+        A patch that always wrote all four would look equivalent and would
+        change the rendered message on later turns, because _compose reads
+        broad_options and last_bits and three of ten branches write neither.
+        """
+        for field in _context.PATCH_FIELDS:
+            value = getattr(patch, field)
+            if value is _context.UNSET:
+                continue
+            state[field] = list(value) if field == "broad_options" else value
+
     def _pick_attribute(self, state: dict, pool: list[str] | None = None) -> str:
         cfg = self._route_cfg(state)
         policy = cfg["ask_policy"]
