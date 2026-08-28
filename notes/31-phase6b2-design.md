@@ -1,63 +1,114 @@
 # Phase 6B2 design & pre-registration — clarification decision extraction
 
-**For review before implementation. No code written.** Recorded at `3a6b09d`,
-264 tests passing, `retrieval_context_mode="control"`, `context_shadow=False`,
-dense OFF.
+**Revision 2. For review before implementation. No code written.** Recorded at
+`638e2f3`, 264 tests passing, `retrieval_context_mode="control"`,
+`context_shadow=False`, dense OFF.
+
+Revision 2 fixes ten defects found in review. The largest: revision 1's single
+`mode` field **cannot describe the customer-visible question at all** in the
+case below. Every claim here was re-verified against source, with line numbers.
 
 Objective: extract `_pick_attribute()` and `_pool_attribute()` into an explicit
 context-programmed controller **without changing customer-visible behaviour,
 score, thresholds or question policy.** This is a relocation. Any movement is a
 defect.
 
-## Two reporting constraints carried forward, permanently
+## Two permanent reporting constraints
 
 1. **The 6B1 end-to-end p95 gate was inconclusive, not passed.** Only "no
    measurable regression" may be claimed, and the direct microbenchmark is not
-   proof that the end-to-end gate resolved. 6B2 does not reuse that gate — see
-   §D.
+   proof the end-to-end gate resolved. 6B2 does not reuse it — see §D.
 2. **Post-adoption shadow agreement is tautological**, because the adapter
-   delegates to the same function. The valid 6B1 relocation evidence is the
-   **pre-adoption 8,483-turn comparison**. The same trap applies here: 6B2's
-   shadow evidence is only meaningful **before** adoption.
+   delegates to the same function. The valid 6B1 evidence is the pre-adoption
+   8,483-turn comparison. **The same applies here: 6B2's shadow evidence counts
+   only before adoption.**
 
-## The hard part: mutations are asymmetric, and staleness is load-bearing
+## Mutations are asymmetric, and staleness is load-bearing
 
-`_pick_attribute` does not write the same fields on every branch, and
-`_compose` reads two of those fields. A value left over from a previous turn
-therefore **changes the rendered message**. Enumerated from source:
+`_pick_attribute` writes different fields on different branches, and
+`_compose` reads two of them, so a value from a previous turn changes the
+rendered message. From source:
 
 | branch | `broad_options` | `last_bits` | `last_coverage` | `last_weighed` |
 |---|---|---|---|---|
-| `other_then_pool`, first-two-`other` gate | — | — | — | — |
-| pool path, before any branch | **set** | — | — | — |
-| uncertain/easier branch | (already set) | **0.0** | — | — |
-| dry give-up branch | (already set) | — | — | — |
-| pool selection | (already set) | **bits** | **set** | **set** |
+| `other_then_pool`, first-two-`other` (line 284) | — | — | — | — |
+| pool path, before any branch (line 290) | **written** | — | — | — |
+| uncertain/easier (296–297) | (already written) | **0.0** | — | — |
+| dry give-up (305) | (already written) | — | — | — |
+| pool selection (307–310) | (already written) | **bits** | **written** | **written** |
 | `other` / `probe_cycle` / `other_then_cycle` | — | — | — | — |
 
-`_compose` reads `broad_options` and `last_bits`. So on a turn where legacy
-writes neither, the message is rendered from the **previous** turn's values.
+`state["asked"].append(attribute)` happens in `respond()` and stays in the host.
 
-**Consequence for the design: `QuestionDecision.state_patch` must be a
-PARTIAL patch containing only the keys the matching legacy branch writes.** A
-patch that always wrote all four would be "obviously equivalent" and would
-change the rendered message on later turns. This is the single likeliest way
-6B2 breaks, and the shadow gate compares patches key-by-key for exactly that
-reason.
+## Selection and rendering are different questions
 
-Also mutated, outside these functions: `state["asked"].append(attribute)` in
-`respond()`, which stays in the host.
+**Canonical counterexample, verified at `dialogue.py:289-298`:**
 
-## Inputs — three, kept apart
+```
+pool is over-general           -> state["broad_options"] = options   (line 290)
+uncertain_streak >= threshold  -> easiest attribute exists           (line 294)
+                               -> last_bits = 0.0, return easy       (296-297)
+```
+
+`broad_options` is written **before** the uncertain branch is tested, so
+selection takes the *easier* path while `_compose` — checking
+`len(options) >= 2` at line 417 — renders the *structured* message. Both are
+true simultaneously and one field cannot hold them.
+
+```python
+@dataclass(frozen=True)
+class QuestionDecision:
+    attribute: str                       # or "other"
+    selection_mode: str                  # branch that selected it
+    render_mode: str                     # open | structured, AFTER the patch
+    effective_options: tuple[str, ...]   # what _compose will actually see
+    bits: float
+    coverage: float
+    weighted_value: float
+    primary_reason: QuestionReason
+    modifiers: tuple[QuestionModifier, ...]
+    patch: QuestionPatch
+```
+
+`STRUCTURED_CLARIFICATION_DUE` is a **modifier**, not a competing primary
+reason: in the counterexample the primary reason is `EASIER_AFTER_UNCERTAIN`
+and structured rendering is a consequence of inherited state, not of the
+branch that fired.
+
+### The structured condition is `len(effective_options) >= 2`
+
+Not `overgeneral`. `_compose` needs two options (line 417), so `overgeneral`
+with one distinguishing option renders **open**. Test: overgeneral with one
+effective option; two or more current options; **stale** two-or-more options
+surviving a no-write branch; and a patch that clears stale options.
+
+## Prior render state, and the effective-state operation
+
+```python
+@dataclass(frozen=True)
+class PriorRenderState:
+    broad_options: tuple[str, ...]
+    last_bits: float
+    last_coverage: float
+    last_weighed: bool
+
+def apply_patch(prior: PriorRenderState, patch: QuestionPatch) -> PriorRenderState
+```
+
+`render_mode`, `effective_options` and all render telemetry derive from
+`apply_patch(prior, patch)` — never from the patch alone, never from the prior
+alone.
+
+## Inputs — four, kept apart
 
 ```python
 @dataclass(frozen=True)
 class QuestionSnapshot:      # session facts only
     asked: tuple[str, ...]
-    other_asked_count: int
     dry_streak: int
     dry_others: int
     uncertain_streak: int
+    prior: PriorRenderState
 
 @dataclass(frozen=True)
 class QuestionPolicy:        # configuration only
@@ -71,7 +122,7 @@ class QuestionPolicy:        # configuration only
     question_dry_cost: float
 
 @dataclass(frozen=True)
-class FacetStat:             # one attribute, over the ranked window
+class FacetStat:
     attribute: str
     bits_with_missing: float
     bits_skip_missing: float
@@ -81,85 +132,116 @@ class FacetStat:             # one attribute, over the ranked window
 @dataclass(frozen=True)
 class CandidateStats:
     window_size: int
-    facets: tuple[FacetStat, ...]          # <= len(ATTR_VOCAB) = 5
+    facets: tuple[FacetStat, ...]        # ATTR_VOCAB order, <= 5
     overgeneral: bool
-    options: tuple[str, ...]               # <= 3
+    options: tuple[str, ...]             # <= 3
 ```
 
-`CandidateStats` is computed by a bounded helper over `ranked[:pool_depth]`
-and the already-resident `cat.text` / `cat.cats` mappings — **the same
-constraint as 6A's `summarize_categories`: no `CategoryIndex`, no
-`FacetIndex`, no `DenseIndex`, no catalog-wide scan.** Cost is bounded at
-5 attributes × 30 candidates for entropy and coverage, plus one pass for the
-category leaves.
+`other_asked_count` is **removed**: both call sites use
+`state["asked"].count("other")` (lines 284, 313) and there is no separate
+source of truth, so carrying it would create one.
 
 `decide_question(snapshot, policy, stats) -> QuestionDecision` receives **no
 `Agent`, no session dict, no catalog, no lazy index.**
 
-## Output
+## The patch representation — immutable and presence-marked
+
+`Mapping[str, object]` cannot distinguish *not written* from *written with the
+same value*, and the legacy oracle depends on that distinction.
 
 ```python
+_UNSET = object()
+
 @dataclass(frozen=True)
-class QuestionDecision:
-    attribute: str                      # or "other"
-    mode: str                           # open | structured | easier | cycle | give_up
-    options: tuple[str, ...]
-    bits: float
-    coverage: float
-    weighted_value: float
-    reasons: tuple[QuestionReason, ...]
-    state_patch: Mapping[str, object]   # PARTIAL, see above
+class QuestionPatch:
+    broad_options: tuple[str, ...] | _UNSET
+    last_bits: float | _UNSET
+    last_coverage: float | _UNSET
+    last_weighed: bool | _UNSET
+
+    def writes(self) -> tuple[str, ...]      # fixed order, allowlisted
 ```
 
-### Action reason codes — explicit priority, not source order
+Three states are distinguishable: **not written** (`_UNSET`), **written with a
+value**, and **written with the value it already held** — the last being
+indistinguishable from the first under a before/after diff.
 
-6A's `decide()` appended codes in source order and let later branches
-overwrite the mode; notes/28 records that as inadequate for control. Here each
-branch emits exactly one **primary** code, and the branch that fires is
-determined by the precedence table below:
+## The legacy patch oracle
 
-`FIRST_TWO_OTHER` · `EASIER_AFTER_UNCERTAIN` · `GIVE_UP_AFTER_DRY` ·
-`STRUCTURED_CLARIFICATION_DUE` · `POOL_ATTRIBUTE_SELECTED` ·
-`NO_DISCRIMINATING_FACET` · `PROBE_CYCLE` · `FALLBACK_OTHER`
+A before/after dict diff **cannot observe a same-value write**, so it is not an
+acceptable oracle. The measurement commit instruments the legacy path with a
+**write-tracking mapping** that records every `__setitem__` against the
+allowlist, capturing the exact keys `_pick_attribute` / `_pool_attribute`
+assign, in order, with their values.
 
-`STRUCTURED_CLARIFICATION_DUE` is **new and distinct** from 6A's
-`ASK_STRUCTURED`, which stays a historical observation code and is not reused
-to drive behaviour. It is emitted only when over-generality is detected **and**
-the branch that fires actually renders a structured question — eligibility and
-final mode both, which is the gap notes/28 identified.
+Real-turn shadow validation compares **five things separately**:
+
+1. write set (which keys)
+2. written values
+3. effective post-patch render state
+4. selected attribute
+5. rendered message
+
+## Candidate window contract
+
+Both `_overgeneral` and `_pool_attribute` use **`ranked[:max(2, int(pool_depth))]`**
+— *not* `ranked[:pool_depth]`, which revision 1 wrote. Boundary cases:
+`pool_depth ∈ {0, 1, 2, 30}`, each against an empty pool, a one-item pool, and
+a full pool.
+
+## Ordering and numerical semantics — pre-registered tests
+
+* `ATTR_VOCAB` **insertion order** is preserved in `CandidateStats.facets`.
+* Equal utility keeps the **first** attribute: legacy uses `util > best_util`,
+  strictly greater (line 309).
+* Equal category counts preserve **first-seen pool order** — `sorted` is stable
+  over insertion-ordered `counts`.
+* Entropy with the missing bucket: exact reproduction, empty string counted as
+  a value.
+* `skip_missing=True`: exact reproduction, unmatched products excluded entirely.
+* Coverage rounds to **four decimals**, matching `_facet_coverage`.
+* When selection yields `"other"`, `_pool_attribute` still runs and writes
+  **`last_coverage = 0.0`**, because `ATTR_VOCAB.get("other")` is `None`.
+
+## Config asymmetry — preserved, and recorded as debt
+
+Selection uses route-resolved `turn_cfg` (`dialogue.py:280`), while `_compose`
+reads **base** `self.cfg["pool_depth"]` (line 422). **This is not corrected
+here.** A test gives a route override a different `pool_depth` from base config
+and requires the rendered message to stay bit-exact.
+
+Recorded as **existing architecture debt, outside 6B2 scope.** Fixing it during
+a relocation would change behaviour under exactly the configuration a reviewer
+would least expect it.
 
 ## Precedence truth table
 
-Order is fixed and reproduces the legacy `if` chain exactly.
+Reproduces the legacy `if` chain exactly. `patch` column lists written keys.
 
-| # | condition | attribute | mode | patch keys | reason |
+| # | condition | attribute | selection_mode | patch | primary reason |
 |---|---|---|---|---|---|
-| 1 | `ask_policy` ∈ {`pool`,`other_then_pool`}, `other_then_pool` and `other_asked_count < 2` | `other` | open | **none** | `FIRST_TWO_OTHER` |
-| 2 | pool path, `uncertain_streak >= answerability_after`, an easier facet exists | easiest unasked | easier | `broad_options`, `last_bits=0.0` | `EASIER_AFTER_UNCERTAIN` |
+| 1 | pool policy, `other_then_pool`, `asked.count("other") < 2` | `other` | first_two_other | **none** | `FIRST_TWO_OTHER` |
+| 2 | pool path, `uncertain_streak >= answerability_after`, easier facet exists | easiest unasked | easier | `broad_options`, `last_bits=0.0` | `EASIER_AFTER_UNCERTAIN` |
 | 3 | pool path, **not** overgeneral, `dry_streak >= pool_give_up_after` | `other` | give_up | `broad_options` | `GIVE_UP_AFTER_DRY` |
-| 4 | pool path, selection yields `bits >= 0.2` | selected | structured if overgeneral else open | `broad_options`, `last_bits`, `last_coverage`, `last_weighed` | `POOL_ATTRIBUTE_SELECTED` (+ `STRUCTURED_CLARIFICATION_DUE` if overgeneral) |
-| 5 | pool path, `bits < 0.2` | `other` | open | as row 4 | `NO_DISCRIMINATING_FACET` |
-| 6 | `ask_policy == "other"`, `ask_fallback_after` set, `dry_others >= limit` | first unasked in `PROBE_ORDER[:-1]` | cycle | none | `PROBE_CYCLE` |
-| 7 | `ask_policy == "probe_cycle"` | first unasked in `PROBE_ORDER` | cycle | none | `PROBE_CYCLE` |
-| 8 | `ask_policy == "other_then_cycle"`, `other_asked_count < 2` | `other` | open | none | `FIRST_TWO_OTHER` |
-| 9 | `ask_policy == "other_then_cycle"`, otherwise | first unasked in `PROBE_ORDER` | cycle | none | `PROBE_CYCLE` |
-| 10 | otherwise | `other` | open | none | `FALLBACK_OTHER` |
+| 4 | pool path, `bits >= 0.2` | selected | pool_selection | all four | `POOL_ATTRIBUTE_SELECTED` |
+| 5 | pool path, `bits < 0.2` | `other` | pool_selection | all four | `NO_DISCRIMINATING_FACET` |
+| 6 | `ask_policy=="other"`, `ask_fallback_after` set, `dry_others >= limit` | first unasked in `PROBE_ORDER[:-1]` | cycle | none | `PROBE_CYCLE` |
+| 7 | `ask_policy=="probe_cycle"` | first unasked in `PROBE_ORDER` | cycle | none | `PROBE_CYCLE` |
+| 8 | `ask_policy=="other_then_cycle"`, `asked.count("other") < 2` | `other` | first_two_other | none | `FIRST_TWO_OTHER` |
+| 9 | `ask_policy=="other_then_cycle"`, otherwise | first unasked in `PROBE_ORDER` | cycle | none | `PROBE_CYCLE` |
+| 10 | otherwise | `other` | fallback | none | `FALLBACK_OTHER` |
 
-**Row 2 beats over-generality.** The uncertain/easier branch is checked before
-the give-up guard and before selection, so an over-general pool does not
-override it — that is the legacy order and it is preserved, not improved.
+`render_mode` is **not** a column: it is derived per row from
+`apply_patch(prior, patch)`, and rows 1 and 6–10 can render structured purely
+from inherited state.
 
-**Row 3 is suppressed by over-generality**, because legacy guards it with
-`if not broad`. An over-general pool is exactly when a targeted question pays.
+Row 2 **beats** over-generality; row 3 is **suppressed** by it. Both are the
+legacy order, preserved rather than improved.
 
-**Rows 1, 6–10 write nothing at all.** Their `state_patch` is empty, and the
-message is rendered from whatever previous turn left behind.
-
-Boundary values to be tested at exactly the threshold: `other_asked_count` ∈
-{1, 2}; `uncertain_streak` ∈ {`answerability_after` − 1, `answerability_after`};
-`dry_streak` ∈ {`pool_give_up_after` − 1, `pool_give_up_after`}; `dry_others` ∈
-{`limit` − 1, `limit`}; `bits` ∈ {0.199, 0.2, 0.201}; `overgeneral_cats`
-crossing the category count.
+Threshold values to test exactly: `asked.count("other") ∈ {1,2}`;
+`uncertain_streak ∈ {t-1, t}`; `dry_streak ∈ {t-1, t}`;
+`dry_others ∈ {limit-1, limit}`; `bits ∈ {0.199, 0.2, 0.201}`;
+`overgeneral_cats` crossing the category count; all five ask policies.
 
 ## `question_context_mode = "off" | "shadow" | "control"`
 
@@ -167,56 +249,62 @@ crossing the category count.
 |---|---|---|
 | `off` | not computed | legacy |
 | `shadow` | computed, **no mutation** | legacy |
-| `control` | computed | pure decision; host applies `state_patch` |
+| `control` | computed | pure decision; host applies the patch |
 
-**`control` must work with `trace=False`.** Telemetry may depend on `trace`;
-orchestration may not.
-
-In `shadow`, the pure path must not write to the session. The stop condition is
-absolute: if shadow execution mutates state, stop.
+**`control` must work with `trace=False`.**
 
 ## Acceptance gates
 
-**A — pure-function correctness.** Exhaustive boundary grid against the legacy
-implementation across all five ask policies and every threshold value above;
-no input mutation (inputs canonicalised either side of a call); deterministic
-for identical snapshot/policy/stats; **no lazy index construction** — a test
-starts with `_cat_index`, `_facet_index` and `_dense_index` all `None` and
-requires them still `None`; reason priority explicit, asserted by a test that
-a lower-priority code never appears when a higher-priority branch fires.
+**A — pure-function correctness.** Exhaustive boundary grid against legacy
+across all five policies, every threshold, and the window cases; no input
+mutation; deterministic for identical inputs; **no lazy index construction**
+(`_cat_index`, `_facet_index`, `_dense_index` all `None` before and after);
+reason priority explicit, with a test that a lower-priority code never appears
+when a higher-priority branch fires.
 
 **B — shadow agreement.** Across `clean`, `vague_start`, `uncooperative`,
 `override_genuine`, `override_category`, `contradiction`,
-`supplementary_dev`: **zero** disagreements on selected attribute, mode,
-structured options, **state patch (key-by-key, including absent keys)**, and
-rendered message. Reported as **raw counts and compared turns**, never rounded
-rates.
+`supplementary_dev`: **zero** disagreements on write set, written values,
+effective post-patch render state, selected attribute, and rendered message.
+**Raw counts and compared turns, never rounded rates.**
 
-**C — behaviour preservation.** Control vs legacy bit-exact on aggregate
-score, HR@10, MRR, MTTC, all four official slices, compat anchor `0.928708`,
-recommendations, `ask_attribute`, and rendered message. Any movement is a
-defect; **no tuning around it.**
+**C — behaviour preservation.** Control vs legacy bit-exact on score, HR@10,
+MRR, MTTC, all four official slices, compat anchor `0.928708`,
+recommendations, `ask_attribute`, rendered message. Any movement is a defect;
+**no tuning around it.**
 
-**D — performance.** The 6B1 end-to-end noise floor was ≈0.452 ms, so a
-0.2 ms end-to-end gate is unmeasurable and **is not reused**.
+**D — performance, executable and pre-registered now.** The 6B1 end-to-end
+noise floor was ≈0.452 ms, so a 0.2 ms end-to-end gate is unmeasurable and is
+not reused.
 
-* **Primary gate:** a repeated, paired direct benchmark of the *complete*
-  question dispatch — stats computation plus decision plus patch application —
-  legacy against pure, reported as median and range over repetitions. 6B1
-  showed a single microbenchmark can silently describe half the path, so the
-  benchmark must exercise the whole dispatch and the call count must be
-  asserted.
-* **Diagnostic only:** end-to-end p50/p95, explicitly not a gate.
-* **Hard gate:** no lazy index construction, and no cold-start regression.
+* **≥ 7 paired repetitions**, fixed warm-up and iteration counts, **alternating
+  legacy-first / pure-first** order to cancel drift.
+* Benchmark the **complete dispatch**: stats + decision + patch application.
+* **Exactly one decision execution per control turn**, asserted by call count.
+* **Median pure/legacy ratio ≤ 1.20.**
+* **Absolute median overhead ≤ 0.10 ms per turn.**
+* End-to-end p50/p95 **diagnostic only**.
+* **Hard gate:** no new lazy-index construction.
 
-**E — migration.** Two commits. (1) Measurement: legacy and pure side by side,
-duplication explicitly temporary. (2) Adoption: delete the legacy rule body,
-leave one adapter. The adoption anchor compares against the **measured control
-implementation**, not only an older baseline.
+**E — migration.** Two commits: (1) measurement, legacy and pure side by side,
+duplication explicitly temporary; (2) adoption, deleting the legacy rule body
+and leaving one adapter. The adoption anchor compares against the **measured
+control implementation**, not only an older baseline.
 
-Every experiment through the lease and the results ledger; aborted or
-defective rows marked non-citable through the append-only invalidation ledger;
-**results are never rewritten.**
+Every experiment through the lease and ledger; aborted or defective rows marked
+non-citable via the append-only invalidation ledger; **results never
+rewritten.**
+
+## Promotion and post-adoption semantics
+
+* **All correctness gates zero-disagreement and performance gates pass** →
+  adopt one implementation, default `question_context_mode="control"`.
+* **Any gate fails** → default stays `"off"`, no adoption, stop for review.
+* **After adoption, `off` means adapter plus no orchestration telemetry.** It
+  is no longer an independent legacy implementation, and must not be described
+  as one.
+* **Post-adoption shadow comparison is tautological** and cannot be quoted as
+  evidence.
 
 ## Stop conditions
 
@@ -226,19 +314,19 @@ disagreement.
 
 ## Predictions
 
-1. Shadow agrees on 100% of turns for attribute and mode.
-2. **The state patch is where this breaks if it breaks** — specifically rows
-   1 and 6–10, which write nothing, and row 2, which writes `last_bits` but
-   not `last_coverage`. An implementation that "tidies" those into a uniform
-   patch would pass attribute and mode agreement and fail message agreement.
-3. Complete-dispatch cost within ±20% of legacy; the same work, differently
-   arranged.
-4. Least confident: that `_compose`'s dependence on stale `broad_options` and
-   `last_bits` is fully captured by the patch model. The rendered-message
-   comparison in gate B is the instrument for that doubt.
+1. Attribute and `selection_mode` agree on 100% of turns.
+2. **`render_mode` and the rendered message are where this breaks if it
+   breaks** — rows 1 and 6–10 write nothing, and row 2 writes `last_bits` but
+   not `last_coverage`. An implementation that tidied those into a uniform
+   patch would pass attribute agreement and fail message agreement.
+3. Complete-dispatch ratio within 1.20; the same work, rearranged.
+4. Least confident: that the write-tracking oracle captures every legacy write
+   path, including any same-value write. That is why the oracle instruments
+   assignment rather than diffing before and after.
 
 ## Not in scope
 
 Personalization, profile weights, dense retrieval, reranking, category logic,
-scoring parameters. **Phase 6C** (profile credibility shadow evaluation)
-follows 6B2, then the score-oriented reranker phase.
+scoring parameters, and the `pool_depth` config asymmetry. **Phase 6C**
+(profile credibility shadow evaluation) follows, then the score-oriented
+reranker phase.
