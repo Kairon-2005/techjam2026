@@ -30,8 +30,9 @@ def turn(n: int = 0, cands=("a", "b"), feats=None) -> dict:
             "features": list(feats or [vec(f_bm25=1.0), vec()])}
 
 
-def session(*turns_, sample_id="s1") -> dict:
+def session(*turns_, sample_id="s1", scoring_from_turn=1) -> dict:
     return {"sample_id": sample_id, "scenario": "supplementary_dev",
+            "scoring_from_turn": scoring_from_turn,
             "turns": list(turns_ or [turn()])}
 
 
@@ -57,6 +58,13 @@ class SchemaAllowlistTest(unittest.TestCase):
             problems = CACHE.validate_schema([s])
             with self.subTest(field=field):
                 self.assertTrue(problems, f"{field} was accepted")
+
+    def test_a_missing_scoring_from_turn_is_rejected(self) -> None:
+        # Without it the cached objective would score a `intent_override`
+        # session from turn 1 and credit hits the evaluator throws away.
+        bad = {k: v for k, v in session().items() if k != "scoring_from_turn"}
+        self.assertTrue(any("scoring_from_turn" in p
+                            for p in CACHE.validate_schema([bad])))
 
     def test_a_missing_required_turn_field_is_rejected(self) -> None:
         for field in ("turn", "candidates", "features", "target"):
@@ -135,7 +143,8 @@ class ReplayGateTest(unittest.TestCase):
             row = dict(cap.rows[("s", turn)])
             row["target"] = row["candidates"][0]
             turn_rows.append(row)
-        sessions = [{"sample_id": "s", "scenario": "clean", "turns": turn_rows}]
+        sessions = [{"sample_id": "s", "scenario": "clean",
+                      "scoring_from_turn": 1, "turns": turn_rows}]
         return ag, sessions, cap
 
     def test_the_collect_hook_records_every_candidate(self) -> None:
@@ -300,7 +309,8 @@ class SnapshotTest(unittest.TestCase):
         poisoned[("s", 1)] = dataclasses.replace(snap, state=live)
         row = dict(cap.rows[("s", 1)])
         row["target"] = row["candidates"][0]
-        sessions = [{"sample_id": "s", "scenario": "clean", "turns": [row]}]
+        sessions = [{"sample_id": "s", "scenario": "clean",
+                      "scoring_from_turn": 1, "turns": [row]}]
 
         clean = CACHE.replay_gate(sessions, ag, cap.snapshots)
         self.assertTrue(clean["ok"], clean.get("reason"))

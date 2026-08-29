@@ -87,16 +87,31 @@ def score_candidate(features: dict, weights: dict[str, float]) -> float:
 def cached_mrr(sessions, weights: dict[str, float]) -> float:
     """Session-level MRR under the evaluator's Top-10 semantics.
 
-    Per session: turns in order; re-score and rank that turn's cached
-    candidates; a target at rank 1-10 records 1/rank and STOPS the session; a
-    rank past 10 continues to the next turn; never in the Top-10 records 0.
+    Per session: turns in order from `scoring_from_turn`; re-score and rank that
+    turn's cached candidates; a target at rank 1-10 records 1/rank and STOPS the
+    session; a rank past 10 continues to the next turn; never in the Top-10
+    records 0.
+
+    `scoring_from_turn` IS PART OF THE EVALUATOR'S SEMANTICS, not an extra.
+    `local_evaluator.py:236` holds `override_applied = scenario_type !=
+    "intent_override"` and gates the hit test on it, so on an `intent_override`
+    session a Top-10 hit BEFORE the override turn scores nothing -- the customer
+    has not yet said what they actually want, and finding the old target is not
+    a success. Omitting it credited hits the evaluator throws away and
+    disagreed with it on 35 of 120 `sup-train` override sessions, in both
+    directions.
     """
     if not sessions:
         return 0.0
     scores: list[float] = []
     for session in sessions:
         best = 0.0
+        first_scoring = int(session.get("scoring_from_turn", 1))
         for turn in session.get("turns") or ():
+            # turn["turn"], not .get(): the schema requires it and a default
+            # would either skip every turn or score every turn, both silently.
+            if int(turn["turn"]) < first_scoring:
+                continue
             target = turn.get("target")
             cands = turn.get("candidates") or ()
             feats = turn.get("features") or ()

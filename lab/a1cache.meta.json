@@ -1,9 +1,9 @@
 {
-  "agent_commit": "39d69a9",
+  "agent_commit": "b25008f",
   "agent_in_worktree": true,
   "agent_sha256": "0ad7f7f9c9a08235",
   "arm": "A1",
-  "build_seconds": 289.2,
+  "build_seconds": 130.9,
   "cache_path": "/Users/kairon/Projects/techjam/conversational-search/lab/a1cache.jsonl",
   "cache_sessions": 800,
   "cache_sha256": "f0b744692def3a818b756026c4173d41ac8ff515781be3c7a9ff07c3105fea97",
@@ -23,6 +23,46 @@
   "ok": true,
   "orphan_rerank_calls": 0,
   "phase": "7A-R1",
+  "rotation_diagnostic": {
+    "rotated_sessions": 0,
+    "rotated_turns": 0,
+    "rr_moved_by_scenario": {
+      "intent_override": 35
+    },
+    "rr_moved_examples": [
+      {
+        "cached_rr": 0.5,
+        "evaluator_rr": 0.3333333333333333,
+        "sample_id": "supplementary_dev_0058",
+        "scenario": "intent_override"
+      },
+      {
+        "cached_rr": 0.5,
+        "evaluator_rr": 1.0,
+        "sample_id": "supplementary_dev_0001",
+        "scenario": "intent_override"
+      },
+      {
+        "cached_rr": 0.1,
+        "evaluator_rr": 1.0,
+        "sample_id": "supplementary_dev_0580",
+        "scenario": "intent_override"
+      },
+      {
+        "cached_rr": 1.0,
+        "evaluator_rr": 0.5,
+        "sample_id": "supplementary_dev_0542",
+        "scenario": "intent_override"
+      },
+      {
+        "cached_rr": 0.16666666666666666,
+        "evaluator_rr": 0.14285714285714285,
+        "sample_id": "supplementary_dev_0464",
+        "scenario": "intent_override"
+      }
+    ],
+    "sessions_whose_rr_moved": 35
+  },
   "smoke": false,
   "split": "sup-train",
   "split_train_hash": "48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d",

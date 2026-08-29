@@ -51,6 +51,26 @@ LAB = Path("lab")
 BUILD_LOG = "lab/a1builds.jsonl"
 
 
+def first_scoring_turn(sample: dict) -> int:
+    """The first turn on which a Top-10 hit COUNTS, from the evaluator's rule.
+
+    `local_evaluator.py:236`: `override_applied = scenario_type !=
+    "intent_override"`, and the hit test is gated on it. The loop then flips it
+    at the END of turn `override["turn"] - 1`, so scoring starts at
+    `override["turn"]` -- default 3, and 3 or 4 for every `sup-train` override
+    row. On every other scenario it is turn 1.
+
+    A configured override turn of 1 or less would never flip the flag at all,
+    and the evaluator would score that session 0 no matter what the agent did;
+    that is returned as an unreachable turn rather than quietly treated as 1.
+    """
+    if str(sample.get("scenario_type")) != "intent_override":
+        return 1
+    override = (sample.get("behavior") or {}).get("override") or {}
+    turn = int(override.get("turn", 3))
+    return turn if turn > 1 else E.MAX_TURNS + 1
+
+
 def run_session(agent, sample: str | dict, capture: CACHE.Capture,
                 catalog_ids, categories, products) -> dict:
     """One session, driven exactly as `evaluator.local_evaluator.evaluate` does.
@@ -117,6 +137,7 @@ def run_session(agent, sample: str | dict, capture: CACHE.Capture,
     return {"sample_id": sample_id, "scenario": str(sample["scenario_type"]),
             "target": target, "turns": turns, "hit_turn": hit_turn,
             "best_rank": best_rank, "rotated_turns": rotated_turns,
+            "scoring_from_turn": first_scoring_turn(sample),
             "reciprocal_rank": 0.0 if best_rank is None else 1.0 / best_rank}
 
 
@@ -153,7 +174,9 @@ def build(rows, catalog: Path = CATALOG, config: dict | None = None,
                 continue
             turn_rows.append({**row, "target": outcome["target"]})
         sessions.append({"sample_id": outcome["sample_id"],
-                         "scenario": outcome["scenario"], "turns": turn_rows})
+                         "scenario": outcome["scenario"],
+                         "scoring_from_turn": outcome["scoring_from_turn"],
+                         "turns": turn_rows})
     return {"sessions": sessions, "capture": capture, "agent": agent,
             "outcomes": outcomes, "seconds": round(time.time() - started, 1)}
 
@@ -186,6 +209,8 @@ def rotation_diagnostic(outcomes, sessions, snapshots) -> dict:
             continue
         cached_rr = 0.0
         for turn in session["turns"]:
+            if int(turn["turn"]) < int(session.get("scoring_from_turn", 1)):
+                continue
             snap = snapshots.get((session["sample_id"], turn["turn"]))
             if snap is None:
                 continue
@@ -218,11 +243,25 @@ def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
     if not written["ok"]:
         return {"ok": False, "stage": "schema", **written}
     result = CACHE.replay_gate(sessions, built["agent"], built["capture"].snapshots)
+    rotation = rotation_diagnostic(built["outcomes"], sessions,
+                                   built["capture"].snapshots)
+    evaluator = evaluator_mrr(built["outcomes"])
+    # THE THIRD AGREEMENT. The cache re-derives A0's ranking (delta_mrr) and the
+    # snapshot re-runs it, but both are the cache checking itself. This compares
+    # the cached objective against the EVALUATOR'S OWN number over the same
+    # sessions, and requires any difference to be explained by `_rotate` -- the
+    # one mechanism that can legitimately separate the emitted order from the
+    # order the cache records. An unexplained gap means the cached objective is
+    # scoring something the evaluator does not, which is how a search comes to
+    # optimise a metric nobody is graded on.
+    evaluator_delta = result["cached_default_mrr"] - evaluator
+    evaluator_agrees = evaluator_delta == 0.0 or rotation["rotated_turns"] > 0
     fingerprints = R.git_state(dataset=str(SPLIT.DEV))
     manifest = {
         "phase": "7A-R1",
         "arm": "A1",
         "ok": bool(result["ok"]) and result["delta_mrr"] == 0.0
+              and evaluator_agrees
               and not built["capture"].duplicate_keys,
         "checked_sessions": result["checked_sessions"],
         "checked_turns": result["checked_turns"],
@@ -231,9 +270,10 @@ def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
         "cached_default_mrr": result["cached_default_mrr"],
         "live_a0_mrr": result["live_a0_mrr"],
         "delta_mrr": result["delta_mrr"],
-        "evaluator_mrr_diagnostic": evaluator_mrr(built["outcomes"]),
-        "rotation_diagnostic": rotation_diagnostic(
-            built["outcomes"], sessions, built["capture"].snapshots),
+        "evaluator_mrr": evaluator,
+        "evaluator_delta": evaluator_delta,
+        "evaluator_agrees": evaluator_agrees,
+        "rotation_diagnostic": rotation,
         "cache_sha256": written["sha256"],
         "cache_path": str(cache_path),
         "cache_sessions": written["sessions"],
@@ -260,8 +300,9 @@ def report(manifest: dict) -> None:
     print("\n=== A1 default replay gate ===")
     for field in ("checked_sessions", "checked_turns", "full_order_mismatches",
                   "cached_default_mrr", "live_a0_mrr", "delta_mrr",
-                  "evaluator_mrr_diagnostic", "cache_sha256", "split_train_hash",
-                  "agent_commit", "agent_sha256", "catalog_sha256"):
+                  "evaluator_mrr", "evaluator_delta", "cache_sha256",
+                  "split_train_hash", "agent_commit", "agent_sha256",
+                  "catalog_sha256"):
         print(f"  {field:<26} {manifest.get(field)}")
     rot = manifest.get("rotation_diagnostic") or {}
     if rot:

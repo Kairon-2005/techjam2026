@@ -1,5 +1,13 @@
 # Phase 7A-R1 pre-registration — quality evaluation of A0, A1 and A2-10
 
+**Revision 5. PRE-DATA CORRECTION, committed 2026-08-30.** One further defect,
+found by the revision 4 machinery itself and fixed before trial 0: the cached
+objective did not implement the evaluator's rule that a hit BEFORE the override
+turn scores nothing. See **§0.8**. Still no trial, no `sup-val`, no public row
+and no sealed holdout.
+
+---
+
 **Revision 4. PRE-DATA CORRECTION, committed 2026-08-30.** No cache has been
 built, no trial has been run, no `sup-val` and no public row has been touched.
 Revision 4 exists because revision 3's text and the implementation had come
@@ -235,6 +243,77 @@ are exactly the surface on which one arm's construction can perturb another's,
 and a paired comparison is worth nothing if the pairing is the thing that broke
 it.
 
+### 0.8 Revision 5 — the cached objective must honour `override_applied`
+
+**Found by §0.4's own diagnostic**, which is the reason it was written. The
+first 800-session build reported cached MRR **0.199835** and the evaluator's own
+MRR over the same sessions **0.202827**. §0.4 predicted that gap would come from
+`_rotate`. **It did not: `_rotate` fired on 0 turns.** The entire difference was
+a rule the cached objective never implemented.
+
+`evaluator/local_evaluator.py:236`:
+
+```python
+override_applied = sample["scenario_type"] != "intent_override"
+...
+if override_applied and target in ranked:
+    best_rank = ranked.index(target) + 1
+```
+
+**On an `intent_override` session, a Top-10 hit before the override turn scores
+nothing.** The customer has not yet said what they actually want, and surfacing
+the pre-override target is not a success — it is the failure mode the scenario
+exists to test. The flag flips at the end of turn `override["turn"] - 1`, so
+scoring starts at `override["turn"]`: **3 or 4 for every `sup-train` override
+row, 75 sessions each.**
+
+The omission was wrong **in both directions**, which is why an eyeball on the
+aggregate would not have caught it:
+
+* it **credited** hits the evaluator discards;
+* and because a credited hit also **stops the session**, it never reached the
+  later hit the evaluator actually scores.
+
+**It disagreed with the evaluator on 35 of the 120 `sup-train` override
+sessions** — 4.4% of the corpus, concentrated entirely in one scenario. A search
+run against it would have optimised a metric nobody is graded on, and would have
+optimised it hardest exactly where A0's override handling is the thing under
+test.
+
+**The correction:**
+
+* the cache carries **`scoring_from_turn`** per session, declared in the schema
+  allowlist rather than added quietly. It is a property of the customer's
+  behaviour, as much an input as `target` is;
+* `cached_mrr` and the gate's `live_a0_mrr` both **skip every turn before it**;
+* an override turn configured at 1 or less never flips the evaluator's flag at
+  all, so it is recorded as **unreachable** rather than silently treated as
+  turn 1 — that session scores 0 whatever the agent does, and inventing a score
+  the evaluator never awards is the same error in miniature.
+
+**And a third agreement is now a gate, not a printout.** `delta_mrr` compares
+the cache against A0's live order — the cache checking itself. The gate now
+also compares **the cached objective against the evaluator's own MRR over the
+same sessions**, and requires any difference to be explained by a non-zero
+rotated-turn count:
+
+```
+evaluator_agrees  ⇔  cached_default_mrr == evaluator_mrr  OR  rotated_turns > 0
+```
+
+`_rotate` is the only mechanism that may legitimately separate the emitted order
+from the order the cache records. **An unexplained gap fails the build.** A test
+moves one session's evaluator score without touching the cache and requires the
+gate to stop — a gate that cannot fail is not a gate.
+
+**Why this is a correction and not a redesign.** `notes/40` §6 registered
+"cached **evaluator** semantics" and `notes/44` §6 registered "identical
+semantics to A1's". The evaluator's semantics have always included this rule;
+the implementation did not. Revision 5 conforms the implementation to the
+registered intent, before any trial, and the objective's definition is
+otherwise untouched — Top-10, stop on conversion, continue on miss, mean over
+sessions.
+
 ### 0.7 What revision 4 supersedes
 
 | superseded | by |
@@ -243,6 +322,8 @@ it.
 | revision 3 §9b, `model_absent` as a non-invalidating configuration fact | §0.5 — invalidating |
 | `notes/40`, *"the public 200 is a CONFIRMATION set, evaluated **once per arm**"* | **notes/44 §7b Step 3 — ONE finalist, one run, one number.** `notes/44` is the operative contract for R1 wherever the two documents differ |
 | `notes/40`'s superseded 806/194 global-hash split | §0.3 — the stratified 800/200 split, asserted at startup |
+| revision 4 §0.4's expectation that any cached-vs-evaluator gap would be `_rotate` | §0.8 — `_rotate` fired on 0 turns; the gap was the unimplemented `override_applied` rule |
+| the cached objective scoring an `intent_override` session from turn 1 | §0.8 — from `scoring_from_turn` |
 
 `notes/40` remains the design document. **Where `notes/40` and `notes/44`
 disagree, `notes/44` governs R1**, and the disagreements are the four rows
@@ -545,7 +626,8 @@ reads. Off-policy for the same reason A1's cache is.
 Frozen feature cache, **189 deterministic coordinate trials**, grid relative to
 the **original default** weights.
 
-**Cached evaluator semantics** — process turns in order; target rank **1–10** →
+**Cached evaluator semantics** — process turns in order **from
+`scoring_from_turn`** (§0.8); target rank **1–10** →
 record `1/rank` and **stop**; rank **> 10** → **continue**; never in the Top-10
 → **0**; mean over `sup-train` sessions.
 
@@ -752,7 +834,10 @@ classifier**, not resolved by editing the gate.
 ## 10. Stop conditions
 
 Stop if: the driver runs any split but the operative 800/200, or reports 806/194
-anywhere; the cache stores a live state reference rather than a frozen snapshot;
+anywhere; the cached objective scores an `intent_override` turn before that
+sample's override turn; the cached objective and the evaluator's own MRR differ
+with no rotated turn to explain it; the cache stores a live state reference
+rather than a frozen snapshot;
 the default replay gate reports a non-zero mismatch count or a non-zero delta
 and a trial runs anyway; an A2 shard with a non-zero invalidating-reason count
 is quoted as an A2 quality verdict; any frozen parameter is searched alongside

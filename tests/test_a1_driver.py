@@ -83,6 +83,43 @@ class SplitGuardTest(unittest.TestCase):
         self.assertFalse((Path(self._tmp.name) / "a1cache.meta.json").exists())
 
 
+class FirstScoringTurnTest(unittest.TestCase):
+    """The evaluator's `override_applied` rule, read off the sample."""
+
+    def test_non_override_scenarios_score_from_turn_one(self) -> None:
+        for scenario in ("buying", "browsing", "boundary"):
+            self.assertEqual(
+                D.first_scoring_turn(_sample("supplementary_dev_0001", "W1",
+                                             scenario=scenario)), 1, scenario)
+
+    def test_an_override_scores_from_its_override_turn(self) -> None:
+        for turn in (3, 4):
+            row = _sample("supplementary_dev_0001", "W1", scenario="intent_override")
+            row["behavior"] = {"scenario_type": "intent_override",
+                               "override": {"turn": turn, "message": "m"}}
+            self.assertEqual(D.first_scoring_turn(row), turn)
+
+    def test_a_missing_override_turn_defaults_to_three(self) -> None:
+        row = _sample("supplementary_dev_0001", "W1", scenario="intent_override")
+        row["behavior"] = {"scenario_type": "intent_override", "override": {}}
+        self.assertEqual(D.first_scoring_turn(row), 3)
+
+    def test_an_override_turn_of_one_is_unreachable_not_turn_one(self) -> None:
+        # The evaluator flips the flag at the END of turn `n - 1`, so n <= 1
+        # never flips it and the session scores 0 whatever the agent does.
+        # Silently treating it as turn 1 would invent a score the evaluator
+        # never awards.
+        row = _sample("supplementary_dev_0001", "W1", scenario="intent_override")
+        row["behavior"] = {"scenario_type": "intent_override", "override": {"turn": 1}}
+        self.assertGreater(D.first_scoring_turn(row), 10)
+
+    @unittest.skipUnless(DEV.exists(), "needs data/supplementary_dev.jsonl")
+    def test_every_sup_train_override_row_scores_from_turn_three_or_four(self) -> None:
+        seen = {D.first_scoring_turn(r) for r in SPLIT.train_rows(DEV)
+                if r["scenario_type"] == "intent_override"}
+        self.assertEqual(seen, {3, 4})
+
+
 class CapturedRunTest(unittest.TestCase):
     """A real run over the fixture catalog, through the evaluator's own loop."""
 
@@ -178,6 +215,27 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue(self.manifest["ok"], self.manifest.get("first_mismatch"))
         self.assertEqual(self.manifest["full_order_mismatches"], 0)
         self.assertEqual(self.manifest["delta_mrr"], 0.0)
+
+    def test_the_cached_objective_agrees_with_the_evaluator(self) -> None:
+        # The third agreement: delta_mrr is the cache checking itself, this is
+        # the cache against the evaluator's own number over the same sessions.
+        self.assertTrue(self.manifest["evaluator_agrees"])
+        self.assertEqual(self.manifest["evaluator_delta"], 0.0)
+
+    def test_an_unexplained_evaluator_gap_fails_the_gate(self) -> None:
+        # A gate that cannot fail is not a gate. `_rotate` is the only thing
+        # allowed to separate the two numbers, so a gap with no rotated turn
+        # must stop the build.
+        rows = [_sample(f"supplementary_dev_{i:04d}", p["parent_asin"])
+                for i, p in enumerate(PRODUCTS[:2], 1)]
+        built = D.build(rows, catalog=Path(self.path), progress_every=0)
+        # Move one session's evaluator score without touching the cache.
+        built["outcomes"][0]["reciprocal_rank"] += 0.5
+        split, _ = SPLIT.operative(DEV)
+        manifest = D.gate(built, split, Path(self._tmp.name) / "poisoned.jsonl")
+        self.assertNotEqual(manifest["evaluator_delta"], 0.0)
+        self.assertFalse(manifest["evaluator_agrees"])
+        self.assertFalse(manifest["ok"])
 
 
 if __name__ == "__main__":

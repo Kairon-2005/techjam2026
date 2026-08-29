@@ -36,8 +36,15 @@ def turn(target_rank: int | None, n: int = 30, target: str = "T"):
     return {"candidates": cands, "features": feats, "target": target}
 
 
-def session(*turns_):
-    return {"sample_id": "s", "turns": list(turns_)}
+def session(*turns_, scoring_from_turn: int = 1):
+    """Turns numbered from 1, and the turn at which scoring starts.
+
+    `scoring_from_turn` is the evaluator's `override_applied` rule: on an
+    `intent_override` sample a Top-10 hit BEFORE the override turn scores
+    nothing, because the customer has not yet said what they want.
+    """
+    return {"sample_id": "s", "scoring_from_turn": int(scoring_from_turn),
+            "turns": [{**t, "turn": i} for i, t in enumerate(turns_, 1)]}
 
 
 class ObjectiveTest(unittest.TestCase):
@@ -83,6 +90,51 @@ class ObjectiveTest(unittest.TestCase):
 
     def test_no_sessions_is_zero_not_an_error(self) -> None:
         self.assertEqual(S.cached_mrr([], {"f_bm25": 1.0}), 0.0)
+
+
+class OverrideScoringTest(unittest.TestCase):
+    """A hit before the override turn scores nothing -- the evaluator's rule.
+
+    `local_evaluator.py:236` holds `override_applied = scenario_type !=
+    "intent_override"` and gates the hit test on it. Omitting this credited
+    hits the evaluator throws away, and disagreed with it on 35 of 120
+    `sup-train` override sessions -- in BOTH directions, because the cached
+    objective also stopped the session early and never saw the later hit the
+    evaluator scored.
+    """
+
+    def mrr(self, *sessions):
+        return S.cached_mrr(list(sessions), {"w_bm25": 1.0})
+
+    def test_a_pre_override_hit_scores_zero(self) -> None:
+        # Rank 1 on turn 1, nothing afterwards. The evaluator scores 0.
+        self.assertEqual(self.mrr(session(turn(1), turn(None),
+                                          scoring_from_turn=3)), 0.0)
+
+    def test_a_pre_override_hit_does_not_stop_the_session(self) -> None:
+        # The defect in both directions: crediting turn 1 also ENDED the
+        # session, so the rank-2 hit the evaluator actually scores was never
+        # reached. Turns 1 and 2 are ignored; turn 3 converts at rank 2.
+        got = self.mrr(session(turn(1), turn(1), turn(2), scoring_from_turn=3))
+        self.assertAlmostEqual(got, 0.5)
+
+    def test_the_override_turn_itself_counts(self) -> None:
+        self.assertEqual(self.mrr(session(turn(None), turn(None), turn(1),
+                                          scoring_from_turn=3)), 1.0)
+
+    def test_turn_four_overrides_are_handled_too(self) -> None:
+        # sup-train carries override turns 3 and 4, 75 sessions each.
+        self.assertEqual(self.mrr(session(turn(1), turn(1), turn(1), turn(2),
+                                          scoring_from_turn=4)), 0.5)
+
+    def test_a_non_override_session_scores_from_turn_one(self) -> None:
+        self.assertEqual(self.mrr(session(turn(1))), 1.0)
+
+    def test_an_unreachable_scoring_turn_scores_zero(self) -> None:
+        # A configured override turn of 1 or less never flips the evaluator's
+        # flag, so the session scores 0 no matter what the agent did.
+        self.assertEqual(self.mrr(session(turn(1), turn(1),
+                                          scoring_from_turn=11)), 0.0)
 
 
 class GridTest(unittest.TestCase):

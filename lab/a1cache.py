@@ -37,7 +37,11 @@ from lab import a1search as S
 # Exactly the keys a cached row may carry. An allowlist, not a grep: a
 # forbidden field is one this set does not mention, so a future addition has to
 # be declared here rather than slipping in unnoticed.
-SESSION_KEYS = frozenset({"sample_id", "scenario", "turns"})
+# `scoring_from_turn` is DECLARED here, which is what the allowlist is for. It
+# is a property of the customer's behaviour, not of the agent's output -- as
+# much an input as `target` is -- and without it the cached objective credits
+# hits the evaluator throws away. See `first_scoring_turn` below.
+SESSION_KEYS = frozenset({"sample_id", "scenario", "turns", "scoring_from_turn"})
 TURN_KEYS = frozenset({"turn", "candidates", "features", "target"})
 FEATURE_KEYS = frozenset({"f_bm25", "f_phrase", "f_idf", "f_cat", "f_pop",
                           "f_exact", "f_field", "f_pos", "f_card", "f_soft",
@@ -56,6 +60,8 @@ def validate_schema(sessions) -> list[str]:
             problems.append(f"session {si}: unexpected keys {sorted(keys - SESSION_KEYS)}")
         if "sample_id" not in keys:
             problems.append(f"session {si}: no sample_id")
+        if "scoring_from_turn" not in keys:
+            problems.append(f"session {si}: no scoring_from_turn")
         for ti, turn in enumerate(session.get("turns") or ()):
             where = f"session {si} turn {ti}"
             tkeys = set(turn)
@@ -204,11 +210,11 @@ def capturing(agent, capture: Capture):
 def live_mrr(sessions, snapshots, top_k: int = S.TOP_K) -> float:
     """A0's own session-level MRR, from the orders `_rerank` ACTUALLY returned.
 
-    Identical semantics to `a1search.cached_mrr` -- turns in order, first
-    Top-10 hit records 1/rank and stops the session, a miss continues, never in
-    the Top-10 scores 0 -- but read off the LIVE order rather than re-derived
-    from cached features. That is what makes the delta between them meaningful:
-    same metric, two independent sources.
+    Identical semantics to `a1search.cached_mrr` -- turns from
+    `scoring_from_turn` onward, first Top-10 hit records 1/rank and stops the
+    session, a miss continues, never in the Top-10 scores 0 -- but read off the
+    LIVE order rather than re-derived from cached features. That is what makes
+    the delta between them meaningful: same metric, two independent sources.
     """
     if not sessions:
         return 0.0
@@ -219,6 +225,8 @@ def live_mrr(sessions, snapshots, top_k: int = S.TOP_K) -> float:
             snap = snapshots.get((session["sample_id"], turn["turn"]))
             if snap is None:
                 continue
+            if int(turn["turn"]) < int(session.get("scoring_from_turn", 1)):
+                continue                   # pre-override: the evaluator ignores it
             order = list(snap.live_order)
             target = turn.get("target")
             rank = order.index(target) + 1 if target in order else None
