@@ -1,192 +1,212 @@
-# Phase 7A-R1 results — the A1 cache, the A1 freeze, and where A2 stops
+# Phase 7A-R1 results — A0 keeps the default
 
-**Status: A1 frozen. A2 blocked on an absent environment. `sup-val` not run,
-public 200 not touched, sealed holdout not touched.**
+**The answer: `score_default` stays A0.** A1 and A2-10 both qualified on
+`sup-val`; A1 was the finalist; A1 failed **every one** of the section 9 public
+gates. That outcome was pre-registered as acceptable (`notes/44` §7b Step 4) and
+is reported as what it is. **Nothing was retuned and nothing was re-run.**
 
-Every number here comes from a citable row in `lab/a1builds.jsonl` or
-`lab/r1builds.jsonl` — a valid lease, an isolated worktree, and every input
-fingerprint present (`lab/provenance.py`).
+Every number below comes from a citable row — a valid lease, an isolated
+worktree, every input fingerprint present (`lab/provenance.py`). Ledgers:
+`lab/a1builds.jsonl`, `lab/a2builds.jsonl`, `lab/r1builds.jsonl`,
+`lab/supval.jsonl`, `lab/public.jsonl`.
 
-## 1. The split, asserted rather than described
+*This document replaced an earlier draft written while the A2 environment was
+missing. The ledger rows are the immutable record; this is the report over
+them, and §6 says what changed.*
 
-| | train | val |
-|---|---|---|
-| `buying` | 320 | 80 |
-| `browsing` | 320 | 80 |
-| `intent_override` | 120 | 30 |
-| `boundary` | 40 | 10 |
-| **total** | **800** | **200** |
+## 1. Headline
 
-`sup-train` `48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d`,
-`sup-val` `82e0470ee83d2cf8883399ededda11b5ddb4fa762685196b36a9fe521a105a73`.
+| | `sup-train` MRR | `sup-val` MRR Δ | public `clean` MRR Δ |
+|---|---|---|---|
+| **A1** | 0.202827 → **0.422520** | **+0.228613** | **−0.116467** |
+| **A2-10** | 0.202827 → **0.218575** | **+0.008248** | not run — see §5 |
 
-The superseded 806/194 global-hash split is refused by count alone, and a
+**A1 is the same arm in all three columns.** It roughly doubles MRR on the
+supplementary corpus and loses 14% of it on the public set. **The two corpora
+disagree about what a good ranker is**, and that is the phase's real finding.
+
+## 2. The split and the caches
+
+| | |
+|---|---|
+| `sup-train` | 800 = 320/320/120/40, `48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d` |
+| `sup-val` | 200 = 80/80/30/10, `82e0470ee83d2cf8883399ededda11b5ddb4fa762685196b36a9fe521a105a73` |
+| A1 cache | `41bd811310e5364abc83d7a6b531164f79726dd331e177c76e73824a5ed6f553` |
+| A2 cache | `4b6092d98b4b7336ce3fa7934d09925b35307269d48d51ff4f1fbcf57792233c` |
+
+The superseded 806/194 global-hash split is refused **by count alone**, and a
 negative test rebuilds it — accidental strata included, `boundary` 38/12 — and
-requires the guard to reject it.
+requires rejection.
 
-## 2. The A1 feature cache
+**The A1 replay gate, before trial 0:** 800 sessions, 4402 turns, **0**
+full-order mismatches, and cached MRR = live A0 MRR = evaluator MRR =
+`0.20282688492063491`, both deltas **exactly 0**. Three independent leased
+builds at three commits produced the same hash.
 
-| | |
-|---|---|
-| cache sha256 | `41bd811310e5364abc83d7a6b531164f79726dd331e177c76e73824a5ed6f553` |
-| sessions / turns | **800 / 4402** |
-| ledger row | `e8de9a88edd37c0d`, commit `842da7d`, lease valid |
+**The gate earned its keep.** The first build showed cached 0.199835 against the
+evaluator's 0.202827. Revision 4 §0.4 had predicted such a gap would be
+`_rotate`; **`_rotate` fired on 0 turns**. The difference was the evaluator's
+`override_applied` rule, unimplemented in the cached objective: on an
+`intent_override` session a Top-10 hit *before* the override turn scores
+nothing. Wrong in both directions — it credited hits the evaluator discards, and
+a credited hit also stopped the session so the later scoring hit was never
+reached — and it disagreed on **35 of 120** override sessions. Corrected in
+revision 5 §0.8, before any trial.
 
-**The default replay gate, before trial 0:**
+## 3. A1 — frozen, then falsified
 
-| | |
-|---|---|
-| full-order mismatches | **0** |
-| cached default MRR | **0.20282688492063491** |
-| live A0 MRR | **0.20282688492063491** |
-| delta | **0.0 exactly** |
-| evaluator MRR | **0.20282688492063491** |
-| evaluator delta | **0.0 exactly** |
-| rotated turns | 0 |
+189 trials (3 sweeps × 9 weights × 7 grid points, asserted). Deterministic: two
+leased runs at different commits returned the identical vector, MRR and 16
+accepted moves.
 
-Three agreements, not one: the cache re-derives A0's full candidate order from
-its stored features, re-running `_rerank` on each frozen snapshot returns the
-same order, and the cached objective equals the evaluator's own MRR over the
-same 800 sessions.
+| weight | default | frozen | | weight | default | frozen |
+|---|---|---|---|---|---|---|
+| `w_bm25` | 0.3 | **2.4** | | `w_neg` | 2.0 | 2.0 |
+| `w_cat` | 1.0 | **8.0** | | `w_phrase` | 5.0 | **1.25** |
+| `w_exact` | 1.5 | **3.0** | | `w_pop` | 4.0 | **1.0** |
+| `w_field` | 2.0 | **0.0** | | `slot_soft` | 4.0 | **0.0** |
+| `w_idf` | 0.25 | **2.0** | | | | |
 
-**The hash reproduces.** Three independent leased builds at commits `27f3730`,
-`483d514` and `842da7d` all produced `41bd8113…`, so the cache is a function of
-its inputs and not of the run.
+`delta_mrr` **+0.219693** → not a no-op → finalist-eligible.
 
-### What the gate caught, and what that cost
+**The off-policy caveat did not bite.** A1's on-policy `sup-val` gain
+(**+0.228613** MRR) *exceeded* its off-policy cache gain (+0.219693), so the
+cache understated the arm rather than inflating it.
 
-The first build reported cached MRR 0.199835 against the evaluator's 0.202827.
-`notes/44` revision 4 §0.4 had predicted any such gap would be `_rotate`. **It
-was not — `_rotate` fired on 0 turns.** The whole difference was the evaluator's
-`override_applied` rule, which the cached objective did not implement: on an
-`intent_override` session a Top-10 hit **before** the override turn scores
-nothing. It was wrong in both directions — it credited hits the evaluator
-discards, and because a credited hit also stops the session it never reached the
-later hit the evaluator scores — and it disagreed on **35 of 120** `sup-train`
-override sessions. Corrected in revision 5 §0.8, before any trial.
+**The `w_pop` caution did bite, exactly as written before the run.** `w_pop`
+4.0 → 1.0 runs against the public set's strongest single feature (`NOTES.md`:
+`w_pop = 0` costs −0.061 there), because public targets sit at the 99.5th
+popularity percentile as an artefact of Amazon 5-core sampling.
 
-## 3. A1: 189 trials, frozen
+## 4. A2-10 — feasible, invariant, and never spent
 
-| | |
-|---|---|
-| trials | **189** = 3 sweeps × 9 weights × 7 grid points, asserted |
-| baseline MRR | 0.20282688492063491 |
-| best MRR | **0.42251984126984127** |
-| `delta_mrr` | **+0.21969295634920635** |
-| L1 from defaults | 25.1 |
-| Step 0 | **not a no-op — finalist-eligible** |
-
-| weight | default | frozen |
-|---|---|---|
-| `w_bm25` | 0.3 | **2.4** |
-| `w_cat` | 1.0 | **8.0** |
-| `w_exact` | 1.5 | **3.0** |
-| `w_field` | 2.0 | **0.0** |
-| `w_idf` | 0.25 | **2.0** |
-| `w_neg` | 2.0 | 2.0 |
-| `w_phrase` | 5.0 | **1.25** |
-| `w_pop` | 4.0 | **1.0** |
-| `slot_soft` | 4.0 | **0.0** |
-
-**Deterministic.** Two leased runs at different commits returned the identical
-vector, the identical MRR and the identical 16 accepted moves.
-
-**Where the gain lives** — descriptive, computed after freezing:
-
-| scenario | default | frozen | Δ | n |
-|---|---|---|---|---|
-| `boundary` | 0.115446 | 0.301488 | +0.186 | 40 |
-| `browsing` | 0.199479 | 0.403873 | +0.204 | 320 |
-| `buying` | 0.225548 | 0.425094 | +0.200 | 320 |
-| `intent_override` | 0.180291 | 0.505724 | +0.325 | 120 |
-
-Broad, not one slice carrying the rest.
-
-### Read the size of this with the caution it needs
-
-Doubling MRR by reweighting nine existing features is not a modelling
-breakthrough. **The shipped weights were fitted on the PUBLIC set in phases 1–3
-and have never been fitted to the supplementary distribution**, where A0 scores
-0.2028 against 0.8526 on public. A large gain is what fitting a new distribution
-looks like. Two specific cautions, recorded now rather than after `sup-val`:
-
-* **`w_pop` 4.0 → 1.0 runs against the public set's strongest single feature.**
-  `NOTES.md` records `w_pop = 0` costing −0.061 there. Public targets sit at the
-  99.5th popularity percentile because sessions were sampled from Amazon 5-core;
-  if the supplementary corpus lacks that bias, the shipped `w_pop` is partly a
-  public-set artefact — **and these weights may be worse on public.**
-* **The cache is off-policy by construction** (`notes/40` §6). It holds the turns
-  A0 ran, so a trial reranks A0's candidate lists along A0's trajectories, while
-  different weights would change which questions get asked. **Full-Agent
-  `sup-val` is the validation and this number is not it.**
-
-`notes/44` §9 gates on public `clean` MRR Δ ≥ +0.010 with no slice regression,
-and §7b Step 4 keeps A0 as the default if that bar is not cleared. **Nothing
-here moves `score_default`.**
-
-## 4. A2 integrated feasibility — half measured, half blocked
-
-**Measured**, on the real 60 MB catalog, three fresh interpreters per stage
-(row `c9098c3a44ba66d7`):
+**Integrated feasibility on the real corpus** — the 390 `sup-train` queries and
+3900 product texts `lab/r1_fields.py` wrote out, seven fresh processes:
 
 | gate | limit | measured | |
 |---|---|---|---|
-| additional cold load | ≤ +5 s | **+0.42 s** | **PASS** (run spread 0.14 s) |
-| RSS delta | ≤ +400 MB | **+32.4 MB** | **PASS** |
-| field store | — | **18.94 MB** | — |
+| Top-10 p95 | ≤ 25 ms | **15.95 ms** | **PASS** (spread 0.18 ms) |
+| additional cold load | ≤ +5 s | **+0.42 s** | **PASS** |
+| RSS delta | ≤ +400 MB | **+131.6 MB** | **PASS** |
+| offline load | required | yes | **PASS** |
+| deterministic | required | one signature | **PASS** |
+| bad permutations | — | **0** | — |
 
-**Measured**, on the real `sup-train` queries and product texts — 800 sessions,
-4402 turns, written to `lab/r1_texts.jsonl`:
+R0.1 measured 15.23 ms on synthetic fixtures; integration did not move it. The
+field store costs **18.94 MB** and **+0.42 s** of catalog build.
 
-| | |
-|---|---|
-| turns that would invoke the model | **390 of 4402 (8.9%)** |
-| reasons | `ineligible` 4012, `reranked` 390 |
-| `effective_k` | **10 on every turn**, never clamped to 0 or 1 |
-| query chars | p50 43, p95 77, max 112 |
-| **queries at the 200-char cap** | **0** |
-| product text chars | p50 967, p95 2291, max 4960, none empty |
+**Thread sensitivity, diagnostic:** 1 → 16.29 ms, 2 → 11.83, 4 → 11.60, ORT
+default → 15.95. The default is *slower* than 2 or 4 — oversubscription on a
+batch of ten short sequences — and **every setting clears the 25 ms cap**, which
+retires R0.1's recorded risk that a judging host with fewer cores might differ.
 
-Two things this settles. **Activation is concentrated**, which is what `notes/44`
-§4 predicted — had it been broad, §9b required investigating the route
-classifier rather than editing the gate. And **the 200-char query cap never
-binds on real text**, so the query cannot crowd the product out of the 256-token
-window; the product side truncates first, as `only_second` intends.
+**λ, over a cache that is exact rather than approximate:**
 
-### Blocked, and why it is not reported as a pass
+| λ | `sup-train` MRR | Δ |
+|---|---|---|
+| 0.00 | 0.202826885 | +0.000000000 |
+| 0.10 | 0.202826885 | +0.000000000 |
+| 0.25 | 0.206078373 | +0.003251488 |
+| 0.50 | 0.212678075 | +0.009851190 |
+| **1.00** | **0.218575397** | **+0.015748512** |
 
-**`onnxruntime`, `tokenizers`, `numpy` and the pinned TinyBERT artifact are all
-absent from this environment.** `lab/r0/artifacts/` holds only a manifest; the
-`.venv` R0 and R0.1 ran in no longer exists.
+Three checks rather than three arguments. HR@10 0.56125 and MTTC 5.94125 are
+identical at **every** λ. The full Agent re-run at λ = 1.0 returns the cached
+number **to the last digit**. The full Agent re-run at λ = 0 returns
+`0.20282688492063491` — byte-identical to A0, and equal to the independent A1
+cache's baseline, which cross-checks the two caches against each other.
 
-| gate | status |
-|---|---|
-| semantic component Top-10 p95 ≤ 25 ms | **not measured** |
-| offline load | **not measured** |
-| deterministic output | **not measured** |
+**λ = 1.0 sits at the edge of the frozen grid**, so the optimum may lie outside
+it. The grid is five points and extending it now would be searching more than
+was registered.
 
-Under `notes/44` §0.5 a `model_absent` turn is **experiment-invalidating**:
-running the A2 arm now would fall back to A0 on every turn and report A0's
-quality under A2's name. `lab/provenance.py` refuses such a row, so the result
-would not merely be wrong — it would be uncitable. **A2 is therefore not frozen,
-and no λ has been searched.**
+## 5. `sup-val`, and the finalist
 
-Restoring it needs, at the versions R0.1 pinned:
+200 rows, **one leased process per arm** — the catalog cache, an ONNX session
+and a tokenizer are module-level singletons, and a paired comparison is worth
+nothing if the pairing is what broke it.
 
-```
-onnxruntime==1.24.1   numpy==2.5.2   tokenizers==0.22.2
-cross-encoder/ms-marco-TinyBERT-L2-v2 @ 81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc
-  onnx/model_qint8_arm64.onnx (4,518,071 bytes) + tokenizer.json + vocab.txt
-```
+| arm | composite | HR@10 | MRR | MTTC |
+|---|---|---|---|---|
+| A0 | 0.437447 | 0.5550 | 0.210155 | 6.1550 |
+| **A1** | **0.717730** | **0.8600** | **0.438768** | **3.1950** |
+| A2-10 | 0.439921 | 0.5550 | 0.218403 | 6.1550 |
 
-Both are network fetches, and neither has been made.
+| | composite Δ | MRR Δ | HR@10 Δ | MTTC Δ |
+|---|---|---|---|---|
+| A1 | +0.280283 | +0.228613 | +0.305 | −2.96 |
+| A2-10 | +0.002474 | +0.008248 | **0.000** | **0.00** |
 
-## 5. What has not happened
+**A2's HR@10 and MTTC are exactly invariant in the full-Agent run** — the proof
+`notes/44` §1 derived from the evaluator's source survives contact with the real
+pipeline. Its telemetry carries **0 invalidating turns** and **0 λ = 0
+violations**, with the model invoked on 97 of 1142 turns (8.5%, against 8.9% on
+`sup-train`).
 
-* **`sup-val` has not run.** `notes/44` §7 requires **both** arms frozen first,
-  and A2 is not frozen.
-* **The public 200 has not been touched.** It runs once, for one finalist,
-  after `sup-val`.
-* **The sealed holdout has not been touched at all**, including by the split
-  guard, which tests corpus membership by namespace rather than by opening the
-  file.
+Both clear the Step 1 floors *and* the Step 1b qualification. **Step 2 selects
+A1 on higher `sup-val` MRR.**
+
+**A2-10 was therefore never run on the public 200 and never will be for this
+phase.** Whether it would have passed is a question the pre-registration forbids
+asking after the fact (§7b Step 3, §10): one finalist, one run, one number. Its
+`sup-val` result is a supplementary result and is not promoted to a public
+claim.
+
+## 6. The one public confirmation — every gate fails
+
+Run once, for A1 alone. `lab/public.py` enforces that mechanically: it refuses
+to start if any confirmation row already exists, refuses any arm but the
+selected finalist, and refuses to run at all if no arm qualified.
+
+| arm | composite | HR@10 | MRR | MTTC |
+|---|---|---|---|---|
+| A0 | **0.932067** | 0.9950 | 0.852556 | 2.0600 |
+| A1 | 0.887327 | 0.9850 | 0.736089 | 2.3000 |
+
+A0 reproduced the frozen anchor `0.932067` exactly, so the control did not
+drift.
+
+| gate | requirement | measured | |
+|---|---|---|---|
+| `clean` MRR | Δ ≥ **+0.010** | **−0.116467** | **FAIL** |
+| composite | ≥ 0.932067 | 0.887327 | **FAIL** |
+| official slices | no MRR regression | boundary −0.175, buying −0.136, browsing −0.118, intent_override −0.042 | **FAIL** |
+| robustness | paired Δscore ≥ −0.005 | worst −0.130 (`uncooperative`) | **FAIL** |
+| robustness | paired HR@10 drop ≤ 0.01 | worst −0.117 (`uncooperative`) | **FAIL** |
+
+Per scenario: `vague_start` −0.071/−0.055, `uncooperative` −0.130/−0.117,
+`override_genuine` −0.043/−0.008, `override_category` −0.046/−0.010,
+`contradiction` −0.063/−0.040 (Δscore / ΔHR@10).
+
+**`score_default` stays A0.** Not "the best of the two", not "the one that
+regressed least" — A0. A challenger that cannot clear the bar it was measured
+against has not earned the default, and the bar was set before it ran.
+
+## 7. What this phase actually established
+
+1. **The supplementary corpus and the public set want different rankers.** The
+   same nine weights, fitted on one, lose 0.116 MRR on the other — and lose it
+   on *every* slice and *every* robustness scenario. Any future claim fitted on
+   supplementary data has to answer this before it means anything.
+2. **`w_pop` is largely a public-set artefact**, and the arm that discovered
+   that is the arm that failed because of it. Its 4.0 → 1.0 move is the single
+   clearest expression of the distribution gap.
+3. **A2-10 is feasible and provably safe**, at 15.95 ms p95 on real text, with
+   HR@10 and MTTC exactly invariant, byte-exact A0 fallback, and no invalidating
+   turn anywhere. It is also **worth about +0.008 MRR on `sup-val`** — real, and
+   small. It bought a pinned model, an ONNX runtime and a vendored artifact for
+   that.
+4. **Off-policy caching did not inflate A1** — it understated it. The caveat was
+   worth writing and was not what went wrong.
+5. **Every gate that fired, fired before it could be argued with.** The `w_pop`
+   caution, the off-policy caveat and the λ-edge caution were all committed
+   before the runs that tested them.
+
+## 8. What was not done
+
+* **The sealed holdout was not touched at all** — including by the split guard,
+  which tests corpus membership by namespace rather than by opening the file.
+* **A2-10 did not reach public**, and must not now be run there as a
+  consolation.
+* **Nothing was retuned after a public number.** A1's weights, A2's λ and the
+  gates all predate the runs that judged them.

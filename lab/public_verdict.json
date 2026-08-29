@@ -1,0 +1,69 @@
+{
+  "all_gates_pass": false,
+  "arm": "a1",
+  "checks": {
+    "clean MRR delta >= +0.010": {
+      "pass": false,
+      "value": -0.116467
+    },
+    "composite not below 0.932067": {
+      "pass": false,
+      "value": 0.887327
+    },
+    "no official slice MRR regression": {
+      "pass": false,
+      "value": {
+        "boundary": -0.175,
+        "browsing": -0.117812,
+        "buying": -0.135854,
+        "intent_override": -0.041666
+      }
+    },
+    "robustness paired HR@10 drop <= 0.01": {
+      "pass": false,
+      "value": -0.117
+    },
+    "robustness paired score delta >= -0.005": {
+      "pass": false,
+      "value": {
+        "contradiction": {
+          "d_hr10": -0.04,
+          "d_score": -0.063329
+        },
+        "override_category": {
+          "d_hr10": -0.01,
+          "d_score": -0.046126
+        },
+        "override_genuine": {
+          "d_hr10": -0.008,
+          "d_score": -0.042893
+        },
+        "uncooperative": {
+          "d_hr10": -0.117,
+          "d_score": -0.129895
+        },
+        "vague_start": {
+          "d_hr10": -0.055,
+          "d_score": -0.070841
+        }
+      }
+    }
+  },
+  "clean": {
+    "a0": {
+      "hr10": 0.995,
+      "mrr": 0.852556,
+      "mttc": 2.06,
+      "score": 0.932067
+    },
+    "a1": {
+      "hr10": 0.985,
+      "mrr": 0.736089,
+      "mttc": 2.3,
+      "score": 0.887327
+    }
+  },
+  "ok": true,
+  "score_default": "STAYS A0. A challenger that cannot clear the bar it was measured against has not earned the default, and the bar was set before it ran. The result is recorded as failing; it is NOT adjusted and re-run (notes/44 7b Step 4).",
+  "ts": "2026-08-30T02:40:05"
+}
