@@ -1,25 +1,18 @@
 # Phase 7A-R1 pre-registration — quality evaluation of A0, A1 and A2-10
 
-**Revision 2. Design and pre-registration only. Nothing is implemented.** No
-ONNX in the Agent, no A1 cache, no λ trials, no `sup-val`, no public 200, no
-sealed holdout.
+**Revision 3. Design and pre-registration.** R1 implementation begins on this
+document; no further review round is required.
 
-Revision 2 closes seven gaps found in review of `a492f05`. Two were wrong
-rather than merely absent:
+Revision 3 adds two eliminations that revision 2 lacked, and corrects one
+overclaim:
 
-1. **The call site was not pinned.** A2's position relative to `_rotate` was
-   undefined, and running before it would have let the semantic order feed the
-   rotation.
-2. **"Every state key identical" was FALSE.** `state["shown"]` records the
-   order candidates were displayed in, so A2 necessarily changes it. The
-   correct invariant is membership, not bytes.
-3. **Output equality was asserted on sets**, which cannot see a duplicate or a
-   dropped item.
-4. **What is ALLOWED to change** was never stated, only what must not.
-5. **No finalist rule** — the document did not say which arm wins if A1 and A2
-   both pass.
-6. **The negation claim overreached.**
-7. **Telemetry was unfrozen.**
+1. **No-op elimination.** An arm that reduces to A0 is not a passing arm, and
+   must not consume the single public confirmation.
+2. **Challenger qualification.** Revision 2's `sup-val` gates were *floors* —
+   "did not regress badly". Clearing a floor is not evidence of a positive
+   signal, and an arm must show one to compete.
+3. **The multiple-comparisons claim** was quantified when it should not have
+   been.
 
 Both feasibility conclusions stand and neither is edited:
 
@@ -356,12 +349,35 @@ Revision 1 never said which arm wins if **both** A1 and A2 pass. Deciding that
 after seeing quality numbers would be choosing the winner and then calling it a
 rule, so it is fixed here, before any of them exist.
 
+### Step 0 — no-op elimination, BEFORE `sup-val`
+
+An arm that reduces to A0 has not been shown to work; it has been shown to be
+absent. **A no-op is not a pass, and must not consume the single public
+confirmation.**
+
+| arm | no-op condition | consequence |
+|---|---|---|
+| **A2-10** | `sup-train` selects **λ = 0** | recorded as **"semantic signal failed"**. A2 **stops immediately**: no `sup-val` run, **not finalist-eligible** |
+| **A1** | the final nine weights are **exactly identical to the original defaults** | recorded as a **no-op**. A1 **stops immediately**: no `sup-val` run, **not finalist-eligible** |
+
+Checked **after freezing and before any `sup-val` run**, so a no-op costs
+nothing beyond the `sup-train` search that produced it.
+
+λ = 0 is a legitimate `sup-train` outcome (§5) and this is what it *means*
+downstream: legitimate to select, and disqualifying to carry forward. The same
+holds for an A1 weight vector that coordinate descent returns unchanged — the
+search ran, found nothing better than the shipped weights, and that is a
+result, not a candidate.
+
+**If both arms are no-ops:** A0 remains the default, no public confirmation
+runs, and Phase 7A ends as a **negative result**.
+
 ### Step 1 — `sup-val` elimination
 
 Each arm is judged **independently** against `sup-val`, paired against a fresh
 A0 on the same 200 rows:
 
-| gate | requirement |
+| floor | requirement |
 |---|---|
 | composite | **Δ ≥ −0.005** |
 | MRR | **Δ ≥ −0.010** |
@@ -369,9 +385,37 @@ A0 on the same 200 rows:
 
 An arm failing any of these **stops there** and does not reach public.
 
+### Step 1b — challenger qualification
+
+The gates above are **floors**: they say an arm *did not regress badly*. That
+is not evidence of a positive signal, and revision 2 would have let a
+neutral-but-harmless arm consume the public confirmation.
+
+To enter finalist selection an arm must **additionally** show:
+
+| | requirement |
+|---|---|
+| `sup-val` session-level **MRR** | **Δ > 0** — strictly positive |
+| `sup-val` **composite** | **Δ ≥ 0** |
+
+An arm meeting the floors but not these is **not a challenger**. It is
+recorded as *"no severe regression, no demonstrated positive signal"* — which
+is a real and reportable finding, and is not a reason to spend the public run.
+
+**If neither A1 nor A2-10 qualifies:**
+
+* **A0 remains the default;**
+* **no public confirmation is run;**
+* **Phase 7A ends as a negative result.**
+
+That outcome is pre-registered as acceptable. A phase whose honest answer is
+"the challengers did not beat the baseline" has produced a finding, and
+spending the one public run to dress it up as a near-miss would spend the thing
+the run exists to protect.
+
 ### Step 2 — one finalist, by a fixed order
 
-If **both** survive, the finalist is chosen on **`sup-val` alone**:
+If **both qualify**, the finalist is chosen on **`sup-val` alone**:
 
 1. **primary metric: `sup-val` session-level MRR**, higher wins;
 2. **tie-break 1:** `sup-val` composite, higher wins;
@@ -386,9 +430,14 @@ If **both** survive, the finalist is chosen on **`sup-val` alone**:
 over all frozen arms.
 
 The reason is the multiple-comparisons one: confirming *n* arms on the same 200
-samples and reporting the best gives the best of *n* draws, and with the
-per-slice gates each arm faces, testing three arms roughly triples the chance
-that one clears them by luck. **One finalist, one run, one number.**
+samples and reporting the best gives the best of *n* draws. **Testing and
+selecting among multiple correlated arms increases the family-wise
+false-positive risk; the exact factor is not claimed because the arms are
+paired and correlated.** Revision 2 said "roughly triples", which asserts an
+independence the arms do not have — they share A0's candidate generation, the
+same 200 samples and the same session trajectories.
+
+**One finalist, one run, one number.**
 
 The eliminated arm's `sup-val` result is reported as what it is — a
 supplementary result — and is never promoted to a public claim.
@@ -481,5 +530,6 @@ run before both arms are frozen; the public 200 is touched by anything but the
 single confirmation run; the sealed holdout is touched at all; HR@10 or MTTC
 moves for A2-10 and is explained as a trade-off; more than one arm is run on
 the public 200; the eligibility gate is modified after seeing activation
-counts; or `score_default` moves to an arm that did not clear +0.010 on public
-`clean` MRR.
+counts; `score_default` moves to an arm that did not clear +0.010 on public
+`clean` MRR; a no-op arm is carried past Step 0; or an arm that met the floors
+without qualifying is run on the public 200.
