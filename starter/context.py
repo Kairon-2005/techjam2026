@@ -285,6 +285,12 @@ def match_count(tag: str, window_texts: Sequence[str]) -> int:
     return profile_support(tag, window_texts).match_count
 
 
+PROFILE_MODES = ("off", "shadow")
+# No "control". 6C1 measures; it does not act. A mode that could be switched on
+# would be switched on before the evidence existed, which is the whole failure
+# the 6C1/6C2 split was designed around.
+
+
 class ProfileTagCategory(str, Enum):
     CONFLICTING = "conflicting"
     DUPLICATED_SESSION_EVIDENCE = "duplicated_session_evidence"

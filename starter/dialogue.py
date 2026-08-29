@@ -490,6 +490,56 @@ class DialogueMixin:
         else:
             ask = f"To sharpen this, could you tell me {self.ASK_COPY.get(attribute, attribute)}?"
         return lead + ask
+    # ---- Phase 6C1: profile credibility (shadow only) --------------------
+
+    def _profile_snapshot(self, state: dict, turn: int) -> "_context.ProfileSnapshot":
+        """Session facts only. No candidate identity, and no target."""
+        slots = state.get("slots") or ()
+        blocked = self._uncredible(state)
+        return _context.ProfileSnapshot(
+            tags=_context.normalize_profile_tags(
+                (state.get("profile") or {}).get("preference_tags")),
+            stated_values=tuple(sorted({str(s.value).casefold() for s in slots
+                                        if s.polarity > 0 and s.active})),
+            negated_values=tuple(sorted({str(s.value).casefold() for s in slots
+                                         if s.polarity < 0})),
+            blocked_values=tuple(sorted({str(v).casefold() for v in blocked})),
+            turn=int(turn))
+
+    def _profile_decision(self, state: dict, window_asins: list[str], cfg: dict,
+                          turn: int = 0) -> "_context.ProfileDecision":
+        """Classify this turn's profile against the PRE-RERANK window.
+
+        The host resolves asins to text here and hands the pure function texts
+        alone. That is not a convenience: passing texts is what keeps candidate
+        identity -- and therefore the ground-truth target -- structurally
+        unable to reach the decision. D5 joins the target in the lab, after.
+        """
+        texts = [self.cat.text.get(asin, "") for asin in window_asins]
+        return _context.classify_profile(
+            self._profile_snapshot(state, turn),
+            _context.ProfilePolicy(
+                profile_max_coverage=float(cfg["profile_max_coverage"])),
+            texts)
+
+    @staticmethod
+    def _profile_trace(decision: "_context.ProfileDecision", *,
+                       first_recommendation_turn: bool) -> dict:
+        """Bounded telemetry for one turn. Raw counts, never a rate."""
+        row = {
+            "profile_session_verdict": decision.session_verdict.value,
+            "profile_credible_tags": list(decision.credible_tags),
+            "profile_tag_count": len(decision.tags),
+            "profile_window_size": decision.window_size,
+            "profile_first_recommendation_turn": bool(first_recommendation_turn),
+            "profile_tags": [
+                {"tag": v.tag, "category": v.category.value,
+                 "match_count": v.match_count, "coverage": v.coverage}
+                for v in decision.tags],
+        }
+        row.update({f"profile_cat_{k}": v for k, v in decision.counts().items()})
+        return row
+
     # ---- protocol ----------------------------------------------------
     @staticmethod
     def _blank_state(profile: dict | None = None) -> dict:

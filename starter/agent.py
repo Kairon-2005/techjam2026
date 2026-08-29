@@ -244,6 +244,7 @@ DEFAULTS = {
     #   control decision controls; the host applies its partial patch
     # "control" works with trace=False.
     "question_context_mode": "control",
+    "profile_context_mode": "off",
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -440,6 +441,22 @@ class Agent(RetrievalMixin, DialogueMixin):
         if key not in self._warned_modes:
             self._warned_modes.add(key)
             print(f"[agent] warning: unknown question_context_mode {mode!r}; "
+                  f"falling back to 'off'", file=sys.stderr)
+        return "off"
+
+    def _profile_mode(self, cfg: dict) -> str:
+        """Validated mode; an unrecognised value degrades to "off", loudly.
+
+        There is no "control" to degrade TO in 6C1, which is the point: the
+        only way to act on a profile is to add a mode that does not exist yet.
+        """
+        mode = str(cfg.get("profile_context_mode", "off"))
+        if mode in _context.PROFILE_MODES:
+            return mode
+        key = f"profile:{mode}"
+        if key not in self._warned_modes:
+            self._warned_modes.add(key)
+            print(f"[agent] warning: unknown profile_context_mode {mode!r}; "
                   f"falling back to 'off'", file=sys.stderr)
         return "off"
 
@@ -647,12 +664,35 @@ class Agent(RetrievalMixin, DialogueMixin):
         state["starved"] = bool(starved)
         limit = max(top_k, depth) if turn_cfg["rerank"] else top_k
         cands, trace = self._candidates(state, turn_cfg, limit)
+        # THE CALL SITE IS PINNED: after _candidates(), before _rerank().
+        # The window is the pre-rerank candidate population. A post-rerank
+        # snapshot would be circular -- if a later phase ever let the profile
+        # influence _rerank(), coverage would be computed over candidates
+        # promoted partly BECAUSE they matched the tags, so a tag would raise
+        # its own support and "the profile is informative" would be true by
+        # construction. Shadow-only: the decision is recorded and never read.
+        profile_decision = None
+        if self._profile_mode(turn_cfg) == "shadow":
+            profile_decision = self._profile_decision(
+                state, [asin for asin, _ in cands[: int(turn_cfg["pool_depth"])]],
+                turn_cfg, turn)
         if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:
             ranked = [a for a, _ in cands]
         ranked = self._rotate(ranked, state, turn_cfg)
         ordered = ranked[:top_k]
+        if turn_cfg["trace"] and profile_decision is not None:
+            # "First recommendation turn" is derived from the trace rather than
+            # tracked in session state: a shadow feature that wrote a marker
+            # into state would no longer be inert, and the lab needs the flag,
+            # not the agent. It is the first turn whose PRE-RERANK window was
+            # non-empty -- the first turn on which a prior could have acted.
+            prior_turns = state.get("trace_log") or []
+            first = bool(profile_decision.window_size) and not any(
+                (row.get("profile_window_size") or 0) > 0 for row in prior_turns)
+            trace.update(self._profile_trace(profile_decision,
+                                             first_recommendation_turn=first))
         if turn_cfg["trace"]:
             # Recorded AFTER ranking and read by nobody upstream of it. The
             # decision trace has to be able to explain a turn without being
