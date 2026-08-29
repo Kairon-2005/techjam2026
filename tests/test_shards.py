@@ -85,11 +85,36 @@ class ShardTest(unittest.TestCase):
             for label, cfg in SH.SHARDS[name].configs.items():
                 self.assertNotIn("question_context_mode", cfg, f"{name}/{label}")
 
+    def test_the_6c1_shards_never_enable_a_profile_control(self) -> None:
+        # 6C1 measures; it does not act. There is no "control" mode to set, and
+        # a shard that set one would be the first place it could appear.
+        import starter.context as C
+        for name in [n for n in SH.SHARDS if n.startswith("p6c1-")]:
+            for label, cfg in SH.SHARDS[name].configs.items():
+                mode = cfg.get("profile_context_mode")
+                self.assertIn(mode, C.PROFILE_MODES, f"{name}/{label}")
+
+    def test_every_6c1_shard_compares_off_against_shadow(self) -> None:
+        # Off-vs-shadow bit-exactness is a gate, not an afterthought: shadow
+        # that moved a score would invalidate every number in the phase.
+        for name in [n for n in SH.SHARDS if n.startswith("p6c1-")]:
+            self.assertEqual(sorted(SH.SHARDS[name].configs), ["off", "shadow"], name)
+
+    def test_the_6c1_primary_population_is_clean_alone(self) -> None:
+        from lab import profilegates as PG
+        self.assertEqual(SH.SHARDS["p6c1-arm-a"].scenarios, (PG.PRIMARY_SCENARIO,))
+
+    def test_the_6c1_profile_weights_are_never_set(self) -> None:
+        for name in [n for n in SH.SHARDS if n.startswith("p6c1-")]:
+            for label, cfg in SH.SHARDS[name].configs.items():
+                for key in ("w_profile", "w_profile_adaptive"):
+                    self.assertNotIn(key, cfg, f"{name}/{label}: {key}")
+
     def test_supplementary_runs_alone(self) -> None:
         # 1,000 sessions across three arms. Chaining it behind other shards is
         # what starved the p6b2-Q7 run of wall clock and journalled zero rows.
-        shard = SH.SHARDS["p6b2r2-supplementary"]
-        self.assertEqual(shard.scenarios, ("supplementary_dev",))
+        for name in ("p6b2r2-supplementary", "p6c1-supplementary"):
+            self.assertEqual(SH.SHARDS[name].scenarios, ("supplementary_dev",))
 
 
 if __name__ == "__main__":

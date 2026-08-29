@@ -43,6 +43,11 @@ ROBUSTNESS_SCENARIOS = ("vague_start", "uncooperative", "override_genuine",
                         "override_category", "contradiction")
 SEEDS = (7, 8, 9, 10, 11)
 
+# Phase 6C1 runs profile shadow against profile off. `question_context_mode` is
+# left at its adopted default so the arms differ in ONE thing only.
+PROFILE_MODES = {mode: {**_TRACE, "profile_context_mode": mode}
+                 for mode in ("off", "shadow")}
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Shard:
@@ -83,6 +88,22 @@ SHARDS: dict[str, Shard] = {
         configs={"compat_anchor_default": {k: v for k, v in COMPAT_ANCHOR.items()
                                            if k != "question_context_mode"}},
         note="adoption: the 0.928708 anchor with the mode left at its default"),
+    # --- Phase 6C1: profile credibility, shadow only -----------------------
+    # Both modes everywhere, because off-vs-shadow bit-exactness is a gate and
+    # not an afterthought: shadow that moved a score would invalidate every
+    # number in the phase, so every shard that measures also compares.
+    "p6c1-arm-a": Shard(
+        scenarios=("clean",), configs=PROFILE_MODES,
+        note="Arm A: the 200 unique clean samples, the PRIMARY population"),
+    "p6c1-arm-b2": Shard(
+        scenarios=("profile_informative",), configs=PROFILE_MODES,
+        note="Arm B2: oracle instrument check; upper bound, never a claim"),
+    "p6c1-robustness": Shard(
+        scenarios=ROBUSTNESS_SCENARIOS, configs=PROFILE_MODES,
+        note="five stochastic scenarios, reported separately, NEVER pooled into a gate"),
+    "p6c1-supplementary": Shard(
+        scenarios=("supplementary_dev",), configs=PROFILE_MODES,
+        note="supplementary_dev, both modes; 1,000 sessions, run alone"),
     "p6b2r2-robustness": Shard(
         scenarios=ROBUSTNESS_SCENARIOS, configs=MODES,
         note="five stochastic scenarios, three modes, five seeds"),

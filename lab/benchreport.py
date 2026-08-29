@@ -39,6 +39,11 @@ GATES: dict[str, dict] = {
     F.NO_SCAN:       {"max_overhead_ms": 0.10, "max_ratio": 1.10},
     F.CATEGORY_ONLY: {"max_overhead_ms": 0.25, "max_ratio": 1.10},
     F.POOL:          {"max_overhead_ms": 0.50, "max_ratio": 1.10},
+    # Phase 6C1. The control arm is a no-op, so its median sits far below the
+    # micro-path floor and the ratio is diagnostic by the R2.1 rule -- which is
+    # correct here: a ratio against "doing nothing" is unbounded by
+    # construction and says nothing. The absolute budget is what binds.
+    F.PROFILE:       {"max_overhead_ms": 0.10, "max_ratio": 1.10},
 }
 
 # Below this legacy median, the ratio is DIAGNOSTIC ONLY and the requirement is

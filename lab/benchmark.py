@@ -148,7 +148,27 @@ def _states(fixture: F.Fixture, n: int) -> list[dict]:
     mutated list with its neighbour after a dispatch.
     """
     base = {**_blank_state(), **copy.deepcopy(fixture.state)}
+    if fixture.component == F.PROFILE_COMPONENT:
+        base["profile"] = {"preference_tags": list(fixture.profile_tags)}
     return [dict(base) for _ in range(n)]
+
+
+def _profile_arms(agent, fixture, cfg: dict, pool: list[str]):
+    """Control = no decision at all; treatment = the shadow decision.
+
+    Profile shadow is purely ADDITIVE -- "off" takes no decision -- so the
+    control arm genuinely does nothing and the measured delta is the whole cost
+    of the decision rather than a difference between two implementations.
+    """
+    window = pool[: int(cfg["pool_depth"])]
+
+    def control(state):
+        return None
+
+    def treatment(state):
+        return agent._profile_decision(state, window, cfg, 1).session_verdict
+
+    return {"legacy": control, "pure": treatment}
 
 
 def _arms(agent, cfg: dict, pool: list[str]):
@@ -171,6 +191,18 @@ def _arms(agent, cfg: dict, pool: list[str]):
 
 
 def _agree(agent, fixture: F.Fixture, cfg: dict, pool: list[str]) -> dict:
+    if fixture.component == F.PROFILE_COMPONENT:
+        # Nothing to agree ON: the control arm produces no decision, which is
+        # the point of a purely additive shadow path. What IS checked is that
+        # the decision is reachable and deterministic.
+        base = {**_blank_state(), "profile": {"preference_tags": list(fixture.profile_tags)}}
+        window = pool[: int(cfg["pool_depth"])]
+        a = agent._profile_decision(dict(base), window, cfg, 1)
+        b = agent._profile_decision(dict(base), window, cfg, 1)
+        return {"attribute_agrees": True, "state_agrees": True,
+                "selection_mode": "n/a", "branch_as_registered": a == b,
+                "attribute": a.session_verdict.value}
+
     """Do the two arms produce the same attribute and the same state?
 
     Checked once per fixture per repetition, before timing. Comparing the speed
@@ -230,6 +262,11 @@ def child(rep: int, warmup: int, measured: int, catalog: str) -> dict:
         pool = catalog_pool[:fixture.pool_size]
         prepared.append((fixture, cfg, pool))
 
+    def arms_for(fixture, cfg, pool):
+        if fixture.component == F.PROFILE_COMPONENT:
+            return _profile_arms(agent, fixture, cfg, pool)
+        return _arms(agent, cfg, pool)
+
     # Calibrate, then publish a projected duration BEFORE doing the work, so
     # the parent's watchdog is set from what this fixture set actually costs on
     # this machine rather than from a constant that would be wrong the first
@@ -237,7 +274,7 @@ def child(rep: int, warmup: int, measured: int, catalog: str) -> dict:
     projected = load_s
     for fixture, cfg, pool in prepared:
         agent.cfg = cfg
-        arms = _arms(agent, cfg, pool)
+        arms = arms_for(fixture, cfg, pool)
         for name in order:
             sample = _time_arm(arms[name], _states(fixture, CALIBRATION_DISPATCHES))
             projected += sample["wall_ms"] / 1000 * (warmup + measured)
@@ -248,7 +285,7 @@ def child(rep: int, warmup: int, measured: int, catalog: str) -> dict:
     fixtures: dict[str, dict] = {}
     for fixture, cfg, pool in prepared:
         agent.cfg = cfg
-        arms = _arms(agent, cfg, pool)
+        arms = arms_for(fixture, cfg, pool)
         agreement = _agree(agent, fixture, cfg, pool)
         timings = {}
         for name in order:

@@ -25,6 +25,18 @@ import json
 NO_SCAN = "no_scan"                # zero candidate scans
 CATEGORY_ONLY = "category_only"    # one bounded pass over cat.cats
 POOL = "pool"                      # category summary + per-facet cat.text passes
+# Phase 6C1. A bounded <= 8 x 30 = 240 shared-kernel match check. Its control
+# arm does nothing at all, because profile shadow is purely ADDITIVE -- "off"
+# takes no decision -- so the measured quantity is the decision's whole cost
+# rather than a difference between two implementations of it.
+PROFILE = "profile"
+
+# The row schema names the two arms "legacy" and "pure" for historical reasons.
+# They are really CONTROL and TREATMENT: for question fixtures that is the
+# legacy controller against the staged one; for profile fixtures it is a no-op
+# against the shadow decision.
+QUESTION_COMPONENT = "question"
+PROFILE_COMPONENT = "profile"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -39,6 +51,9 @@ class Fixture:
     cfg: dict                      # config patch over Agent DEFAULTS
     state: dict                    # session-state patch over the blank state
     pool_size: int                 # candidates handed to the controller
+    component: str = QUESTION_COMPONENT
+    # Profile fixtures only: the raw preference_tags handed to the decision.
+    profile_tags: tuple = ()
 
 
 # `asked=["other","other"]` is what gets past the first-two-`other` guard under
@@ -86,11 +101,37 @@ FIXTURES: tuple[Fixture, ...] = (
             dict(_PAST_GUARD), 1),
 )
 
+# --- Phase 6C1 profile fixtures ------------------------------------------
+# The control arm is a no-op, so these measure the decision's absolute cost.
+# `_GENERIC` and `_MIXED` use words that do and do not occur in apparel text,
+# so the fixtures exercise the generic and unsupported branches rather than
+# only the cheap empty one. `_MAXIMAL` is the bound: eight tags at the
+# MAX_PROFILE_TAG_CHARS limit, which is the worst case the decision can face.
+_MAXIMAL = tuple(f"{'z' * 39}{i}" for i in range(8))
+
+PROFILE_FIXTURES: tuple[Fixture, ...] = (
+    Fixture("profile_no_tags", PROFILE, "n/a", {}, {}, 30,
+            component=PROFILE_COMPONENT, profile_tags=()),
+    Fixture("profile_generic", PROFILE, "n/a", {}, {}, 30,
+            component=PROFILE_COMPONENT,
+            profile_tags=("cotton", "black", "dress")),
+    Fixture("profile_unsupported", PROFILE, "n/a", {}, {}, 30,
+            component=PROFILE_COMPONENT,
+            profile_tags=("titanium", "hydrofoil", "quartzite")),
+    Fixture("profile_official_shape", PROFILE, "n/a", {}, {}, 30,
+            component=PROFILE_COMPONENT,
+            profile_tags=("fit", "material", "comfort", "style")),
+    Fixture("profile_maximal", PROFILE, "n/a", {}, {}, 30,
+            component=PROFILE_COMPONENT, profile_tags=_MAXIMAL),
+)
+
+FIXTURES = FIXTURES + PROFILE_FIXTURES
+
 BY_NAME = {f.name: f for f in FIXTURES}
 
 # Branch classes MUST be covered; a run that silently dropped every no-scan
 # fixture would report a weighted aggregate that has no no-scan term in it.
-REQUIRED_CLASSES = (NO_SCAN, CATEGORY_ONLY, POOL)
+REQUIRED_CLASSES = (NO_SCAN, CATEGORY_ONLY, POOL, PROFILE)
 
 
 def spec() -> list[dict]:

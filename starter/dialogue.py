@@ -524,8 +524,15 @@ class DialogueMixin:
 
     @staticmethod
     def _profile_trace(decision: "_context.ProfileDecision", *,
-                       first_recommendation_turn: bool) -> dict:
-        """Bounded telemetry for one turn. Raw counts, never a rate."""
+                       first_recommendation_turn: bool,
+                       window_asins: list[str] | None = None) -> dict:
+        """Bounded telemetry for one turn. Raw counts, never a rate.
+
+        The window asins are recorded ONLY on the first recommendation turn.
+        The lab needs them to join the target and compute D5's margin, and D5
+        is a first-turn gate -- recording them every turn would carry 30 asins
+        per turn per session for rows no gate reads.
+        """
         row = {
             "profile_session_verdict": decision.session_verdict.value,
             "profile_credible_tags": list(decision.credible_tags),
@@ -538,6 +545,8 @@ class DialogueMixin:
                 for v in decision.tags],
         }
         row.update({f"profile_cat_{k}": v for k, v in decision.counts().items()})
+        if first_recommendation_turn:
+            row["profile_window_asins"] = list(window_asins or ())
         return row
 
     # ---- protocol ----------------------------------------------------

@@ -32,6 +32,7 @@ from typing import Callable
 
 import evaluator.local_evaluator as E
 import starter.agent as A
+import starter.context as _C
 
 CATALOG, DATASET = "data/catalog.jsonl", "data/public_set.jsonl"
 SUPPLEMENTARY_DEV = "data/supplementary_dev.jsonl"
@@ -225,6 +226,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
     if non:
         out["unstarved_latency_p95"] = _percentile(
             [t.get("retrieval_ms", 0.0) for t in non], 0.95)
+    out.update(_profile_telemetry(agent, truth, session_to_sample or {}, _PRODS))
     out.update(_question_telemetry(agent))
     out.update(_shadow_telemetry(turns))
     out.update(_retrieval_decision_telemetry(turns))
@@ -366,6 +368,90 @@ def _shadow_telemetry(turns: list) -> dict:
         "snapshot_bytes_p95": _percentile(sizes, 0.95),
         "snapshot_fields_max": max(fields) if fields else 0,
     }
+
+
+def _profile_telemetry(agent, truth: dict, session_to_sample: dict,
+                       prods: dict) -> dict:
+    """Phase 6C1 first-turn profile aggregates, and D5's target join.
+
+    The TARGET IS JOINED HERE, in the harness, after the ProfileDecision
+    already exists -- the same rule recall follows a few lines above, and for
+    the same reason: the agent must never see the ground-truth asin. If the
+    target could reach the decision, the phase would be measuring a leak.
+
+    One row per SESSION, from the first recommendation turn only. Later turns
+    are evolution telemetry and are never a gate input.
+
+    Everything returned is a scalar, because lab/record.py averages telemetry
+    across seeds and a per-session structure would not survive it. Gates are
+    evaluated on `clean`, which is deterministic and runs one seed, so its
+    scalars are exact rather than averaged.
+    """
+    from lab import profilegates as PG
+
+    sessions = margins = 0
+    with_credible = eligible = wins = 0
+    excluded_target_absent = excluded_no_supported_tag = 0
+    categories: dict[str, int] = {c.value: 0 for c in _C.PROFILE_CATEGORY_PRECEDENCE}
+    credible_sets: list[frozenset] = []
+    margin_values: list[float] = []
+
+    for sid, state in getattr(agent, "_sessions", {}).items():
+        row = next((tr for tr in (state.get("trace_log") or [])
+                    if tr.get("profile_first_recommendation_turn")), None)
+        if row is None:
+            continue
+        sessions += 1
+        for tag in row.get("profile_tags") or ():
+            categories[tag["category"]] = categories.get(tag["category"], 0) + 1
+        credible = tuple(row.get("profile_credible_tags") or ())
+        if credible:
+            with_credible += 1
+            credible_sets.append(frozenset(credible))
+
+        # --- D5 eligibility, with the two exclusion reasons kept apart ------
+        target = truth.get(sid)
+        window = list(row.get("profile_window_asins") or ())
+        if target is None or target not in window:
+            # Says something about RETRIEVAL, not about profiles. Pooling the
+            # two would let a retrieval failure read as a profile failure.
+            excluded_target_absent += 1
+            continue
+        if not credible:
+            excluded_no_supported_tag += 1
+            continue
+        eligible += 1
+        texts = {a: _blob(prods.get(a) or {}) for a in window}
+        margin = PG.session_margin(credible, texts.get(target, ""),
+                                   [v for a, v in texts.items() if a != target])
+        if margin is None:
+            continue
+        margins += 1
+        margin_values.append(margin)
+        if margin > 0:
+            wins += 1
+
+    out = {"profile_sessions": sessions,
+           "profile_sessions_with_credible": with_credible,
+           "profile_eligible_sessions": eligible,
+           "profile_excluded_target_absent": excluded_target_absent,
+           "profile_excluded_no_supported_tag": excluded_no_supported_tag,
+           "profile_d5_margins": margins, "profile_d5_wins": wins}
+    out.update({f"profile_cat_{k}": v for k, v in categories.items()})
+    if margin_values:
+        out["profile_d5_median_margin"] = round(statistics.median(margin_values), 6)
+        out["profile_d5_p_value"] = PG.binomial_p_value(wins, margins)
+    if len(credible_sets) > 1:
+        pairs = [len(a & b) / len(a | b) if (a | b) else 0.0
+                 for i, a in enumerate(credible_sets)
+                 for b in credible_sets[i + 1:]]
+        out["profile_d2_median_jaccard"] = round(statistics.median(pairs), 6)
+    return out
+
+
+def _blob(product: dict) -> str:
+    return " ".join(str(product.get(f) or "")
+                    for f in ("title", "features", "details", "description"))
 
 
 def _question_telemetry(agent) -> dict:

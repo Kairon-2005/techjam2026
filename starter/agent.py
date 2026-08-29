@@ -671,11 +671,12 @@ class Agent(RetrievalMixin, DialogueMixin):
         # promoted partly BECAUSE they matched the tags, so a tag would raise
         # its own support and "the profile is informative" would be true by
         # construction. Shadow-only: the decision is recorded and never read.
-        profile_decision = None
+        profile_decision, profile_window = None, []
         if self._profile_mode(turn_cfg) == "shadow":
+            profile_window = [asin for asin, _ in
+                              cands[: int(turn_cfg["pool_depth"])]]
             profile_decision = self._profile_decision(
-                state, [asin for asin, _ in cands[: int(turn_cfg["pool_depth"])]],
-                turn_cfg, turn)
+                state, profile_window, turn_cfg, turn)
         if turn_cfg["rerank"] and cands:
             ranked = self._rerank(cands, state)
         else:
@@ -692,7 +693,8 @@ class Agent(RetrievalMixin, DialogueMixin):
             first = bool(profile_decision.window_size) and not any(
                 (row.get("profile_window_size") or 0) > 0 for row in prior_turns)
             trace.update(self._profile_trace(profile_decision,
-                                             first_recommendation_turn=first))
+                                             first_recommendation_turn=first,
+                                             window_asins=profile_window))
         if turn_cfg["trace"]:
             # Recorded AFTER ranking and read by nobody upstream of it. The
             # decision trace has to be able to explain a turn without being
