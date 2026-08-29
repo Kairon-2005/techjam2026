@@ -36,7 +36,8 @@ METRICS = ("score", "hr10", "mrr", "mttc")
 
 
 RESULT_LOGS = {"lab/results.jsonl", "lab/capability.jsonl", "lab/experiments.jsonl",
-               "lab/tuning_runs.jsonl", "lab/benchmarks.jsonl"}
+               "lab/tuning_runs.jsonl", "lab/benchmarks.jsonl",
+               "lab/a1builds.jsonl", "lab/a1cache.meta.json"}
 
 
 def _sh(*args: str) -> str:

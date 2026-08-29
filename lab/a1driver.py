@@ -37,13 +37,18 @@ from pathlib import Path
 import starter.agent as A
 from evaluator import local_evaluator as E
 from lab import a1cache as CACHE
-from lab import a1search as S
+from lab import lease as L
 from lab import record as R
 from lab import split as SPLIT
 
 CATALOG = Path("data/catalog.jsonl")
-CACHE_PATH = Path("lab/a1cache.jsonl")
-MANIFEST_PATH = Path("lab/a1cache.meta.json")
+CACHE_NAME = "a1cache.jsonl"
+MANIFEST_NAME = "a1cache.meta.json"
+LAB = Path("lab")
+# The build ledger, separate from lab/results.jsonl: a cache manifest is not a
+# score row, and mixing the two would put a row with no score into every table
+# that reads the score ledger.
+BUILD_LOG = "lab/a1builds.jsonl"
 
 
 def run_session(agent, sample: str | dict, capture: CACHE.Capture,
@@ -213,8 +218,14 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="lab.a1driver")
     ap.add_argument("--limit", type=int, default=0,
                     help="smoke mode: first N sup-train rows, NEVER a build")
-    ap.add_argument("--out", default="", help="write cache/manifest elsewhere")
+    ap.add_argument("--out", default="",
+                    help="directory for the cache and manifest (default lab/)")
+    ap.add_argument("--leased", action="store_true",
+                    help="acquire the experiment lease and run the build inside "
+                         "an isolated worktree, in its own interpreter")
     args = ap.parse_args(argv)
+    if args.leased:
+        return leased(args.limit)
 
     # HARD ASSERTIONS FIRST. Row count, per-scenario counts, both id hashes,
     # overlap, union, corpus namespace, and the superseded 806/194 tripwire.
@@ -225,9 +236,8 @@ def main(argv=None) -> int:
     print(f"sup-train {len(train)} rows, hash {split.train_hash}")
     print(f"sup-val   {len(split.val)} rows, hash {split.val_hash}")
 
-    cache_path = Path(args.out or CACHE_PATH.parent) / CACHE_PATH.name \
-        if args.out else CACHE_PATH
-    manifest_path = Path(args.out) / MANIFEST_PATH.name if args.out else MANIFEST_PATH
+    out = Path(args.out) if args.out else LAB
+    cache_path, manifest_path = out / CACHE_NAME, out / MANIFEST_NAME
     if args.limit:
         train = train[: args.limit]
         print(f"SMOKE MODE: {len(train)} rows. This is not a cache build.")
@@ -237,8 +247,39 @@ def main(argv=None) -> int:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                              encoding="utf-8")
+    # Under a lease the manifest is JOURNALLED, not written to the ledger:
+    # provenance is not established until the lease has verified, after the
+    # run, that nothing moved. Without a lease nothing is journalled, which is
+    # what makes a smoke run visibly not a build.
+    journal = L.journal_path()
+    if journal is not None:
+        with journal.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"schema_version": 2, "tag": "p7a-r1-a1cache",
+                                 "scenario": "supplementary_dev",
+                                 "config": {}, "seeds": [],
+                                 **manifest}) + "\n")
     report(manifest)
     return 0 if manifest["ok"] else 1
+
+
+def leased(limit: int = 0) -> int:
+    """Build the cache under the experiment lease, in an isolated worktree.
+
+    The cache and its manifest are written to the ORIGIN's lab/, not to the
+    worktree: the worktree is deleted when the lease exits, and a 345 MB
+    artefact that vanishes with its own provenance is not an artefact.
+    """
+    origin = Path.cwd().resolve()
+    argv = ["--out", str(origin / LAB)]
+    if limit:
+        argv += ["--limit", str(int(limit))]
+    script = ("import sys\n"
+              "from lab import a1driver as D\n"
+              f"sys.exit(D.main({argv!r}))\n")
+    with L.lease("p7a-r1-a1cache", log=BUILD_LOG) as held:
+        held.run(script, expected_cells=1)
+    print(f"lease {held.verdict} {held.broke}")
+    return 0 if held.verdict == "valid" else 1
 
 
 if __name__ == "__main__":
