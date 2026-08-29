@@ -28,6 +28,7 @@ optimises can be traced to the inputs that produced it.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import statistics
 import sys
@@ -354,10 +355,15 @@ def main(argv=None) -> int:
     # what makes a smoke run visibly not a build.
     journal = L.journal_path()
     if journal is not None:
+        # `ts` is part of lab/provenance.py's row_key. Without it every build
+        # of this tag hashes to the SAME identity, so an invalidation aimed at
+        # one superseded build would cover every build there has ever been --
+        # and a ledger whose rows cannot be told apart cannot be corrected.
         with journal.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"schema_version": 2, "tag": "p7a-r1-a1cache",
                                  "scenario": "supplementary_dev",
                                  "config": {}, "seeds": [],
+                                 "ts": dt.datetime.now().isoformat(timespec="seconds"),
                                  **manifest}) + "\n")
     report(manifest)
     return 0 if manifest["ok"] else 1

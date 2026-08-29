@@ -11,6 +11,7 @@ lease exists to prevent, committed by the tool built to record that race.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from lab import provenance as P
 
@@ -19,14 +20,20 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", action="append", default=[])
     ap.add_argument("--scenario", action="append", default=[])
+    ap.add_argument("--ts", action="append", default=[],
+                    help="restrict to rows with these exact timestamps")
+    ap.add_argument("--log", default=str(P.RESULTS),
+                    help="which ledger to read; the invalidation record itself "
+                         "always goes to lab/invalidations.jsonl")
     ap.add_argument("--reason", required=True)
     ap.add_argument("--note", default="")
     args = ap.parse_args()
     if not args.tag and not args.scenario:
         ap.error("give at least one --tag or --scenario")
-    rows = [r for r in P.load()
+    rows = [r for r in P.load(Path(args.log))
             if (not args.tag or r.get("tag") in args.tag)
-            and (not args.scenario or r.get("scenario") in args.scenario)]
+            and (not args.scenario or r.get("scenario") in args.scenario)
+            and (not args.ts or r.get("ts") in args.ts)]
     if not rows:
         print("no rows matched; nothing appended")
         return

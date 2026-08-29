@@ -83,6 +83,34 @@ class SplitGuardTest(unittest.TestCase):
         self.assertFalse((Path(self._tmp.name) / "a1cache.meta.json").exists())
 
 
+class JournalRowTest(unittest.TestCase):
+    """The build row must be distinguishable from every other build row.
+
+    lab/provenance.py's row_key is (tag, scenario, config, ts). The first three
+    A1 builds were journalled without a `ts`, so all three hashed to ONE
+    identity -- and an invalidation aimed at a superseded build would have
+    covered every build there has ever been. A ledger whose rows cannot be told
+    apart cannot be corrected, which is the whole point of an append-only one.
+    """
+
+    def test_the_driver_stamps_a_timestamp_on_the_journal_row(self) -> None:
+        source = Path("lab/a1driver.py").read_text(encoding="utf-8")
+        journal = source.split("journal = L.journal_path()", 1)[1].split("report(", 1)[0]
+        self.assertIn('"ts"', journal,
+                      "the journal row carries no ts, so row_key cannot "
+                      "distinguish two builds of the same tag")
+
+    def test_row_key_separates_two_builds_of_the_same_tag(self) -> None:
+        from lab import provenance as P
+        base = {"tag": "p7a-r1-a1cache", "scenario": "supplementary_dev",
+                "config": {}}
+        first = {**base, "ts": "2026-08-30T01:00:00"}
+        second = {**base, "ts": "2026-08-30T02:00:00"}
+        self.assertNotEqual(P.row_key(first), P.row_key(second))
+        self.assertEqual(P.row_key({**base, "ts": None}),
+                         P.row_key({**base, "ts": None}))
+
+
 class FirstScoringTurnTest(unittest.TestCase):
     """The evaluator's `override_applied` rule, read off the sample."""
 
