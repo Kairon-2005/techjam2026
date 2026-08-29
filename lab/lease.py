@@ -113,7 +113,8 @@ LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl",
 # must be committed before the next experiment, because a changed artefact is a
 # changed input.
 LEDGER_PREFIXES = ("lab/results", "lab/invalidations", "lab/benchmarks",
-                   "lab/a1builds", "lab/a2builds", "lab/r1builds")
+                   "lab/a1builds", "lab/a2builds", "lab/r1builds",
+                   "lab/supval")
 JOURNAL_ENV = "LAB_JOURNAL"
 
 
