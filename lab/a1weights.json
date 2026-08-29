@@ -1,0 +1,224 @@
+{
+  "accepted_moves": [
+    {
+      "from": 0.3,
+      "mrr_from": 0.20282688492063491,
+      "mrr_to": 0.21103819444444444,
+      "sweep": 1,
+      "to": 0.6,
+      "trial": 5,
+      "weight": "w_bm25"
+    },
+    {
+      "from": 0.6,
+      "mrr_from": 0.21103819444444444,
+      "mrr_to": 0.2540868055555556,
+      "sweep": 1,
+      "to": 1.2,
+      "trial": 6,
+      "weight": "w_bm25"
+    },
+    {
+      "from": 1.2,
+      "mrr_from": 0.2540868055555556,
+      "mrr_to": 0.29212748015873014,
+      "sweep": 1,
+      "to": 2.4,
+      "trial": 7,
+      "weight": "w_bm25"
+    },
+    {
+      "from": 1.0,
+      "mrr_from": 0.29212748015873014,
+      "mrr_to": 0.33186706349206346,
+      "sweep": 1,
+      "to": 2.0,
+      "trial": 12,
+      "weight": "w_cat"
+    },
+    {
+      "from": 2.0,
+      "mrr_from": 0.33186706349206346,
+      "mrr_to": 0.35752926587301587,
+      "sweep": 1,
+      "to": 4.0,
+      "trial": 13,
+      "weight": "w_cat"
+    },
+    {
+      "from": 4.0,
+      "mrr_from": 0.35752926587301587,
+      "mrr_to": 0.3786607142857143,
+      "sweep": 1,
+      "to": 8.0,
+      "trial": 14,
+      "weight": "w_cat"
+    },
+    {
+      "from": 1.5,
+      "mrr_from": 0.3786607142857143,
+      "mrr_to": 0.37866815476190474,
+      "sweep": 1,
+      "to": 0.0,
+      "trial": 15,
+      "weight": "w_exact"
+    },
+    {
+      "from": 0.0,
+      "mrr_from": 0.37866815476190474,
+      "mrr_to": 0.37914434523809526,
+      "sweep": 1,
+      "to": 3.0,
+      "trial": 19,
+      "weight": "w_exact"
+    },
+    {
+      "from": 2.0,
+      "mrr_from": 0.37914434523809526,
+      "mrr_to": 0.37969146825396827,
+      "sweep": 1,
+      "to": 0.0,
+      "trial": 22,
+      "weight": "w_field"
+    },
+    {
+      "from": 0.25,
+      "mrr_from": 0.37969146825396827,
+      "mrr_to": 0.3812534722222222,
+      "sweep": 1,
+      "to": 0.5,
+      "trial": 33,
+      "weight": "w_idf"
+    },
+    {
+      "from": 0.5,
+      "mrr_from": 0.3812534722222222,
+      "mrr_to": 0.385624007936508,
+      "sweep": 1,
+      "to": 2.0,
+      "trial": 35,
+      "weight": "w_idf"
+    },
+    {
+      "from": 5.0,
+      "mrr_from": 0.385624007936508,
+      "mrr_to": 0.38622867063492067,
+      "sweep": 1,
+      "to": 2.5,
+      "trial": 45,
+      "weight": "w_phrase"
+    },
+    {
+      "from": 4.0,
+      "mrr_from": 0.38622867063492067,
+      "mrr_to": 0.40416170634920634,
+      "sweep": 1,
+      "to": 0.0,
+      "trial": 50,
+      "weight": "w_pop"
+    },
+    {
+      "from": 0.0,
+      "mrr_from": 0.40416170634920634,
+      "mrr_to": 0.41111309523809525,
+      "sweep": 1,
+      "to": 1.0,
+      "trial": 51,
+      "weight": "w_pop"
+    },
+    {
+      "from": 4.0,
+      "mrr_from": 0.41111309523809525,
+      "mrr_to": 0.42233085317460317,
+      "sweep": 1,
+      "to": 0.0,
+      "trial": 57,
+      "weight": "slot_soft"
+    },
+    {
+      "from": 2.5,
+      "mrr_from": 0.42233085317460317,
+      "mrr_to": 0.42251984126984127,
+      "sweep": 2,
+      "to": 1.25,
+      "trial": 107,
+      "weight": "w_phrase"
+    }
+  ],
+  "agent_commit": "791511a",
+  "agent_in_worktree": true,
+  "agent_sha256": "0ad7f7f9c9a08235",
+  "agent_source": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-lease-kr9ts6z1/tree/starter/agent.py",
+  "arm": "A1",
+  "baseline_mrr": 0.20282688492063491,
+  "best_mrr": 0.42251984126984127,
+  "cache_build_ts": null,
+  "cache_sha256": "41bd811310e5364abc83d7a6b531164f79726dd331e177c76e73824a5ed6f553",
+  "catalog_sha256": "da979b05a68af864",
+  "code_dirty": false,
+  "code_dirty_files": [],
+  "config": {},
+  "dataset": "data/supplementary_dev.jsonl",
+  "dataset_sha256": "6cde11cca2612b77",
+  "default_weights": {
+    "slot_soft": 4.0,
+    "w_bm25": 0.3,
+    "w_cat": 1.0,
+    "w_exact": 1.5,
+    "w_field": 2.0,
+    "w_idf": 0.25,
+    "w_neg": 2.0,
+    "w_phrase": 5.0,
+    "w_pop": 4.0
+  },
+  "delta_mrr": 0.21969295634920635,
+  "harness_commit": "791511a",
+  "l1_distance_from_defaults": 25.1,
+  "multipliers": [
+    0.0,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0
+  ],
+  "no_op": false,
+  "phase": "7A-R1",
+  "result_log_dirty": [],
+  "scenario": "supplementary_dev",
+  "scenario_sha256": "4ee268fe835c3a10",
+  "schema_version": 2,
+  "searched": [
+    "w_bm25",
+    "w_cat",
+    "w_exact",
+    "w_field",
+    "w_idf",
+    "w_neg",
+    "w_phrase",
+    "w_pop",
+    "slot_soft"
+  ],
+  "seconds": 112.1,
+  "seeds": [],
+  "split_train_hash": "48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d",
+  "step": "sup-train coordinate search",
+  "sweeps": 3,
+  "tag": "p7a-r1-a1trials",
+  "trials": 189,
+  "ts": "2026-08-30T01:57:18",
+  "verdict": "CHALLENGER: A1 is frozen at these weights and proceeds to sup-val, where it must still clear the floors and show a strictly positive MRR delta to qualify.",
+  "weights": {
+    "slot_soft": 0.0,
+    "w_bm25": 2.4,
+    "w_cat": 8.0,
+    "w_exact": 3.0,
+    "w_field": 0.0,
+    "w_idf": 2.0,
+    "w_neg": 2.0,
+    "w_phrase": 1.25,
+    "w_pop": 1.0
+  },
+  "weights_unchanged_diagnostic": false
+}

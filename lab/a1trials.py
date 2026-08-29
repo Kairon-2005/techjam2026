@@ -84,6 +84,23 @@ def run(sessions, sweeps: int = S.SWEEPS) -> dict:
     return result
 
 
+def by_scenario(sessions, weights) -> dict:
+    """Cached MRR per `scenario_type`. DESCRIPTIVE, and computed AFTER freezing.
+
+    The weights are already fixed by the pre-registered rule before this runs,
+    so this describes the frozen vector rather than helping choose it. notes/44
+    section 9b's prohibition is on letting telemetry move a gate; it is not a
+    prohibition on knowing where a number came from. A gain that turned out to
+    live entirely in one scenario would be a thing to report, not a thing to
+    tune away.
+    """
+    groups: dict[str, list] = {}
+    for session in sessions:
+        groups.setdefault(str(session.get("scenario") or "?"), []).append(session)
+    return {name: round(S.cached_mrr(rows, weights), 6)
+            for name, rows in sorted(groups.items())}
+
+
 def verdict(result: dict, meta: dict) -> dict:
     """Step 0 of notes/44 section 7b, applied and recorded.
 
@@ -141,6 +158,13 @@ def report(row: dict) -> None:
                   f"MRR {move['mrr_from']:.6f} -> {move['mrr_to']:.6f}")
     else:
         print("\n  accepted moves: none -- no grid point beat the shipped vector")
+    if row.get("mrr_by_scenario_delta"):
+        print("\n  cached MRR by scenario (descriptive, after freezing):")
+        for name in sorted(row["mrr_by_scenario_default"]):
+            print(f"    {name:<18} {row['mrr_by_scenario_default'][name]:>9.6f} -> "
+                  f"{row['mrr_by_scenario_frozen'][name]:>9.6f}   "
+                  f"{row['mrr_by_scenario_delta'][name]:+.6f}   "
+                  f"n={row['sessions_by_scenario'].get(name)}")
     print(f"\n  {row['verdict']}")
 
 
@@ -167,7 +191,18 @@ def main(argv=None) -> int:
     sessions = S.read_cache(CACHE)
     print(f"loaded {len(sessions)} sessions in {time.perf_counter() - t0:.1f}s",
           flush=True)
-    row = verdict(run(sessions), meta)
+    result = run(sessions)
+    row = verdict(result, meta)
+    row["sessions_by_scenario"] = {
+        name: len(rows) for name, rows in sorted(
+            {s.get("scenario"): [x for x in sessions if x.get("scenario") == s.get("scenario")]
+             for s in sessions}.items())}
+    row["mrr_by_scenario_default"] = by_scenario(sessions, S.default_weights())
+    row["mrr_by_scenario_frozen"] = by_scenario(sessions, result["weights"])
+    row["mrr_by_scenario_delta"] = {
+        name: round(row["mrr_by_scenario_frozen"][name]
+                    - row["mrr_by_scenario_default"][name], 6)
+        for name in row["mrr_by_scenario_default"]}
 
     from lab import record as R
     row.update(R.git_state(dataset="data/supplementary_dev.jsonl"))
