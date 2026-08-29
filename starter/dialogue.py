@@ -181,9 +181,10 @@ class DialogueMixin:
         here is an adapter, kept because tests and older call sites name it.
 
         There is deliberately ONE copy of the rule. The measurement commit
-        held two side by side to compare them across 8,483 turns; keeping them
-        after that would have been the same defect this project has already
-        paid for twice -- the void suppress_abandoned switch and the inert
+        held two side by side to compare them across 18,597 raw
+        turn-comparisons (8,483.4 seed-normalised); keeping them after that
+        would have been the same defect this project has already paid for
+        twice -- the void suppress_abandoned switch and the inert
         route_overrides patch.
         """
         snapshot = _context.PreRetrievalSnapshot(
@@ -362,15 +363,16 @@ class DialogueMixin:
         is an adapter, kept because tests and older call sites name it.
 
         There is deliberately ONE copy of the rule. The measurement commit held
-        two side by side to compare them across 8,483 turns; keeping them after
-        that would have been the same defect this project has already paid for
-        three times -- the void suppress_abandoned switch, the inert
+        two side by side to compare them across 18,597 raw turn-comparisons
+        (8,483.4 seed-normalised); keeping them after that would have been the
+        same defect this project has already paid for three times -- the void suppress_abandoned switch, the inert
         route_overrides patch, and _starved's own duplicate before 6B1.
 
         BECAUSE this delegates, `question_context_mode="shadow"` now compares a
         value with itself. Its agreement telemetry is diagnostic from here on
         and is not evidence of anything. The valid evidence is the pre-adoption
-        8,483-turn comparison at tag p6b2r2-shadow.
+        pre-adoption comparison at tag p6b2r2-shadow: 18,597 raw
+        turn-comparisons, 8,483.4 seed-normalised, zero disagreements.
         """
         cfg = self._route_cfg(state)
         decision = self._decide_question(state, pool or [], cfg)

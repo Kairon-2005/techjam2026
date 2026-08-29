@@ -175,7 +175,8 @@ class ScanTopologyTest(unittest.TestCase):
     """The pre-registered scan topology, asserted rather than described.
 
     Phase 6B2's defect was invisible at unit level: every branch returned the
-    right answer, every write set matched, 8,483 turns agreed exactly -- and
+    right answer, every write set matched, all 18,597 raw turn-comparisons
+    agreed exactly -- and
     only the clock said the first-two-`other` branch had scanned all five
     facets to decide something that reads none of them. A correctness suite
     that cannot see wasted work will pass a design that does nothing but waste

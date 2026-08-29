@@ -396,9 +396,10 @@ class Agent(RetrievalMixin, DialogueMixin):
         DIAGNOSTIC AFTER ADOPTION. _pick_attribute is an adapter over the same
         staged controller now, so this compares a value with itself and cannot
         be quoted as evidence of anything. It is retained because it is what
-        proved the relocation BEFORE adoption -- 8,483 turns, zero
-        disagreements, tag p6b2r2-shadow -- and because a future relocation
-        will want the apparatus again.
+        proved the relocation BEFORE adoption -- 18,597 raw
+        turn-comparisons (8,483.4 seed-normalised), zero disagreements, tag
+        p6b2r2-shadow -- and because a future relocation will want the
+        apparatus again.
 
         The write SET is proven at unit level by the 4,320-cell grid, which can
         instrument assignment. Here the comparison is behavioural: the state

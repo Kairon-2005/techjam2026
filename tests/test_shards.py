@@ -38,8 +38,9 @@ class ShardTest(unittest.TestCase):
                     self.assertIn(mode, C.QUESTION_MODES, f"{name}/{label}")
 
     def test_the_shadow_shard_covers_the_seven_scenarios_it_claims(self) -> None:
-        # These seven are what produced the 8,483 turns quoted throughout
-        # notes/32 and notes/33. A shard that lost one would report a smaller
+        # These seven are what produced the comparison quoted throughout
+        # notes/32, notes/33 and notes/36: 18,597 raw turn-comparisons, 8,483.4
+        # seed-normalised. A shard that lost one would report a smaller
         # comparison under the same heading.
         self.assertEqual(set(SH.SHARDS["p6b2r2-shadow"].scenarios),
                          {"clean", "vague_start", "uncooperative",

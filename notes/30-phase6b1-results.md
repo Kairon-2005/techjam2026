@@ -185,3 +185,33 @@ instrument for that doubt.
 `_pick_attribute`, clarification, `ASK_STRUCTURED`, question policy — **6B2,
 not started.** Profile weighting untouched; per-tag credibility is 6C. No
 dense, category, reranker or profile-weight change. Sealed holdout not run.
+
+## Correction — what the "8,483" in this document counts
+
+*Appended 2026-08-29, during Phase 6C design. **The table above is not
+rewritten**: results are never rewritten, and its figures are correct for what
+they measure. This clarifies what that is.*
+
+**8,483 is the seed-normalised equivalent, not the number of comparisons
+performed.** The comparator executed **18,597 raw turn-comparisons**. Five of
+the seven scenarios are stochastic and run five seeds; `clean` and
+`supplementary_dev` are deterministic and run one. Dividing each scenario by
+its own `n_seeds` before summing gives **8,483.4**, which is the figure the
+table reports.
+
+Both are correct statistics of different things:
+
+* **18,597** is the denominator for *"zero disagreements"* — the honest count
+  of independent turn-level checks actually performed.
+* **8,483.4** is the right basis for a per-turn **rate** or a **branch mix**,
+  because it stops `contradiction` being weighted five times as heavily as
+  `clean` for no reason but the seed schedule.
+
+Written unqualified, "8,483 turns" reads as the former while being the latter,
+which **understates** the work done. The correct form is: *18,597 raw
+turn-comparisons / 8,483.4 seed-normalised equivalent turns, zero
+disagreements.*
+
+The same relationship holds for the identically-shaped figure in
+`notes/32-phase6b2-results.md` (Correction 3) and `notes/36-phase6b2-r2-results.md`,
+where the gate-B table now carries both columns per scenario.
