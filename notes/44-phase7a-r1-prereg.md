@@ -1,8 +1,25 @@
 # Phase 7A-R1 pre-registration — quality evaluation of A0, A1 and A2-10
 
-**Design and pre-registration only. Nothing is implemented.** No ONNX in the
-Agent, no A1 cache, no λ trials, no `sup-val`, no public 200, no sealed
-holdout.
+**Revision 2. Design and pre-registration only. Nothing is implemented.** No
+ONNX in the Agent, no A1 cache, no λ trials, no `sup-val`, no public 200, no
+sealed holdout.
+
+Revision 2 closes seven gaps found in review of `a492f05`. Two were wrong
+rather than merely absent:
+
+1. **The call site was not pinned.** A2's position relative to `_rotate` was
+   undefined, and running before it would have let the semantic order feed the
+   rotation.
+2. **"Every state key identical" was FALSE.** `state["shown"]` records the
+   order candidates were displayed in, so A2 necessarily changes it. The
+   correct invariant is membership, not bytes.
+3. **Output equality was asserted on sets**, which cannot see a duplicate or a
+   dropped item.
+4. **What is ALLOWED to change** was never stated, only what must not.
+5. **No finalist rule** — the document did not say which arm wins if A1 and A2
+   both pass.
+6. **The negation claim overreached.**
+7. **Telemetry was unfrozen.**
 
 Both feasibility conclusions stand and neither is edited:
 
@@ -24,6 +41,40 @@ A0(full candidate population)  →  semantic rerank of prefix  →  unchanged A0
   upstream `onnx/model_qint8_arm64.onnx`, ONNX Runtime + `tokenizers` + numpy
 * **the lexical fallback is always available**
 * **model absent or load failure → byte-equivalent A0 behaviour**, not an error
+
+### The call site, pinned
+
+```
+candidates  →  A0 _rerank  →  _rotate  →  a0_ranked
+```
+
+**A2 runs after `_rotate`, never before**, and reorders only a copy of the
+final visible window:
+
+```python
+a0_ordered = a0_ranked[:top_k]                      # agent.py:685, unchanged
+effective_k = min(semantic_rerank_k, top_k, len(a0_ordered))
+a2_ordered  = semantic_permute(a0_ordered[:effective_k]) + a0_ordered[effective_k:]
+```
+
+**`a0_ranked` is never replaced.** The question controller, the
+`ContextSnapshot` and the profile window all continue to read `a0_ranked`, and
+none may read A2's ordering. Verified consumers in `agent.py`:
+
+| line | reads | after A2 |
+|---|---|---|
+| 700 | `_decide_question(state, ranked, …)` | **`a0_ranked`** — question policy unaffected |
+| 683 | `_shadow_context(…, ranked, …)` | **`a0_ranked`** |
+| 677 | profile window, from **pre-rerank `cands`** | untouched |
+| 787 | `_compose(attribute, state, ranked, ordered)` | `ranked` = **`a0_ranked`**; `ordered` = `a2_ordered` |
+| 789 | `recommendations` | `a2_ordered` |
+
+**Why after `_rotate` and not before.** `_rotate` re-orders the tail using
+`seen = set(state["shown"])` (`retrieval.py:46`) to surface unseen candidates
+on a "show me something else" turn. Running A2 first would make the semantic
+order an input to that rotation, so the two mechanisms would interact and
+neither could be reasoned about alone. Running A2 last leaves `_rotate` reading
+exactly what it reads today.
 
 ### Recommendation-set invariance
 
@@ -53,18 +104,98 @@ returned set, **HR@10 and MTTC are provably invariant and only MRR can move.**
 
 ### Pre-registered invariance tests
 
-1. the **same ten ASINs** before and after A2, as a set;
-2. the **HR@10 opportunity set** is unchanged;
-3. **`semantic_rerank_k = 0` is byte-equivalent to A0** — message,
-   `ask_attribute`, recommendations;
-4. **`top_k ∈ {1, 5, 10, 20}`** each preserve the A0 returned set;
-5. the **A0 tail order is unchanged**, element-wise;
-6. **question policy, retrieval, the profile window and state mutations are
-   unaffected** — the Phase 6B2-R2 and 6C1 evidence must survive intact, so
-   `pool_depth`, `candidates`, `starved_candidates` and every `state` key are
-   asserted identical between A0 and A2 on the same turn;
-7. **model absent → byte-equivalent A0**, exercised by pointing the loader at a
-   missing artifact.
+**On the FINAL EMITTED `recommendations`, not on a pre-rotate prefix, and not
+by set comparison.** A `set` cannot see a duplicated ASIN or a dropped one —
+`{a,b,c}` equals `{a,b,c,c}` minus a duplicate and equals a list that lost an
+element and gained a repeat. Every assertion below uses **length +
+`collections.Counter` + explicit duplicate and membership checks**:
+
+1. **`len(a2_recs) == len(a0_recs)`**;
+2. **`Counter(a2_recs) == Counter(a0_recs)`** — multiset equality, which
+   catches a duplicate or a dropped item that set equality cannot;
+3. **no duplicates**: `len(set(a2_recs)) == len(a2_recs)`;
+4. **no illegal ASIN**: every id is in the catalog and was in `a0_ordered`;
+5. **HR@10 opportunity identical** — `target in a2_recs` iff `target in
+   a0_recs`, evaluated per turn;
+6. **MTTC identical** — `first_hit_turn` equal across the whole session;
+7. **A0 tail order unchanged**, element-wise: `a2_ordered[effective_k:] ==
+   a0_ordered[effective_k:]`;
+8. **`top_k ∈ {1, 5, 10, 20}`** each preserve the A0 returned multiset;
+9. **`semantic_rerank_k = 0` byte-equivalent to A0**;
+10. **model absent / load failure / inference failure → byte-equivalent A0**,
+    each exercised separately.
+
+### State invariance, corrected
+
+Revision 1 said "**every `state` key identical**". **That is false.**
+`agent.py:734-736`:
+
+```python
+for asin in ordered:
+    if asin not in state["shown"]:
+        state["shown"].append(asin)
+```
+
+`shown` is appended **in display order**, so permuting the recommendations
+necessarily permutes the order in which new ASINs are appended. The correct
+invariant is membership:
+
+| key | requirement |
+|---|---|
+| every key **except `shown`** | **bit-exact** between A0 and A2 |
+| **`shown`** | **same length**, and **`Counter(shown)` identical**. Order may differ |
+
+**Why order may differ safely, proven rather than assumed.**
+`retrieval.py:46`: `seen = set(state.get("shown") or ())`. **`_rotate` consumes
+`shown` as a SET**, so no downstream behaviour can observe its order. A
+pre-registered test asserts this directly: permuting `state["shown"]` and
+re-running `_rotate` must return an identical list.
+
+**Two-turn tests are required.** A single-turn assertion cannot catch state
+divergence that only surfaces later, which is exactly the shape of a `shown`
+bug. Running A0 and A2 for **two consecutive turns** on the same session, turn
+2 must agree on:
+
+* **route**;
+* **`ask_attribute`**;
+* **candidate membership** (`Counter` of the pre-rerank `cands`);
+* **every state key except `shown`**, bit-exact;
+* **`Counter(shown)`** and `len(shown)`.
+
+The rotation path is exercised explicitly: a turn-2 "show me something else"
+must produce the same `_rotate` output under A0 and A2.
+
+### What is ALLOWED to change, and what is not
+
+Revision 1 stated only what must not move. Both halves are needed, or an
+expected difference reads as a defect and a real defect hides behind "expected".
+
+**With λ > 0, these MAY differ between A0 and A2:**
+
+* **recommendation order** — that is the entire point;
+* **`_compose`'s top-product sentence.** `dialogue.py:467` reads
+  `shown[0]`, so a reordered Top-10 changes which product is named. **This is
+  an intended customer-visible consequence, not a defect.**
+
+**With λ > 0, these MUST be identical:**
+
+* **`ask_attribute`** and the whole question decision — it is taken from
+  `a0_ranked` at `agent.py:700`, before A2 runs;
+* the **question state patch** — `broad_options`, `last_bits`,
+  `last_coverage`, `last_weighed`;
+* every state key except `shown`, per the table above.
+
+**With λ = 0, or the model absent, or a load failure, or an inference
+failure — ALL of these are bit-exact A0:**
+
+* **message** (including the top-product sentence);
+* **`ask_attribute`**;
+* **recommendations**, in order;
+* **existing state and trace fields**.
+
+λ = 0 must be byte-identical and not merely equivalent: it is the fallback's
+correctness proof, and an implementation that "usually" matches A0 at λ = 0 is
+one that will diverge under a case nobody tested.
 
 ## 2. One semantic query, one construction
 
@@ -85,8 +216,12 @@ independent of dict iteration.
 
 **Excluded, deliberately:**
 
-* **negative values** (`polarity < 0`) — a cross-encoder has no notion of
-  negation, so "not leather" would score *toward* leather;
+* **negative values** (`polarity < 0`) — **this MS MARCO relevance model has
+  not been validated to enforce hard negative constraints reliably; negative
+  constraints remain handled by A0's structured logic and are excluded from the
+  semantic query.** (Revision 1 claimed "a cross-encoder has no notion of
+  negation", which overreaches: the claim here is about *what has been
+  validated for this model*, not about what the architecture can represent.)
 * **abandoned / suppressed values** — anything with `soft_ok = False` or in
   `_uncredible(state)`;
 * **raw filler turns** — only accepted evidence enters, never message text;
@@ -215,6 +350,62 @@ three.
 6. **Public results never cause retuning.**
 7. **The sealed holdout stays untouched.**
 
+## 7b. The finalist rule — ONE arm reaches public
+
+Revision 1 never said which arm wins if **both** A1 and A2 pass. Deciding that
+after seeing quality numbers would be choosing the winner and then calling it a
+rule, so it is fixed here, before any of them exist.
+
+### Step 1 — `sup-val` elimination
+
+Each arm is judged **independently** against `sup-val`, paired against a fresh
+A0 on the same 200 rows:
+
+| gate | requirement |
+|---|---|
+| composite | **Δ ≥ −0.005** |
+| MRR | **Δ ≥ −0.010** |
+| A2-10 only | **HR@10 and MTTC exactly invariant** |
+
+An arm failing any of these **stops there** and does not reach public.
+
+### Step 2 — one finalist, by a fixed order
+
+If **both** survive, the finalist is chosen on **`sup-val` alone**:
+
+1. **primary metric: `sup-val` session-level MRR**, higher wins;
+2. **tie-break 1:** `sup-val` composite, higher wins;
+3. **tie-break 2:** **fewer moving parts** — A1 (no dependency, no artifact, no
+   runtime) beats A2-10 (a pinned model, an ONNX runtime and a vendored
+   artifact). A dead-heat on quality should not buy a dependency;
+4. **tie-break 3:** canonical arm-name order, `A1 < A2-10`.
+
+### Step 3 — public confirmation, exactly once
+
+**Only the single finalist is run on the public 200, one time.** Not a matrix
+over all frozen arms.
+
+The reason is the multiple-comparisons one: confirming *n* arms on the same 200
+samples and reporting the best gives the best of *n* draws, and with the
+per-slice gates each arm faces, testing three arms roughly triples the chance
+that one clears them by luck. **One finalist, one run, one number.**
+
+The eliminated arm's `sup-val` result is reported as what it is — a
+supplementary result — and is never promoted to a public claim.
+
+### Step 4 — when `score_default` may change
+
+`score_default` moves to the finalist **only if every public gate in §9
+passes**, in particular **`clean` MRR Δ ≥ +0.010**.
+
+**If no challenger reaches +0.010 on public `clean` MRR, A0 remains the
+default.** Not "the best of the two", not "the one that regressed least" —
+**A0**. A challenger that cannot clear the bar it was measured against has not
+earned the default, and the bar was set before any of them ran.
+
+**Public results never cause retuning.** A finalist that fails on public is
+recorded as failing; it is not adjusted and re-run.
+
 ## 8. A2 integrated feasibility, remeasured
 
 R0.1 measured synthetic fixtures. After integration, **remeasure on real
@@ -258,10 +449,37 @@ The likely causes, if it happens: `effective_semantic_k` not clamped to
 `top_k`; the tail being reordered or truncated; or a non-total tie-break making
 the sort unstable.
 
+## 9b. Frozen telemetry — descriptive only
+
+Recorded per turn and aggregated **by scenario and by official slice**:
+
+| field | meaning |
+|---|---|
+| `a2_eligible_turns` / `a2_total_turns` | how often the robustness gate opened |
+| `a2_model_invoked_turns` | turns where the model actually ran — differs from eligible when the prefix is empty or `effective_k < 2` |
+| `a2_fallback_count`, **by reason** | `model_absent`, `load_failure`, `inference_failure`, `empty_query`, `prefix_too_short`, `ineligible` |
+| `a2_empty_query_count` | turns where the semantic query assembled to `""` |
+| `a2_effective_k_distribution` | histogram of `effective_k`, so a silent clamp to 0 or 1 is visible |
+| `a2_lambda_zero_degenerate` | whether λ = 0 reproduced A0 **byte-for-byte**, asserted per turn rather than assumed |
+
+**These are DESCRIPTIVE ONLY.** They may not be used to modify the eligibility
+gate, the query construction, `semantic_rerank_k`, or λ. That prohibition is
+the point of recording them: activation counts are exactly the kind of number
+that invites "the gate is a bit tight, let me widen it", and the gate is
+product logic frozen in §4.
+
+If the telemetry contradicts the §4 expectation — activation is broad rather
+than concentrated in early evidence-sparse `browsing` turns — that is
+**recorded as a finding and investigated as a possible defect in the route
+classifier**, not resolved by editing the gate.
+
 ## 10. Stop conditions
 
 Stop if: any frozen parameter is searched alongside λ; the eligibility rule is
 changed after seeing activation counts; A1 and A2 are combined; `sup-val` is
 run before both arms are frozen; the public 200 is touched by anything but the
-single confirmation run; the sealed holdout is touched at all; or HR@10 or MTTC
-moves for A2-10 and is explained as a trade-off.
+single confirmation run; the sealed holdout is touched at all; HR@10 or MTTC
+moves for A2-10 and is explained as a trade-off; more than one arm is run on
+the public 200; the eligibility gate is modified after seeing activation
+counts; or `score_default` moves to an arm that did not clear +0.010 on public
+`clean` MRR.
