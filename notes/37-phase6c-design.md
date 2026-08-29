@@ -1,10 +1,30 @@
 # Phase 6C design — profile credibility, and personalization only if it is earned
 
-**Revision 2. Design and pre-registration. No implementation.** Phase 6B2 is
+**Revision 3. Design and pre-registration. No implementation.** Phase 6B2 is
 closed through R2 (`notes/36`); this is the next phase's contract, written
 before any 6C code exists and before any 6C measurement has been taken.
 
-Revision 2 closes nine gaps found in review of revision 1, every one of which
+**Revision 3 closes five further gaps**, and is the last design round before
+implementation:
+
+1. **Baseline-SD loss budgets are withdrawn** for the stochastic official
+   scenarios and replaced with **paired fixed guards** on identical seeds.
+   Baseline SD is an unpaired spread being used to license a paired effect, and
+   it paid a noisier scenario to stay noisy.
+2. **Pseudo-replication is prohibited.** D1–D5 primary inference runs on the
+   **200 unique `clean` samples only**; the other six scenarios are robustness
+   and evolution reporting. Pooling would have put the same user, tags and
+   target into one denominator up to 35 times.
+3. **D4 PASS is stated exactly** — B1 all fixtures, B2 eligible ≥ 30 *and*
+   passing D1–D3 **and D5**, B0 diagnostic only — with **D5 negative controls**
+   for ties, insufficient significance and insufficient median margin.
+4. **External profile input is bounded** before use:
+   `MAX_PROFILE_TAG_CHARS = 40`, a fixed normalize → truncate → drop-empty →
+   stable-dedupe → cap order, and `re.escape` in the kernel.
+5. Prereg text cleaned: "shared-kernel match checks", and the two stale
+   predictions corrected.
+
+Revision 2 closed nine gaps found in review of revision 1, every one of which
 would have produced a measurement that looked clean and meant something other
 than it appeared to:
 
@@ -79,8 +99,10 @@ corpus-derived" below.
 * **`w_profile` and `w_profile_adaptive` stay `0.0`** for the whole of 6C1 and
   for 6C2's shadow stage. They may only move inside 6C2's control stage, and
   only after its gates are met.
-* **The profile decision is bounded, deterministic and pure**, and **builds no
-  lazy catalog index** — `_cat_index`, `_facet_index`, `_dense_index` unchanged
+* **The profile decision is bounded, deterministic and pure** — bounded against
+  arbitrary external input, not against the input the public set happens to
+  contain (`MAX_PROFILE_TAG_CHARS = 40`, `MAX_PROFILE_TAGS = 8`, `re.escape`
+  on every tag) — and **builds no lazy catalog index** — `_cat_index`, `_facet_index`, `_dense_index` unchanged
   before and after, asserted the way `notes/36`'s hard gate is: the set of
   built indexes must be *identical* across modes, not merely `None`.
 * **Shadow mode is bit-exact** on score, rendered message, recommendations and
@@ -228,9 +250,53 @@ ProfileCoverage   tag -> coverage in the bounded window   (host-scanned)
 ```
 
 Bounded by construction: at most `MAX_PROFILE_TAGS` (8) tags against at most
-`pool_depth` (30) candidates = **240 substring checks against text already in
-memory**, no catalog-wide scan, no index. Deterministic: no dict-ordering
-dependence, ties broken explicitly, same inputs → same output.
+`pool_depth` (30) candidates = **240 shared-kernel match checks against text
+already in memory**, no catalog-wide scan, no index. Deterministic: no
+dict-ordering dependence, ties broken explicitly, same inputs → same output.
+
+### The profile is external input and is bounded before use
+
+`user_profile` arrives from outside the agent. Nothing about its shape is
+guaranteed by anything in this repository, so the decision must be bounded
+against the input it is *given*, not the input it *expects* — a 4 KB tag or
+five hundred of them must cost no more than the eight short ones the public set
+happens to contain.
+
+**Normalization pipeline, in this exact order:**
+
+| # | step | rule |
+|---|---|---|
+| 1 | **normalize** | `str()`, strip, casefold, collapse internal whitespace |
+| 2 | **truncate** | to `MAX_PROFILE_TAG_CHARS = 40` characters |
+| 3 | **drop empties** | discard anything empty after 1–2 |
+| 4 | **stable-deduplicate** | first occurrence wins, input order preserved |
+| 5 | **cap** | keep the first `MAX_PROFILE_TAGS = 8` |
+
+**Order matters and is part of the contract.** Truncating before deduplicating
+means two tags differing only past character 40 collapse into one — the right
+outcome, since the kernel could not tell them apart anyway. Deduplicating
+before capping means the cap admits eight *distinct* tags rather than eight
+slots that a repeated tag could fill. Capping first would let duplicates
+consume the budget and silently discard real signal. Dropping empties before
+dedup keeps `""` from occupying the single slot the empty string would claim.
+
+Stable deduplication, not `set()`: set iteration order would make the
+classification depend on hash randomization, and "deterministic" would be false
+in exactly the way that is hardest to reproduce.
+
+**The kernel escapes its input.** `profile_match` compiles a word-boundary
+pattern around **`re.escape(tag)`**. A tag is untrusted text; without escaping,
+a tag containing `(`, `[`, `*` or `+` is a malformed pattern that raises, and
+one containing `.*` is a pattern that matches everything and would classify
+itself `generic` while quietly changing what every other measurement means. The
+40-character truncation also caps compilation cost per tag.
+
+**Bounds hold at the maximum.** The maximal snapshot — 8 tags at 40 characters
+each — must still satisfy `MAX_ENTRIES` (64) and `MAX_BYTES` (4096), asserted
+the way `notes/27`'s bounds test asserts the Phase 6A snapshot: by constructing
+the maximal instance and measuring it, not by adding the fields up by hand. 8 ×
+40 = 320 characters of tag text, so the headroom is large; the test exists so
+that it stays large when someone raises a cap.
 
 ### Mode
 
@@ -244,6 +310,24 @@ Per-turn and per-session numbers are not interchangeable, and revision 1 left
 which one a gate used undefined — so a gate could have been met by one verbose
 session contributing twenty turns.
 
+* **Primary inference runs on the 200 unique `clean` samples ONLY.** All seven
+  scenarios are built from the same 200 public samples, so a sample's profile
+  and its target recur in every one of them — and five scenarios run five seeds
+  on top. Pooling would put the same user, the same nine tags and the same
+  target into a binomial denominator up to 35 times. **That denominator is
+  fabricated**: it would shrink D5's confidence interval by roughly a factor of
+  six while adding no independent evidence, and a null effect would clear
+  α = 0.01 on replication alone. `clean` is the right primary population
+  because it is the one arm where sample, profile and target each appear
+  exactly once — 200 samples, one deterministic seed, no mutation.
+* **The other six scenarios are reported separately, as robustness and
+  evolution.** They answer "does the classification hold up when the customer
+  is uncooperative, or contradicts themselves" — a real and separate question.
+  Their numbers are never merged into a D1–D5 denominator, never averaged with
+  `clean`'s, and never used to reach a minimum sample count.
+* **No gate may pool repeated observations of the same sample, profile or
+  target across scenarios or seeds.** This is a stop condition, not a
+  preference.
 * **Gates D1, D2, D3 and D5 are evaluated on the FIRST RECOMMENDATION TURN of
   each session**, one observation per session. That is the turn where a
   personalization prior would first act, before the session has accumulated
@@ -256,8 +340,11 @@ session contributing twenty turns.
   `1.0` (identical) or `0.0` (maximally separated) each rig the gate in
   opposite directions. Sessions with an empty credible set are already counted
   by D1, and counting them again in D2 would double-penalise the same fact.
-* **Minimum sample counts.** D2 requires **≥ 30** sessions with a non-empty
-  first-turn credible set; D5 requires **≥ 30** eligible sessions. Below the
+* **Minimum sample counts, counted within the primary population.** D2 requires
+  **≥ 30** `clean` sessions with a non-empty first-turn credible set; D5
+  requires **≥ 30** eligible `clean` sessions. The ceiling is 200 in both
+  cases, and a minimum may not be reached by borrowing sessions from another
+  scenario. Below the
   minimum the gate's verdict is **`insufficient_data`**, which is neither pass
   nor fail and **may not be reported as either**. A gate evaluated on eight
   sessions is not a gate.
@@ -320,12 +407,53 @@ Sessions failing either condition are excluded and **the exclusion rate is
 reported**, because a diagnostic that silently drops most of its population is
 reporting on a subset it has not described. B2 is what D4 is evaluated on.
 
+### D4 PASS, stated exactly
+
+D4 passes **iff all three hold**:
+
+| | requirement |
+|---|---|
+| **B1** | **every** constructed fixture passes. Not a majority, not "the important ones" — each fixture pins one rule, and a failing fixture means that rule is not the rule implemented. |
+| **B2** | **eligible sessions ≥ 30**, **and B2 passes D1, D2, D3 and D5** — the same four gates Arm A is judged on, on the same first-turn, one-observation-per-session basis. |
+| **B0** | **diagnostic only.** Reported, never part of the verdict, in either direction: B0 passing does not help D4 and B0 failing does not block it. |
+
+**B2's exclusion rate is reported separately** — eligible sessions, and each
+exclusion reason (target absent from the pre-rerank window; no synthesized tag
+with support) as its own count. A diagnostic that passes on 31 of 200 sessions
+is a different claim from one that passes on 180, and the verdict alone cannot
+distinguish them.
+
+B2 must clear **D5** and not merely D1–D3, because D5 is the gate that
+separates real alignment from rare noise. An instrument check that skipped it
+would certify a classifier that cannot tell the target from anything else —
+which is precisely the failure mode D5 exists to catch on Arm A.
+
 **If Arm B fails, B0/B1/B2 separate the causes.** B1 failing means the
 classifier is wrong — a unit-level defect, fixable without any scenario run.
 B1 passing while B2 fails means the classifier is right and the *scenario
 construction* is weak, i.e. first-five-tokens does not reliably produce
 supported, distinctive tags — a control-construction defect, not a data
 finding. Only B1 and B2 both passing licenses any statement about Arm A.
+
+### D5 negative controls, at lab level
+
+D5 is a statistical gate, and a statistical gate that cannot fail is not a
+gate. Three lab-level controls feed `align`/`margin`/`win` sequences with known
+properties and **require D5 to reject each**:
+
+| control | constructed input | required verdict |
+|---|---|---|
+| **all ties** | every session has `align(target) == median(align(non-target))`, so `margin == 0` throughout | **FAIL** — ties count as non-wins, so the win rate is 0.0 and cannot be significant. Pins the tie convention against a later "ties are half a win" drift, which would turn a null into a pass. |
+| **insufficient significance** | win rate genuinely above 0.5 but n small enough that the one-sided exact binomial does not reach α = 0.01 (e.g. 20 wins of 30, p ≈ 0.049) | **FAIL** — and specifically not by rounding α, and not by falling back to a normal approximation, which is anti-conservative at these n |
+| **insufficient median margin** | win rate overwhelming and significant — say 190 of 200 — but median margin `0.02`, below the `0.10` floor | **FAIL** — significance without effect size is exactly what large n manufactures, and this control is the reason the margin requirement is conjunctive rather than alternative |
+
+Each control is a unit test over the pure aggregation function, with no
+scenario run and no agent. They pin the three ways D5 could silently become
+unfailable: tie handling, test choice, and dropping the effect-size conjunct.
+
+A fourth, positive control — a clearly aligned sequence that D5 **must
+accept** — is required alongside them, because three tests that only prove a
+gate can fail would be satisfied by a gate that always fails.
 
 Reported per arm, never pooled:
 
@@ -338,7 +466,8 @@ Reported per arm, never pooled:
 ### The gate that decides whether 6C2 is designed at all
 
 Pre-registered now. All evaluated on the **first recommendation turn** of each
-session, on **Arm A** except D4:
+session, over the **200 unique `clean` samples** (see pseudo-replication
+above), on **Arm A** except D4:
 
 | | criterion | threshold |
 |---|---|---|
@@ -373,7 +502,7 @@ not the existing scenario alone. See Arm B above for why B0 cannot carry it.
 **D1–D3 are not sufficient.** They ask whether credible tags *exist*, are
 *distinct between users*, and have *usable support*. A set of rare tags that
 match arbitrary candidates for reasons unrelated to what the customer wants
-passes all three. Rare random noise is, by construction, well-supported and
+passes D1, D2 and D3. Rare random noise is, by construction, well-supported and
 well-separated. D5 asks the question the other three do not: **do the credible
 tags point at the right product?**
 
@@ -442,22 +571,35 @@ Stop immediately if: shadow mode moves score, message, recommendations or
 the host, a catalog reference or an index build; any classification depends on
 a corpus-derived constant; `w_profile` / `w_profile_adaptive` move from 0; the
 snapshot is taken anywhere but between `_candidates()` and `_rerank()`; tag
-matching is implemented anywhere but the shared kernel; or any ground-truth
-field reaches the Agent or the `ProfileDecision`.
+matching is implemented anywhere but the shared kernel; any ground-truth field
+reaches the Agent or the `ProfileDecision`; or any gate pools repeated
+observations of the same sample, profile or target across scenarios or seeds
+into one denominator.
 
 ### Predictions
 
-1. **Arm A fails D1.** The nine official tags are dimension names, and the
-   `generic` coverage rule will reject most of them — `fit` and `comfort` are
-   near-ubiquitous in apparel text. If Arm A passes D1 comfortably, I have
-   probably mis-implemented the coverage rule, and that is the first thing to
-   check rather than a result to celebrate.
+1. **Arm A fails D1**, with its tags splitting across **`unsupported` AND
+   `generic`**, not `generic` alone. Revision 1 predicted `generic` only,
+   which assumed every dimension word is ubiquitous in product text. Under
+   word-boundary matching that is true of `fit` and `comfort` and false of
+   `durability`, `performance`, `warmth` and `weather` — words a product
+   description rarely uses about itself, which will match nothing in a 30-item
+   window and land in `unsupported`. Both routes are failures and they have
+   opposite causes: too much support and none. If Arm A passes D1 comfortably,
+   I have probably mis-implemented the kernel or the ceiling, and that is the
+   first thing to check rather than a result to celebrate.
 2. **Arm A fails D2 even where D1 passes.** With 43 distinct tag sets over 200
    samples and a median raw Jaccard of 0.50, credibility filtering has to
    *remove shared tags asymmetrically* to create separation. There is no reason
    it should.
-3. **Arm B passes all three**, because its tags come from the target product
-   and are values rather than dimensions. If it does not, D4 fires.
+3. **B1 passes outright; B2 passes D1–D3 and D5 but excludes a large fraction
+   of sessions.** B1 is constructed to known answers, so anything but a clean
+   pass is a classifier defect. B2's tags come from the target and are values
+   rather than dimensions, so where it is eligible it should align — but
+   first-five-tokens will often emit brand or size fragments that match nothing
+   in the window, so I expect the **exclusion rate to be the interesting number
+   in B2, not its verdict.** A low eligible-session count with a passing
+   verdict is a weak instrument check and must be reported as one.
 4. **`duplicated_session_evidence` is rarer than expected.** The official tags
    are dimensions and the session states values, so they mostly will not
    collide as strings — which is itself evidence that the profile and the
@@ -487,12 +629,13 @@ each citable under `lab.provenance.citable()`:
 |---|---|
 | **official benefit** *(new in revision 2)* | **`score_default` may only enable personalization if the OFFICIAL profile arm shows a real gain.** Either (a) the official composite on `clean` improves by **≥ +0.002 absolute**, or (b) a pre-registered official conversion metric improves — **MTTC on `clean` decreases by ≥ 0.05 turns** — with no composite regression. Measured on **Arm A, real profiles**. See the note below on why "clean stayed equal" is not enough. |
 | **clean regression guard** | `clean` **must not decrease at all** from its measured baseline (`0.932067`), and no official slice may regress. Necessary, **not** sufficient — it is a floor, and the official-benefit gate is the bar. |
+| **paired stochastic guards** | on identical seeds, OFF vs control: per-scenario mean paired **Δscore ≥ −0.005** and mean paired **ΔHR@10 drop ≤ 0.01**. Paired-delta SD reported, never used as a loss budget. |
 | **informative-profile gain** | on Arm B, score improves by **≥ +0.01 absolute** over the same scenario with personalization off, exceeding the across-seed standard deviation. A gain inside its own noise is not a gain. **Diagnostic only:** an oracle upper bound that may never justify default adoption. |
 | **latency** | per-branch through `lab/benchmark.py` under the R2.1 rule: absolute overhead **≤ 0.25 ms**, and the ratio gate applies only where the control median is **≥ 0.10 ms**. Seven fresh-process paired repetitions; four of seven is not a result. |
 | **memory** | no new index built in any mode; the shadow snapshot stays within `MAX_ENTRIES` (64) and `MAX_BYTES` (4096); peak RSS delta **≤ 5 MB** from the harness's recorded `peak_rss_bytes`. |
 | **supplementary veto** | `supplementary_dev` **must not regress**. It is a veto signal, not a score — `lab/record.py` carries `source`/`official` on every row precisely so a supplementary number cannot be quoted as an official one. |
 
-Any one of the six failing stops adoption. There is no weighted trade among
+Any one of the seven failing stops adoption. There is no weighted trade among
 them: a latency budget is not purchasable with score.
 
 ### Why "clean did not regress" is not enough
@@ -513,11 +656,40 @@ measurement. Its across-seed variance is not merely small, it is structurally
 absent, so any movement is signal rather than noise and the threshold's job is
 to exclude the *trivial*, not the *noisy*. `+0.002` is roughly 0.2% relative.
 
-The stochastic official scenarios are held to **no regression beyond their own
-across-seed standard deviation** (measured in the R2 matrix: `uncooperative`
-0.0146, `contradiction` 0.0078, `override_genuine` 0.0038, and `vague_start` /
-`override_category` 0.0), rather than to a hard equality that their own seed
-noise would trip.
+### The stochastic guards are PAIRED and FIXED, not SD budgets
+
+Revision 2 held the stochastic official scenarios to "no regression beyond
+their own across-seed standard deviation". **That is withdrawn.** Using a
+scenario's baseline SD as a loss budget is wrong in two ways at once:
+
+* **It pays a noisier scenario to stay noisy.** `uncooperative`'s 0.0146 SD
+  would have bought it a −0.0146 regression while `vague_start`'s 0.0 bought
+  nothing — the scenario least able to demonstrate anything gets the largest
+  licence to lose.
+* **It answers the wrong question.** Baseline SD measures spread *across
+  seeds within one arm*. The quantity a regression guard cares about is the
+  **paired difference between arms on the same seed**, where the seed's
+  contribution largely cancels. Comparing an unpaired spread against a paired
+  effect is a category error, and it is the more permissive one.
+
+**Fixed guards, evaluated pairwise on identical seeds:**
+
+| guard | requirement |
+|---|---|
+| pairing | OFF and control run on the **same seed list** `(7, 8, 9, 10, 11)`; every delta is a per-seed difference, never a difference of independently-drawn means |
+| per-scenario mean paired **Δscore** | **≥ −0.005** |
+| per-scenario mean paired **ΔHR@10** | drop **≤ 0.01** |
+| paired-delta SD | **reported, never a budget** — it describes the measurement's precision, and no threshold is derived from it |
+
+The paired-delta SD is reported because a guard met with a wide paired spread
+is weaker evidence than the same guard met with a narrow one, and a reader must
+be able to see which they have. It does **not** widen or narrow any threshold:
+the thresholds are the two fixed constants above and they do not move.
+
+`clean` is exempt from the paired guards and keeps its own rules: it is
+deterministic, so it has no seeds to pair and no paired spread. It retains the
+**deterministic no-regression floor** and must additionally clear the
+**official-benefit gate**.
 
 **Arm B cannot substitute.** Its tags come from the target product. A gain
 there is evidence that *the mechanism can exploit signal when signal exists* —
