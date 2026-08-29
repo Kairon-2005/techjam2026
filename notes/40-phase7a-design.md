@@ -1,25 +1,31 @@
 # Phase 7A design — reranker feasibility, and what it is allowed to prove
 
-**Revision 2. Design and pre-registration only.** No implementation, no
-dependency installed, no model downloaded, no weights changed, no public
-evaluation. Phase 6 is closed (`notes/39`) and is not modified.
+**Revision 3. Design and pre-registration only.** No implementation, no
+dependency installed, no model downloaded, no weights changed, no A1 trial, no
+ceiling run, no public evaluation. Phase 6 is closed (`notes/39`) and is not
+modified.
 
-Revision 2 changes six things, five of which were errors in revision 1:
+Revision 3 corrects eight things. Items 1–4 are defects that would have
+contaminated the confirmation set or biased the search; 5–7 close
+pre-registration holes that would have let a decision be made after seeing the
+numbers it depends on; 8 is an overclaim.
 
-1. **Gate 0 was wrong.** It read "numpy is not importable in this interpreter"
-   as "a semantic arm is prohibited". Those are different claims.
-2. **The phase is split**: R0 is runtime feasibility with **no labels and no
-   quality metric**; R1 is quality pre-registration and begins only after A2 is
-   frozen.
-3. **A1's contract was contradictory** — "hand-specified" weights "set on
-   `supplementary_dev`" is a search, not a specification. One contract is now
-   chosen and its search is fully specified.
-4. **The ceiling was asserted, not measured.** The "+0.142 or it's a bug" claim
-   is withdrawn until four named measurements exist.
-5. **Resource gates were shared across arms.** They are now separate, and A2's
-   is set *after* R0 measures reality — but before any quality result.
-6. **"Supplementary must not regress" was undefined.** Metric, tolerance,
-   pairing and role are now stated.
+1. **The ceiling measurements were pointed at the public set.** Revision 2 made
+   them "R1's first deliverable" on `clean` — a design input drawn from the
+   confirmation set. They move to supplementary.
+2. **The oracle was turn-level.** It is now defined at **session** level,
+   through the evaluator's own semantics.
+3. **The split was a global hash**, so scenario proportions were accidental. It
+   is now an exact **scenario-stratified 800/200**.
+4. **Coordinate descent had a zero trap.** A weight driven to 0 in sweep 1 could
+   never come back, because the grid multiplied the *current* value.
+5. **The R0 workload was unspecified**, so "latency" would have meant whatever
+   the first measurement happened to measure.
+6. **The A2 ceiling had no derivation rule.** Numeric caps and a total ordering
+   are fixed here, before any candidate is measured.
+7. **"Search Hugging Face"** is not a citation. Exact revisions and primary
+   sources are required.
+8. **"Not a retrieval problem"** overstated what HR@10 implies.
 
 ## The objective is MRR on the exact purchased item
 
@@ -42,8 +48,16 @@ Current heuristic, `clean`, citable (`p6c1-arm-a`, mode `off`):
 | `buying` | 0.9875 | 0.851181 |
 | **`browsing`** | 1.0000 | **0.809375** — weakest slice |
 
-Session-level HR@10 is 0.995, so this is a **reordering** problem in positions
-2–10 of lists that already contain the answer, not a retrieval problem.
+**Phase 7 holds retrieval fixed and tests how much additional score can be
+recovered by reordering the candidates it receives.**
+
+That is the bounded claim, and revision 2's "not a retrieval problem" was not.
+A final HR@10 of 0.995 says most *remaining score headroom* is ranking-related,
+but it is a **session-level** figure accumulated across turns. The turn-level
+number tells a different story: `recall100 = 0.6861` (`p6c1-arm-a`), so on
+roughly 31% of turns the target is not in the 100-candidate pool at all, and on
+those turns no reranker can do anything. **Retrieval availability still matters
+across turns**; Phase 7 simply does not attempt to change it.
 
 ## Gate 0 — runtime feasibility, corrected
 
@@ -73,32 +87,84 @@ that produces a score.
 
 ### 7A-R0 — model and runtime feasibility only
 
-**No public labels. No quality metric. No MRR.** R0 may not compute a score,
-because a candidate chosen partly on quality would already have consumed the
-confirmation set's independence.
+**No public labels. No quality metric. No MRR.** R0 may not compute a quality
+score, because a candidate chosen even partly on quality would already have
+spent the confirmation set's independence.
 
-* Search Hugging Face, GitHub and official runtime documentation.
-* Shortlist **at most three** exact CPU-local candidates.
-* Record for each, exactly:
+#### Documentation research — exact sources, not "search Hugging Face"
 
-| field | why |
+For **each** of at most three candidates, cite:
+
+* the **primary Hugging Face model card** (URL);
+* the **upstream GitHub or runtime documentation** for the backend;
+* the **license**, by name and source.
+
+Record the **exact revision / commit hash**. **A moving `main` is not a
+revision, and "a tiny model" is not a model ID.** A candidate that cannot be
+pinned to an immutable revision is not eligible, because nothing measured
+against it could be re-run.
+
+| field | why it is required |
 |---|---|
-| model ID | ambiguity here makes the whole run irreproducible |
-| revision / commit hash | a moving `main` is not a fixed artifact |
-| license | a permissive score is worthless if the weights cannot ship |
-| parameter count and on-disk artifact size | the vendoring budget |
-| backend | the dependency being proposed |
+| model ID | ambiguity makes the run irreproducible |
+| revision / commit hash | `main` moves; a measurement against it cannot be repeated |
+| license | a good score is worthless if the weights cannot ship |
+| parameter count, on-disk artifact size | the vendoring budget |
+| backend | the dependency actually being proposed |
 | quantization | changes size, latency and determinism together |
-| maximum sequence length | decides whether a product blob must be truncated |
+| maximum sequence length | decides whether product text must be truncated |
 | offline loading path | proves nothing is fetched at runtime |
 
-* Benchmark, through the committed harness: **cold load**, **steady pair
-  latency**, **RSS**, and **determinism** (identical output for identical input
-  across processes).
-* **Select exactly one A2 candidate on feasibility criteria only** — never on a
-  leaderboard position, a recommendation score, or a quality claim from its
-  model card.
-* **Commit the R0 result before any quality experiment.**
+#### The workload, fixed before any model is timed
+
+Revision 2 said "benchmark cold load, steady pair latency, RSS" without saying
+over *what*. "Latency" would then have meant whatever the first measurement
+happened to measure. **Every candidate runs the identical workload:**
+
+| | specification |
+|---|---|
+| **query fixtures** | **32 synthetic, unlabelled** query strings, committed in the R0 fixture module, drawn from `sup-train` **message templates only** — no ground truth, no target, no label of any kind |
+| **product-text fixtures** | **100 product blobs** sampled deterministically from the catalog by `sha256(asin)` rank, committed as a frozen id list |
+| **serialization** | `"{query} [SEP] {title} {features} {details}"`, single space collapsed, `str.strip()` |
+| **candidate count** | **primary workload = Top-30**, matching `pool_depth`. Also recorded, not gated: Top-10 and Top-100 |
+| **max sequence length** | **256 tokens**, truncating the product side first |
+| **batch size** | **1** (per-turn reality) as the gated figure; batch 8 and 32 recorded as diagnostics |
+| **warm-up** | **20** pair scorings, discarded |
+| **measured repetitions** | **7 fresh processes**, alternating order, per `lab/benchmark.py` |
+| **cold load** | process start → first scored pair returned, **including** artifact load and tokenizer init |
+| **steady latency statistic** | **p95** over the Top-30 workload; median reported alongside |
+| **RSS** | `peak_rss_bytes` from the harness, minus the same measurement with the model absent |
+| **determinism tolerance** | **bit-identical** ranking order across processes, and scores equal to **1e-6** |
+
+#### Eligibility caps, fixed before any candidate is measured
+
+Revision 2 said the A2 ceiling would be "set from R0's measurements", which has
+no derivation rule and would let the bar be drawn around whichever candidate
+happened to appear. **Hard caps, numeric, fixed now:**
+
+| cap | limit |
+|---|---|
+| maximum local artifact size | **≤ 120 MB** on disk, vendored |
+| maximum additional cold load | **≤ 5.0 s** above the current ~10.7 s catalog load |
+| maximum Top-30 steady **p95** latency | **≤ 25 ms** per turn |
+| maximum additional RSS | **≤ 400 MB** above the model-absent baseline |
+| offline load | **must succeed** with networking unavailable |
+| determinism | **must** meet the tolerance above |
+| license | **must** permit redistribution of the weights with the submission |
+
+#### Selection rule, fixed now and applied mechanically
+
+1. **Discard** every candidate failing **any** hard cap.
+2. Among those remaining, choose the **lowest Top-30 p95 latency**.
+3. Tie-break: **lower RSS**, then **smaller artifact**, then
+   **lexicographically smaller model ID**.
+
+**If no candidate passes, A2 is infeasible and the phase records that.** **No
+cap may be relaxed after seeing the measurements** — a cap moved to admit a
+candidate is not a cap, and the infeasible outcome is a real result rather than
+a failure to be engineered around.
+
+**Commit the R0 result before any quality experiment.**
 
 ### 7A-R1 — quality pre-registration
 
@@ -151,28 +217,71 @@ a weight search would relitigate a closed phase.
 
 **Search specification, frozen here:**
 
-* **Split.** `supplementary_dev`'s 1,000 samples are split deterministically by
-  `sha256(sample_id)`: `int(digest, 16) % 5 < 4` goes to **`sup-train`**, the
-  rest to **`sup-val`**. No RNG, no seed, reproducible from the ids alone.
-  **Computed and frozen here, before any trial exists:**
+* **Split — scenario-stratified, exact counts, frozen before any trial.**
+  Revision 2's global `sha256 % 5` split gave 806/194 with **accidental**
+  scenario proportions: a hash split does not preserve strata, so `boundary` —
+  50 samples in the whole corpus — could have landed anywhere. **That split is
+  SUPERSEDED and is not the operative one.** Its hash `211be164cec5ff4f` is
+  recorded here only so the change is visible, and it is never used.
+
+  Within each `scenario_type`, sample ids are ranked by canonical
+  `sha256(sample_id)` hex ascending and the first N taken as train:
+
+  | scenario | total | train | val |
+  |---|---|---|---|
+  | `buying` | 400 | **320** | **80** |
+  | `browsing` | 400 | **320** | **80** |
+  | `intent_override` | 150 | **120** | **30** |
+  | `boundary` | 50 | **40** | **10** |
+  | **total** | **1,000** | **800** | **200** |
+
+  Hashes over **newline-delimited canonical ids, sorted, with a trailing
+  newline**:
 
   | | |
   |---|---|
-  | `sup-train` | **806** samples |
-  | `sup-val` | **194** samples |
-  | **split hash** (`sha256` of the sorted `sup-train` ids, first 16 hex) | **`211be164cec5ff4f`** |
+  | `sup-train` | `48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d` |
+  | `sup-val` | `82e0470ee83d2cf8883399ededda11b5ddb4fa762685196b36a9fe521a105a73` |
 
-  Reproduced by:
+  **Verified before registration:** overlap **0**; union **1,000**; every
+  sample assigned **exactly once**; no duplicate within either side.
 
   ```bash
-  python3 -c "import hashlib,json; ids=[json.loads(l)['sample_id'] for l in open('data/supplementary_dev.jsonl')]; tr=sorted(str(s) for s in ids if int(hashlib.sha256(str(s).encode()).hexdigest(),16)%5<4); print(len(tr), hashlib.sha256(''.join(tr).encode()).hexdigest()[:16])"
+  python3 -c "
+  import json,hashlib,collections
+  rows=[json.loads(l) for l in open('data/supplementary_dev.jsonl')]
+  TRAIN={'buying':320,'browsing':320,'intent_override':120,'boundary':40}
+  by=collections.defaultdict(list)
+  for r in rows: by[r['scenario_type']].append(str(r['sample_id']))
+  tr,va=[],[]
+  for sc in sorted(by):
+      ids=sorted(by[sc], key=lambda s: hashlib.sha256(s.encode()).hexdigest())
+      tr+=ids[:TRAIN[sc]]; va+=ids[TRAIN[sc]:]
+  h=lambda xs: hashlib.sha256(('\n'.join(sorted(xs))+'\n').encode()).hexdigest()
+  print(len(tr),h(tr)); print(len(va),h(va)); print('overlap',len(set(tr)&set(va)))"
   ```
+
+  No RNG and no seed: the split is a function of the ids and the corpus alone.
 * **Method.** Deterministic coordinate descent. Fixed sweep order:
   weights sorted alphabetically by name. **3 sweeps.**
-* **Grid.** Per weight, 7 points: `{0, 0.25, 0.5, 1, 2, 4, 8} ×` its current
-  value. A weight whose current value is 0 is **excluded entirely** — the grid
-  is multiplicative so it could never leave zero, and admitting one would mean
-  introducing a feature rather than reweighting one.
+* **Grid, relative to the FROZEN ORIGINAL DEFAULT — not the current value.**
+
+  ```
+  candidate(w) = multiplier × original_default(w),
+  multiplier in {0, 0.25, 0.5, 1, 2, 4, 8}
+  ```
+
+  The current best vector supplies every *other* coordinate; the coordinate
+  being tested always uses the original absolute grid. **This removes a trap in
+  revision 2:** with a grid multiplying the *current* value, a weight set to 0
+  in sweep 1 was pinned at 0 for every later sweep, because every multiplier of
+  0 is 0. A weight can now be zeroed early and **restored** later, so sweep
+  order cannot permanently delete a feature.
+* **Pinned, and not silently in the search:** `w_soft_lo`, `w_soft_hi` and
+  `soft_adaptive` keep their shipped values throughout. They govern how
+  `w_soft_eff` is chosen at run time, so varying them would change the model's
+  *structure* rather than reweight it — and would do so invisibly, since none
+  of the three appears in the score expression by name.
 * **The searched set is exactly 9 weights**, verified against `DEFAULTS`:
   `w_bm25`, `w_phrase`, `w_idf`, `w_cat`, `w_pop`, `w_exact`, `w_field`,
   `slot_soft`, `w_neg`. Excluded as currently zero: `w_pos`, `w_card`,
@@ -183,9 +292,10 @@ a weight search would relitigate a closed phase.
 * **Trial count.** 3 sweeps × 9 weights × 7 points = **189 trials**, fixed in
   advance.
 * **Objective.** MRR on **`sup-train` only**.
-* **Tie-break.** Lowest L1 norm of the weight vector; then the alphabetically
-  earlier weight name. Deterministic, so no seed is required, and that is
-  stated rather than left to be assumed.
+* **Final tie-break, in order.** (1) highest `sup-train` MRR; (2) lowest L1
+  norm of the weight vector; (3) lexicographically smallest canonical tuple of
+  all nine weights, in the fixed alphabetical order above. Total and
+  deterministic, so no seed is required — stated rather than assumed.
 * **Freeze.** The resulting weights are committed **before** any public
   confirmation run.
 * **`sup-train` is never reported as validation.** It selected the weights; it
@@ -208,29 +318,58 @@ headroom.
 drops `boundary` MRR 1.000 → 0.870, and is therefore never the default. **The
 routing rule is fixed now, not after a winner is known.**
 
-## The ceiling must be measured before it is claimed
+## The ceiling — measured on supplementary, never on the public set
 
-**Revision 1 asserted a 0.142 headroom and declared any larger gain "a bug".
-That claim is withdrawn.** It was derived from `0.995 − 0.8526`, which assumes
-the rerank window always contains the target — and the one relevant citable
-number says otherwise: turn-level `recall100 = 0.6861` (`p6c1-arm-a`), i.e. the
-target is in the 100-candidate pool on about 69% of *turns*. That is a hint,
-not the ceiling, and the two are not the same statistic.
+**Revision 2 put these four measurements on `clean` as "R1's first
+deliverable". That is withdrawn.** A number computed on the public 200 that
+then informs rerank-window depth, candidate count, feature set, weights or
+model choice is a design input drawn from the confirmation set, and it would
+spend the independence the whole phase depends on. The wording that made the
+public ceiling a design deliverable is deleted, not softened.
 
-**Four measurements at A0, on `clean`, before any headroom claim is made.**
-They are diagnostics of the existing baseline — no arm, no selection, no
-tuning — and they are the first deliverable of R1:
+**Where each measurement lives:**
+
+| corpus | role |
+|---|---|
+| **`sup-train`** | diagnostic and **design input**. Window depth, candidate count, features, weights and model choice may be decided here and nowhere else. |
+| **`sup-val`** | **frozen validation.** Not consulted during selection. |
+| **public 200** | computed **once, at final confirmation**, after **every** arm *and the rerank window depth* are frozen. |
+
+**Public oracle diagnostics may be reported at confirmation, and no decision
+may change afterwards.** If the public ceiling turns out to differ from the
+supplementary one, that is a finding to report, not a licence to re-pick a
+window depth.
+
+### The oracle is defined at SESSION level
+
+Revision 2's oracle was turn-level, which is not the quantity the evaluator
+scores. Per session:
+
+1. Find the **earliest turn** at which the target is in the **rerank input
+   window**.
+2. The oracle moves it to **rank 1 on that turn**.
+3. If it **never** appears in any turn's window, the session **remains a miss**
+   — the oracle does not rescue what retrieval never delivered.
+4. Recompute **HR@10, MRR, MTTC and composite** using the **evaluator's own
+   session semantics**, not a re-derivation of them.
+
+**Turn-level coverage is reported separately and is NOT the MRR ceiling.** The
+two differ whenever a session finds the target on a later turn, which is
+exactly what MTTC measures, and conflating them would overstate what reordering
+can win.
+
+### The four measurements, on `sup-train`
 
 | # | measurement |
 |---|---|
-| 1 | **Recall@rerank_window** — share of turns where the target is among the candidates handed to `_rerank` |
-| 2 | **Target coverage by candidate depth** — the same at depths 10, 30, 50, 100, so the window size is chosen from evidence |
-| 3 | **Conditional MRR given the target is in the window** — what the reranker achieves when it *can* succeed |
-| 4 | **Oracle MRR** — every present target moved to rank 1. **This is the ceiling.** |
+| 1 | **Recall@rerank_window** — share of **sessions** with at least one turn whose window contains the target, and share of **turns**, reported separately |
+| 2 | **Target coverage by candidate depth** — at 10, 30, 50, 100, so window depth is chosen from evidence rather than from the current default |
+| 3 | **Conditional MRR given the target reached the window** — what the reranker achieves when it *can* succeed |
+| 4 | **Session-level oracle MRR and composite**, per the definition above |
 
-**The ceiling is `oracle MRR − 0.8526`**, and no gain claim may exceed it. Until
-those four numbers exist, this document makes **no** headroom claim, and the
-"any gain above +0.142 is a bug" sentence is deleted rather than softened.
+**The ceiling is `oracle − A0`, measured on `sup-train`.** No headroom claim is
+made until these exist, and none is made from the public set at any point
+before confirmation.
 
 ## Resource gates, separate per arm
 
@@ -247,22 +386,22 @@ are stated so that "trivially met" is a measurement and not an assumption.
 
 ### A2 feasibility / `showcase_model`
 
-**The ceiling is set after R0 measures reality, and before any quality result
-exists.** Fixing a number now would be guessing; fixing it after a quality
-result would be choosing the number that admits the answer we liked.
+**The caps are the ones fixed in R0 above** — artifact ≤ 120 MB, cold load
+≤ +5.0 s, Top-30 p95 ≤ 25 ms, RSS ≤ +400 MB, offline load, determinism,
+redistributable license — together with the mechanical selection rule. They are
+numeric, they are fixed before any candidate is measured, and they are not
+adjusted afterwards.
 
-Procedure, itself pre-registered:
+Revision 2 deferred these to "after R0 measures reality", which sounds
+disciplined and is not: a bar drawn after seeing the candidates is a bar drawn
+around them. **A derivation rule fixed in advance is the only version of
+"set it from measurements" that means anything.**
 
-1. R0 measures cold load, steady pair latency and RSS for the shortlist.
-2. The A2 ceiling is set from those measurements and **committed**, with its
-   justification, **before any labelled data is touched**.
-3. Offline artifact loading and determinism are required regardless, and are
-   not negotiable against latency.
-
-**A gate must not be set so tight that no real model could pass it merely so
-the phase can report that semantic reranking "was evaluated".** That would be a
-theatre of rigour: the honest outcomes are a real ceiling met, a real ceiling
-missed, or Gate 0 unresolved — not a rigged one.
+**A gate must not be set impossibly tight merely so the phase can report that
+semantic reranking "was evaluated".** That is a theatre of rigour. The honest
+outcomes are a real cap met, a real cap missed, or Gate 0 unresolved — and the
+caps above were chosen to be *passable by a real small cross-encoder*, not to
+guarantee either answer.
 
 ### A2 → `score_default` promotion
 
@@ -290,8 +429,9 @@ missed, or Gate 0 unresolved — not a rigged one.
 | **metric** | primary: composite `recommended_technical_score`. Secondary, reported always: MRR |
 | **tolerance** | paired **Δcomposite ≥ −0.005** and paired **ΔMRR ≥ −0.010** |
 | **pairing** | `supplementary_dev` is deterministic — no `reply`/`mutate`/`init`/`sample_tf` hook, so `record.matrix` runs it at a single seed. Pairing is therefore exact, not statistical, and no seed list is needed |
-| **role** | **VETO, not validation** — for A0 and A2, over the full corpus. It can block adoption; its number is never reported as a score, and `record.py` carries `source`/`official` on every row so it cannot be mistaken for one |
-| **role for A1** | A1's weights are selected on `sup-train`, so the **full corpus is contaminated for A1**. A1's veto and its validation number both come from **`sup-val` only**, which the search never sees |
+| **role** | **VETO, not validation.** It can block adoption; its number is never reported as a score, and `record.py` carries `source`/`official` on every row so it cannot be mistaken for one |
+| **which split** | **`sup-val` only, for every arm.** Not just A1. Under revision 3 `sup-train` also supplies the ceiling diagnostics that fix the **rerank window depth**, and that depth applies to A0, A1 and A2 alike — so `sup-train` is a design input for all three and cannot serve as an unbiased veto for any of them. Revision 2 exempted only A1; that was too narrow |
+| **A0's own numbers** | A0 is the control, so its `sup-train` figures are diagnostics rather than a claim. Its **veto and validation numbers still come from `sup-val`**, so all three arms are judged on the same untouched split |
 
 ## Every experiment reports the full set
 
@@ -331,12 +471,13 @@ supplementary.
 2. **Slice regression will bind before mean gain does.** Any reranker
    aggressive enough to move `browsing` will move `boundary`, which has nothing
    to gain.
-3. **Conditional MRR given the target is in the window will be much higher than
-   0.8526**, and the oracle ceiling correspondingly tighter than the naive
-   `0.995 − 0.8526 = 0.142`. If measurement 3 comes back near 0.85, the
-   reranker is failing on lists that *do* contain the answer, which would make
-   A1 far more promising than I expect — and that is the outcome worth
-   discovering early, which is why the four measurements come first.
+3. **Conditional MRR given the target reached the window will be much higher
+   than the unconditional figure**, and the session-level oracle ceiling
+   correspondingly tighter than any naive `HR@10 − MRR` arithmetic. If it comes
+   back close to the unconditional number, the reranker is failing on lists
+   that *do* contain the answer, which would make A1 far more promising than I
+   expect — the outcome worth discovering early, and why the four measurements
+   come first and come from `sup-train`.
 4. **A2's binding constraint will be cold load, not steady latency.** The
    catalog already costs ~10.7 s to load; a vendored model adds to a budget
    that is already the largest fixed cost in the system.
