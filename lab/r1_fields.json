@@ -1,0 +1,148 @@
+{
+  "agent_commit": "b92b17d",
+  "agent_in_worktree": true,
+  "agent_sha256": "0ad7f7f9c9a08235",
+  "agent_source": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-lease-h8bmof23/tree/starter/agent.py",
+  "catalog": {
+    "additional_cold_load_s": 0.4199,
+    "additional_cold_load_within_noise": false,
+    "additional_rss_mb": 32.37,
+    "cold_load_cap_s": 5.0,
+    "cold_load_pass": true,
+    "cold_load_run_spread_s": 0.1441,
+    "field_store_mb": 18.94,
+    "lean": {
+      "build_s_median": 5.294,
+      "build_s_spread": 0.1441,
+      "rss_delta_mb_median": 426.0,
+      "runs": [
+        {
+          "build_s": 5.294,
+          "cpu_count": 10,
+          "field_store_bytes": 0,
+          "products": 50000,
+          "rss_before_bytes": 19791872,
+          "rss_delta_bytes": 426000384,
+          "rss_peak_bytes": 445792256,
+          "semantic_fields": false
+        },
+        {
+          "build_s": 5.2926,
+          "cpu_count": 10,
+          "field_store_bytes": 0,
+          "products": 50000,
+          "rss_before_bytes": 19677184,
+          "rss_delta_bytes": 421920768,
+          "rss_peak_bytes": 441597952,
+          "semantic_fields": false
+        },
+        {
+          "build_s": 5.4367,
+          "cpu_count": 10,
+          "field_store_bytes": 0,
+          "products": 50000,
+          "rss_before_bytes": 19791872,
+          "rss_delta_bytes": 428294144,
+          "rss_peak_bytes": 448086016,
+          "semantic_fields": false
+        }
+      ]
+    },
+    "lean_field_store_bytes": 0,
+    "reps": 3,
+    "rss_delta_cap_mb": 400.0,
+    "rss_pass": true,
+    "semantic_on": {
+      "build_s_median": 5.7139,
+      "build_s_spread": 0.014,
+      "rss_delta_mb_median": 458.38,
+      "runs": [
+        {
+          "build_s": 5.7047,
+          "cpu_count": 10,
+          "field_store_bytes": 18941882,
+          "products": 50000,
+          "rss_before_bytes": 19677184,
+          "rss_delta_bytes": 458375168,
+          "rss_peak_bytes": 478052352,
+          "semantic_fields": true
+        },
+        {
+          "build_s": 5.7187,
+          "cpu_count": 10,
+          "field_store_bytes": 18941882,
+          "products": 50000,
+          "rss_before_bytes": 19791872,
+          "rss_delta_bytes": 449118208,
+          "rss_peak_bytes": 468910080,
+          "semantic_fields": true
+        },
+        {
+          "build_s": 5.7139,
+          "cpu_count": 10,
+          "field_store_bytes": 18941882,
+          "products": 50000,
+          "rss_before_bytes": 20037632,
+          "rss_delta_bytes": 464191488,
+          "rss_peak_bytes": 484229120,
+          "semantic_fields": true
+        }
+      ]
+    }
+  },
+  "catalog_sha256": "da979b05a68af864",
+  "code_dirty": false,
+  "code_dirty_files": [],
+  "component": "semantic field store",
+  "config": {},
+  "corpus": {
+    "effective_k_counts": {
+      "10": 4402
+    },
+    "empty_product_texts": 0,
+    "invoking_turns": 390,
+    "product_text_chars": {
+      "max": 4960,
+      "min": 107,
+      "n": 3900,
+      "p50": 967.0,
+      "p95": 2291
+    },
+    "product_texts": 3900,
+    "queries_at_the_cap": 0,
+    "query_cap_chars": 200,
+    "query_chars": {
+      "max": 112,
+      "min": 19,
+      "n": 390,
+      "p50": 43.0,
+      "p95": 77
+    },
+    "reason_counts": {
+      "ineligible": 4012,
+      "reranked": 390
+    },
+    "seconds": 137.3,
+    "sessions": 800,
+    "turns": 4402
+  },
+  "dataset": "data/supplementary_dev.jsonl",
+  "dataset_sha256": "6cde11cca2612b77",
+  "harness_commit": "b92b17d",
+  "model_absent_note": "onnxruntime, tokenizers and the pinned TinyBERT artifact are not present in this environment, so no semantic latency, offline-load or determinism number is produced here. Under notes/44 section 0.5 a model_absent turn is EXPERIMENT-INVALIDATING: running the A2 arm now would measure A0 and report it under A2's name.",
+  "model_gates_pending": [
+    "topk_p95_ms",
+    "offline_load",
+    "deterministic_output"
+  ],
+  "model_measured": false,
+  "phase": "7A-R1",
+  "result_log_dirty": [],
+  "scenario": "supplementary_dev",
+  "scenario_sha256": "4ee268fe835c3a10",
+  "schema_version": 2,
+  "seeds": [],
+  "smoke": false,
+  "tag": "p7a-r1-fields",
+  "ts": "2026-08-30T01:50:42"
+}

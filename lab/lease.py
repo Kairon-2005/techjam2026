@@ -81,7 +81,13 @@ WATCHED = (
 # invalidations.jsonl was missing here, so recording an aborted run made the
 # lease refuse to start the re-run of that same experiment. benchmarks.jsonl is
 # here for the same reason and was added with it, not after being caught by it.
-LEDGER_PREFIXES = ("lab/results", "lab/invalidations", "lab/benchmarks")
+# Append-only ledgers. Appending to one necessarily dirties the tree, so a run
+# must not be blocked by the record of the previous run. REWRITTEN artefacts --
+# lab/a1cache.meta.json, lab/r1_fields.json -- are deliberately NOT here: those
+# must be committed before the next experiment, because a changed artefact is a
+# changed input.
+LEDGER_PREFIXES = ("lab/results", "lab/invalidations", "lab/benchmarks",
+                   "lab/a1builds", "lab/r1builds")
 JOURNAL_ENV = "LAB_JOURNAL"
 
 

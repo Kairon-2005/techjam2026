@@ -176,7 +176,11 @@ def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
         return (mrr, -l1_distance(weights, original),
                 tuple(-weights[n] for n in SEARCH_WEIGHTS))
 
-    for _ in range(int(sweeps)):
+    # Which coordinates actually moved, in order. Additive telemetry: it is
+    # appended to when a move is accepted and read by nobody in the loop, so
+    # the search it describes is the search that would have run without it.
+    accepted: list[dict] = []
+    for sweep in range(int(sweeps)):
         for name in SEARCH_WEIGHTS:
             for value in candidate_values(name, original[name]):
                 trials += 1
@@ -184,12 +188,17 @@ def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
                 trial[name] = value
                 mrr = cached_mrr(sessions, trial)
                 if rank(trial, mrr) > rank(best, best_mrr):
+                    accepted.append({"sweep": sweep + 1, "trial": trials,
+                                     "weight": name, "from": best[name],
+                                     "to": value, "mrr_from": best_mrr,
+                                     "mrr_to": mrr})
                     best, best_mrr = trial, mrr
     result = {"weights": best, "baseline_mrr": baseline_mrr, "best_mrr": best_mrr,
               "delta_mrr": best_mrr - baseline_mrr, "mrr": best_mrr,
               "trials": trials, "sweeps": int(sweeps),
               "weights_unchanged": weights_unchanged(best),
-              "searched": list(SEARCH_WEIGHTS), "multipliers": list(MULTIPLIERS)}
+              "searched": list(SEARCH_WEIGHTS), "multipliers": list(MULTIPLIERS),
+              "accepted": accepted}
     result["no_op"] = is_no_op(result)
     return result
 
