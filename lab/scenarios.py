@@ -391,6 +391,8 @@ def _profile_telemetry(agent, truth: dict, session_to_sample: dict,
 
     sessions = margins = 0
     with_credible = eligible = wins = 0
+    d3_checked = d3_violations = 0
+    ceiling = float(A.DEFAULTS["profile_max_coverage"])
     excluded_target_absent = excluded_no_supported_tag = 0
     categories: dict[str, int] = {c.value: 0 for c in _C.PROFILE_CATEGORY_PRECEDENCE}
     credible_sets: list[frozenset] = []
@@ -404,6 +406,15 @@ def _profile_telemetry(agent, truth: dict, session_to_sample: dict,
         sessions += 1
         for tag in row.get("profile_tags") or ():
             categories[tag["category"]] = categories.get(tag["category"], 0) + 1
+        # D3 re-checked from the RECORDED numbers rather than trusted from the
+        # category label. Trusting the label would make D3 a tautology over the
+        # classifier that produced it, which is the one thing it must not be.
+        for tag in row.get("profile_tags") or ():
+            if tag["category"] != "specific_informative":
+                continue
+            d3_checked += 1
+            if int(tag["match_count"]) < 1 or float(tag["coverage"]) > ceiling:
+                d3_violations += 1
         credible = tuple(row.get("profile_credible_tags") or ())
         if credible:
             with_credible += 1
@@ -436,7 +447,9 @@ def _profile_telemetry(agent, truth: dict, session_to_sample: dict,
            "profile_eligible_sessions": eligible,
            "profile_excluded_target_absent": excluded_target_absent,
            "profile_excluded_no_supported_tag": excluded_no_supported_tag,
-           "profile_d5_margins": margins, "profile_d5_wins": wins}
+           "profile_d5_margins": margins, "profile_d5_wins": wins,
+           "profile_d3_credible_checked": d3_checked,
+           "profile_d3_violations": d3_violations}
     out.update({f"profile_cat_{k}": v for k, v in categories.items()})
     if margin_values:
         out["profile_d5_median_margin"] = round(statistics.median(margin_values), 6)
