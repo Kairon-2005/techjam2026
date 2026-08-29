@@ -8,6 +8,7 @@ correct while measuring something else.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import unittest
 
@@ -168,6 +169,34 @@ class MatchCountAndCoverageTest(unittest.TestCase):
     def test_every_candidate_matching_is_full_coverage(self) -> None:
         got = C.profile_support("cotton", self.window(30))
         self.assertEqual((got.match_count, got.coverage), (30, 1.0))
+
+
+class MaximalBoundsTest(unittest.TestCase):
+    """The bound is asserted by BUILDING the maximal instance and measuring it.
+
+    Adding the fields up by hand is how a declared bound of 64 came to have a
+    true maximum of 73 in Phase 6A.
+    """
+
+    def maximal_tags(self) -> tuple[str, ...]:
+        return tuple(f"{'z' * (C.MAX_PROFILE_TAG_CHARS - 1)}{i}" for i in range(8))
+
+    def test_a_maximal_profile_decision_stays_within_the_byte_bound(self) -> None:
+        import dataclasses
+        import json
+        tags = self.maximal_tags()
+        snap = C.ProfileSnapshot(tags=tags, stated_values=tags,
+                                 negated_values=tags, blocked_values=tags, turn=99)
+        decision = C.classify_profile(snap, C.ProfilePolicy(), ["text"] * 30)
+        self.assertEqual(len(decision.tags), C.MAX_PROFILE_TAGS)
+        blob = json.dumps(dataclasses.asdict(decision), default=str).encode()
+        self.assertLessEqual(len(blob), C.MAX_BYTES)
+
+    def test_the_phase_6a_snapshot_bound_survives_maximal_profile_tags(self) -> None:
+        from tests.test_context import _maximal
+        snap = dataclasses.replace(_maximal(), profile_tags=self.maximal_tags())
+        self.assertLessEqual(C.entry_count(snap), C.MAX_ENTRIES)
+        self.assertLessEqual(C.snapshot_bytes(snap), C.MAX_BYTES)
 
 
 class PurityTest(unittest.TestCase):
