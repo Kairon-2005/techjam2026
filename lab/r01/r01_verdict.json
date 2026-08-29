@@ -1,0 +1,11 @@
+{
+  "reps": 7,
+  "p95_median": 15.2344,
+  "cold_median": 0.4684,
+  "rss_delta_mb": 134.529024,
+  "total_mb": 5.463224,
+  "largest_mib": 4.308768272399902,
+  "deterministic": true,
+  "all_caps_pass": true,
+  "baseline_rss_bytes": 53936128
+}
