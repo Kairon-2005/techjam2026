@@ -239,6 +239,13 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(self.manifest["split_train_n"], 800)
         self.assertEqual(self.manifest["split_val_n"], 200)
 
+    def test_the_row_carries_every_field_citability_requires(self) -> None:
+        # A build whose gate passed and whose row cannot be cited is a build
+        # that did not happen, as far as any report is concerned.
+        from lab import provenance as P
+        for field in P.FINGERPRINTS:
+            self.assertTrue(self.manifest.get(field), field)
+
     def test_the_gate_verdict_is_a_pass(self) -> None:
         self.assertTrue(self.manifest["ok"], self.manifest.get("first_mismatch"))
         self.assertEqual(self.manifest["full_order_mismatches"], 0)

@@ -22,6 +22,10 @@ def main() -> None:
     ap.add_argument("--scenario", action="append", default=[])
     ap.add_argument("--ts", action="append", default=[],
                     help="restrict to rows with these exact timestamps")
+    ap.add_argument("--row-key", action="append", default=[], dest="row_key",
+                    help="restrict to these provenance row keys -- the ledger's "
+                         "own identity, and the only selector that is exact "
+                         "when several rows share every other field")
     ap.add_argument("--log", default=str(P.RESULTS),
                     help="which ledger to read; the invalidation record itself "
                          "always goes to lab/invalidations.jsonl")
@@ -33,7 +37,8 @@ def main() -> None:
     rows = [r for r in P.load(Path(args.log))
             if (not args.tag or r.get("tag") in args.tag)
             and (not args.scenario or r.get("scenario") in args.scenario)
-            and (not args.ts or r.get("ts") in args.ts)]
+            and (not args.ts or r.get("ts") in args.ts)
+            and (not args.row_key or P.row_key(r) in args.row_key)]
     if not rows:
         print("no rows matched; nothing appended")
         return

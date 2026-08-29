@@ -284,12 +284,12 @@ def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
         "split_val_hash": split.val_hash,
         "split_train_n": len(split.train),
         "split_val_n": len(split.val),
-        "agent_commit": fingerprints["agent_commit"],
-        "agent_sha256": fingerprints["agent_sha256"],
-        "agent_in_worktree": fingerprints["agent_in_worktree"],
-        "code_dirty": fingerprints["code_dirty"],
-        "catalog_sha256": fingerprints["catalog_sha256"],
-        "dataset_sha256": fingerprints["dataset_sha256"],
+        # The WHOLE fingerprint block, not a hand-picked subset. Cherry-picking
+        # it left scenario_sha256 off the row, and lab/provenance.py refused to
+        # cite a build whose gate had passed -- for a field the driver simply
+        # forgot to copy. A future addition to P.FINGERPRINTS now arrives here
+        # on its own.
+        **fingerprints,
         "duplicate_rerank_keys": [list(k) for k in built["capture"].duplicate_keys],
         "orphan_rerank_calls": built["capture"].orphan_calls,
         "build_seconds": built["seconds"],
