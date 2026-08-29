@@ -74,7 +74,21 @@ WATCHED = (
     "evaluator/local_evaluator.py",
     "data/public_set.jsonl",
     "data/catalog.jsonl",
+    # Phase 7A-R1. The A1 feature cache is an INPUT to the coordinate search
+    # exactly as the catalog is an input to a scored run: it is gitignored,
+    # linked into the tree rather than copied, and watched so a swap between
+    # the gate that passed it and the search that consumes it cannot go
+    # unnoticed. lab/split.py and lab/a1search.py decide what the search means.
+    "lab/a1cache.jsonl",
+    "lab/split.py",
+    "lab/a1search.py",
+    "lab/a1cache.py",
 )
+
+# Gitignored inputs the checkout has no copy of. Linked rather than copied --
+# the runs only read them, and the link targets are fingerprinted above, so a
+# repoint mid-flight is caught.
+LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl")
 
 # Ledgers churn by definition -- appending a row, or an invalidation for one,
 # dirties the tree -- so they are excluded from the fingerprint's dirty set.
@@ -195,13 +209,19 @@ def _worktree(commit: str, origin: Path):
         shutil.rmtree(tmp, ignore_errors=True)
         raise LeaseBusy(f"could not isolate: {proc.stderr.strip()}")
     try:
-        # data/catalog.jsonl is 58 MB and gitignored, so the checkout has no
-        # copy. Link rather than copy: the run only reads it, and the link
-        # target is fingerprinted so a swap cannot pass unnoticed.
-        catalog = origin / "data" / "catalog.jsonl"
-        if catalog.exists():
-            (tree / "data").mkdir(parents=True, exist_ok=True)
-            (tree / "data" / "catalog.jsonl").symlink_to(catalog)
+        # The gitignored inputs the checkout has no copy of: the 58 MB catalog
+        # and the 420 MB A1 feature cache. Link rather than copy -- the runs
+        # only read them, and the link targets are fingerprinted so a swap
+        # cannot pass unnoticed.
+        for relative in LINKED_INPUTS:
+            source = origin / relative
+            if not source.exists():
+                continue
+            target = tree / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(source)
         yield tree
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", str(tree)],

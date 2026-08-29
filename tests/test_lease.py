@@ -58,6 +58,22 @@ class FingerprintTest(unittest.TestCase):
         self.assertIn("data/public_set.jsonl", L.WATCHED)
         self.assertIn("starter/agent.py", L.WATCHED)
 
+    def test_the_a1_cache_is_watched(self) -> None:
+        # 420 MB, gitignored, and the INPUT to the coordinate search. A cache
+        # swapped between the gate that passed it and the search that consumes
+        # it would produce a weight vector, an MRR and a delta that all look
+        # exactly like a result.
+        self.assertIn("lab/a1cache.jsonl", L.WATCHED)
+        for module in ("lab/split.py", "lab/a1search.py", "lab/a1cache.py"):
+            self.assertIn(module, L.WATCHED)
+
+    def test_every_linked_input_is_also_watched(self) -> None:
+        # A linked input that is not fingerprinted is the worst of both: it
+        # reaches the run through a path the run cannot check, and a repoint
+        # leaves no trace at all.
+        for relative in L.LINKED_INPUTS:
+            self.assertIn(relative, L.WATCHED, relative)
+
 
 class LeaseVerdictTest(unittest.TestCase):
     def setUp(self) -> None:
