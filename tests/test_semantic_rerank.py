@@ -21,6 +21,7 @@ from pathlib import Path
 
 import starter.agent as A
 import starter.context as C
+import starter.semantic as SEM
 from tests.test_indexes import _catalog_file
 
 OPENING = "I'm looking for Clothing Women Dresses, but I'm still exploring."
@@ -82,11 +83,11 @@ class EffectiveKTest(SemanticBase):
                                       (10, 10, 30, 10), (10, 10, 3, 3),
                                       (0, 10, 30, 0), (30, 10, 30, 10)):
             with self.subTest(k=k, top_k=top_k, n=n):
-                self.assertEqual(A.Agent._effective_semantic_k(k, top_k, n), expected)
+                self.assertEqual(SEM.effective_k(k, top_k, n), expected)
 
     def test_effective_k_is_never_negative(self) -> None:
-        self.assertEqual(A.Agent._effective_semantic_k(-5, 10, 30), 0)
-        self.assertEqual(A.Agent._effective_semantic_k(10, 0, 30), 0)
+        self.assertEqual(SEM.effective_k(-5, 10, 30), 0)
+        self.assertEqual(SEM.effective_k(10, 0, 30), 0)
 
 
 class FusionTest(SemanticBase):
@@ -310,7 +311,7 @@ class FallbackTest(SemanticBase):
     def test_a_load_failure_is_byte_exact_a0(self) -> None:
         def make():
             ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0)
-            ag._semantic_session = lambda cfg: (_ for _ in ()).throw(RuntimeError("boom"))
+            ag._semantic_scorer = lambda d, m: (_ for _ in ()).throw(RuntimeError("boom"))
             return ag
         self.compare(make)
 
@@ -322,12 +323,17 @@ class FallbackTest(SemanticBase):
         self.compare(make)
 
     def test_an_empty_query_is_byte_exact_a0(self) -> None:
-        def make():
-            ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0)
-            ag._semantic_query = lambda state: ""
-            ag._semantic_score_order = lambda q, a: list(reversed(a))
-            return ag
-        self.compare(make)
+        import starter.semantic as _S
+        original = _S.build_query
+        _S.build_query = lambda *a, **k: ""
+        try:
+            def make():
+                ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0)
+                ag._semantic_score_order = lambda q, a: list(reversed(a))
+                return ag
+            self.compare(make)
+        finally:
+            _S.build_query = original
 
     def test_a_scorer_returning_a_bad_permutation_falls_back(self) -> None:
         # A scorer that drops or invents an ASIN must not reach the customer.
@@ -347,7 +353,7 @@ class EligibilityTest(SemanticBase):
     def eligible(self, **state) -> bool:
         base = {"route": "browsing", "slots": [], "last_override_turn": 0,
                 "category": None}
-        return A.Agent._semantic_eligible({**base, **state})
+        return SEM.eligible({**base, **state})
 
     def slot(self, **kw):
         return A.SlotValue(**{"attribute": "material", "value": "silk",
@@ -386,6 +392,133 @@ class EligibilityTest(SemanticBase):
     def test_one_active_hard_slot_is_allowed(self) -> None:
         self.assertTrue(self.eligible(slots=[self.slot(hardness="hard")]))
 
+    def test_a_contested_value_blocks(self) -> None:
+        # The gate the first draft omitted. _uncredible(state) is DialogueMixin's
+        # contested / pre-override set, and a value the session has contested is
+        # exactly where A0's structured handling is doing work this relevance
+        # model has not been validated to replicate.
+        self.assertFalse(SEM.eligible({"route": "browsing", "slots": [],
+                                       "last_override_turn": 0},
+                                      uncredible=frozenset({"silk"})))
+
+    def test_a_contested_single_valued_slot_blocks_end_to_end(self) -> None:
+        # Two values of a SINGLE_VALUED attribute: the older is superseded and
+        # lands in _uncredible, so the whole turn is ineligible.
+        A.clear_catalog_cache()
+        ag = self.agent()
+        state = {"route": "browsing", "last_override_turn": 0, "slots": [
+            self.slot(attribute="color", value="blue", source_turn=1),
+            self.slot(attribute="color", value="red", source_turn=2)]}
+        blocked = ag._uncredible(state)
+        self.assertTrue(blocked, "the superseded value should be uncredible")
+        self.assertFalse(SEM.eligible(state, blocked))
+
+    def test_a_pre_override_slot_blocks_end_to_end(self) -> None:
+        A.clear_catalog_cache()
+        ag = self.agent()
+        state = {"route": "browsing", "last_override_turn": 2,
+                 "slots": [self.slot(value="silk", source_turn=1)]}
+        blocked = ag._uncredible(state)
+        self.assertIn("silk", blocked)
+        self.assertFalse(SEM.eligible(state, blocked))
+
+    def test_contested_values_never_reach_the_semantic_query(self) -> None:
+        # Even where the gate is bypassed, the query must not re-introduce a
+        # value the session contested.
+        state = {"category": None, "terms": ["silk", "cotton"],
+                 "slots": [self.slot(value="silk")], "last_override_turn": 0}
+        got = SEM.build_query(state, uncredible=frozenset({"silk"}))
+        self.assertNotIn("silk", got)
+        self.assertIn("cotton", got)
+
+
+class TelemetryTest(SemanticBase):
+    """Ten distinct reasons, recorded. Never collapsed."""
+
+    def trace(self, **cfg) -> dict:
+        A.clear_catalog_cache()
+        ag = self.agent(semantic_rerank_mode="on", trace=True, **cfg)
+        if cfg.get("semantic_lambda"):
+            ag._semantic_score_order = lambda q, a: list(reversed(a))
+        self.turns(ag)
+        return ag._sessions["s"]["trace_log"][-1]
+
+    def test_the_reason_reaches_the_trace(self) -> None:
+        got = self.trace(semantic_lambda=0.0)
+        self.assertIn("semantic_reason", got)
+        self.assertIn(got["semantic_reason"], SEM.REASONS)
+
+    def test_the_frozen_fields_are_all_present(self) -> None:
+        got = self.trace(semantic_lambda=0.0)
+        for key in ("semantic_reason", "semantic_effective_k",
+                    "semantic_eligible", "semantic_invoked",
+                    "semantic_invalidating", "semantic_lambda_zero_exact"):
+            self.assertIn(key, got)
+
+    def test_lambda_zero_records_an_exact_degeneracy_assertion(self) -> None:
+        got = self.trace(semantic_lambda=0.0)
+        self.assertEqual(got["semantic_reason"], SEM.REASON_LAMBDA_ZERO)
+        self.assertIs(got["semantic_lambda_zero_exact"], True)
+
+    def test_a_missing_model_is_recorded_as_model_absent(self) -> None:
+        A.clear_catalog_cache()
+        ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0,
+                        semantic_model_dir="/nonexistent", trace=True)
+        self.turns(ag)
+        reasons = {t.get("semantic_reason")
+                   for t in ag._sessions["s"]["trace_log"]}
+        self.assertIn(SEM.REASON_MODEL_ABSENT, reasons)
+
+    def test_the_three_failure_modes_are_distinct_values(self) -> None:
+        # Collapsing them would let a shard where the model never ran be
+        # reported as a quality result.
+        self.assertEqual(len({SEM.REASON_MODEL_ABSENT, SEM.REASON_LOAD_FAILURE,
+                              SEM.REASON_INFERENCE_FAILURE}), 3)
+
+    def test_the_invalidating_set_excludes_model_absent(self) -> None:
+        # A model that was never installed is a configuration fact; a model
+        # that failed to load or infer invalidates the shard.
+        self.assertNotIn(SEM.REASON_MODEL_ABSENT, SEM.INVALIDATING_REASONS)
+        for reason in (SEM.REASON_LOAD_FAILURE, SEM.REASON_INFERENCE_FAILURE,
+                       SEM.REASON_BAD_PERMUTATION):
+            self.assertIn(reason, SEM.INVALIDATING_REASONS)
+
+    def test_off_records_no_semantic_telemetry(self) -> None:
+        A.clear_catalog_cache()
+        ag = self.agent(trace=True)
+        self.turns(ag)
+        self.assertNotIn("semantic_reason", ag._sessions["s"]["trace_log"][-1])
+
+
+class ModuleBoundaryTest(unittest.TestCase):
+    """Candidate ordering is retrieval's domain (Phase 5B)."""
+
+    def test_dialogue_owns_no_semantic_machinery(self) -> None:
+        source = Path("starter/dialogue.py").read_text()
+        for banned in ("onnxruntime", "tokenizers", "InferenceSession",
+                       "rrf_fuse", "semantic_rerank", "product_text"):
+            self.assertNotIn(banned, source, f"dialogue.py still owns {banned}")
+
+    def test_retrieval_calls_the_semantic_module(self) -> None:
+        source = Path("starter/retrieval.py").read_text()
+        self.assertIn("_semantic.reorder", source)
+
+    def test_the_semantic_module_imports_only_context(self) -> None:
+        import ast
+        tree = ast.parse(Path("starter/semantic.py").read_text())
+        starter_imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("starter"):
+                starter_imports.add(node.module.split(".")[-1])
+            elif isinstance(node, ast.ImportFrom) and node.module == "starter":
+                starter_imports.update(a.name for a in node.names)
+        self.assertLessEqual(starter_imports, {"starter", "context"},
+                             f"semantic.py imports {starter_imports}")
+
+    def test_the_mro_is_unchanged(self) -> None:
+        self.assertEqual([c.__name__ for c in A.Agent.__mro__],
+                         ["Agent", "RetrievalMixin", "DialogueMixin", "object"])
+
 
 class QueryConstructionTest(SemanticBase):
     """One canonical query. Order fixed, exclusions enforced."""
@@ -403,7 +536,8 @@ class QueryConstructionTest(SemanticBase):
         ag = self.agent()
         base = {"category": None, "slots": [], "terms": [],
                 "last_override_turn": 0}
-        return ag._semantic_query({**base, **state})
+        return SEM.build_query({**base, **state},
+                               ag._uncredible({**base, **state}))
 
     def test_category_comes_first(self) -> None:
         got = self.query(category="dresses", terms=["cotton"])
@@ -443,27 +577,81 @@ class QueryConstructionTest(SemanticBase):
 
 
 class ProductSerializationTest(SemanticBase):
-    def test_the_field_order_is_canonical(self) -> None:
+    def sem_agent(self) -> A.Agent:
+        # sem_title / sem_desc are built only when the cascade is armed, so a
+        # lean agent would serialize products without their title.
         A.clear_catalog_cache()
-        ag = self.agent()
-        asin = next(iter(ag.cat.cats))
-        got = ag._semantic_product_text(asin)
-        title = ag.cat.title.get(asin, "")
-        if title:
-            self.assertTrue(got.startswith(title))
-        self.assertIn(ag.cat.cats[asin].split(",")[0].strip(), got)
+        return self.agent(semantic_rerank_mode="on")
+
+    def test_the_field_order_is_canonical(self) -> None:
+        # title -> full category path -> features/details -> description, each
+        # EXACTLY once. Asserted on positions, not on membership: a duplicated
+        # field still "contains" everything.
+        ag = self.sem_agent()
+        asin = next(a for a in ag.cat.cats
+                    if ag.cat.sem_title.get(a) and ag.cat.cats.get(a)
+                    and ag.cat.feat.get(a) and ag.cat.sem_desc.get(a))
+        got = SEM.product_text(ag.cat, asin)
+        title = ag.cat.sem_title[asin]
+        cats = ag.cat.cats[asin]
+        feat = ag.cat.feat[asin]
+        desc = ag.cat.sem_desc[asin]
+        self.assertTrue(got.startswith(title), "title must come first")
+        self.assertLess(got.index(cats), got.index(feat))
+        self.assertLess(got.index(feat), got.index(desc))
+
+    def test_no_field_appears_twice(self) -> None:
+        # The defect this replaces: building from cat.text -- which is already
+        # " ".join(title, categories, features, details, store, description) --
+        # while ALSO prepending title/categories/features duplicated three
+        # fields and pushed the description out of a 256-token window.
+        ag = self.sem_agent()
+        asin = next(a for a in ag.cat.cats
+                    if ag.cat.sem_title.get(a) and ag.cat.cats.get(a))
+        got = SEM.product_text(ag.cat, asin)
+        self.assertEqual(got.count(ag.cat.sem_title[asin]), 1)
+        self.assertEqual(got.count(ag.cat.cats[asin]), 1)
+
+    def test_store_is_never_included(self) -> None:
+        # `store` IS in cat.text and is NOT in the pre-registered field list,
+        # so a serialization built from cat.text would leak the brand name into
+        # the relevance model.
+        from tests.test_indexes import PRODUCTS
+        ag = self.sem_agent()
+        checked = 0
+        for product in PRODUCTS:
+            asin = str(product.get("parent_asin") or "")
+            store = str(product.get("store") or "").strip().casefold()
+            if not asin or not store or asin not in ag.cat.cats:
+                continue
+            blob = ag.cat.text.get(asin, "")
+            if store not in blob:
+                continue
+            got = SEM.product_text(ag.cat, asin)
+            # Only meaningful where the store string is not also a legitimate
+            # part of a kept field.
+            kept = (ag.cat.sem_title.get(asin, ""), ag.cat.cats.get(asin, ""),
+                    ag.cat.feat.get(asin, ""), ag.cat.sem_desc.get(asin, ""))
+            if any(store in field for field in kept):
+                continue
+            checked += 1
+            self.assertNotIn(store, got, f"{asin}: store leaked into semantic text")
+        self.assertGreater(checked, 0, "no product exercised the store exclusion")
+
+    def test_the_semantic_store_is_opt_in(self) -> None:
+        A.clear_catalog_cache()
+        lean = self.agent()
+        self.assertEqual(len(lean.cat.sem_title), 0)
+        self.assertEqual(len(lean.cat.sem_desc), 0)
 
     def test_a_missing_asin_gives_empty_text(self) -> None:
-        A.clear_catalog_cache()
-        ag = self.agent()
-        self.assertEqual(ag._semantic_product_text("NOSUCHASIN"), "")
+        self.assertEqual(SEM.product_text(self.sem_agent().cat, "NOSUCHASIN"), "")
 
     def test_serialization_is_deterministic(self) -> None:
-        A.clear_catalog_cache()
-        ag = self.agent()
+        ag = self.sem_agent()
         asin = next(iter(ag.cat.cats))
-        self.assertEqual(ag._semantic_product_text(asin),
-                         ag._semantic_product_text(asin))
+        self.assertEqual(SEM.product_text(ag.cat, asin),
+                         SEM.product_text(ag.cat, asin))
 
 
 if __name__ == "__main__":

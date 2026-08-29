@@ -52,10 +52,25 @@ class _Catalog:
 
     FIELDS = ("title", "categories", "features", "details", "store", "description")
 
-    def __init__(self, path: Path, extras: bool = True) -> None:
+    def __init__(self, path: Path, extras: bool = True,
+                 semantic_fields: bool = False) -> None:
         # `extras` controls the order/card structures, which are only read when
         # w_pos / w_card are non-zero. Both are 0.0 by default.
         self.extras = extras
+        # Phase 7A-R1. `text` is " ".join(title, categories, features, details,
+        # store, description), so a semantic serialization built from it would
+        # duplicate three fields and smuggle in `store`, which the
+        # pre-registration excludes. These two are the fields NOT already
+        # available separately: `feat` is features+details and `cats` is the
+        # category path, but the full title (self.title is clipped to 90 for
+        # display) and the description are not.
+        #
+        # OPT-IN, like `extras`: off by default, so the feature-off memory
+        # profile is unchanged and nothing is paid for a path that is not
+        # running. Its cost is measured in the integrated feasibility run.
+        self.semantic_fields = semantic_fields
+        self.sem_title: dict[str, str] = {}
+        self.sem_desc: dict[str, str] = {}
         self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         cur = self.conn.cursor()
         cur.execute(
@@ -104,6 +119,9 @@ class _Catalog:
                 if extras:
                     self.order[asin] = ordered[:12]
                     self.card[asin] = _card4(p, blob)
+                if semantic_fields:
+                    self.sem_title[asin] = _norm(_text(p.get("title")))
+                    self.sem_desc[asin] = _norm(_text(p.get("description")))
                 self.cats[asin] = _norm(_text(p.get("categories")))
                 raw_path = [_norm(str(c)) for c in (p.get("categories") or []) if str(c).strip()]
                 self.catpath[asin] = tuple(sys.intern(c) for c in raw_path)
@@ -636,15 +654,21 @@ def clear_catalog_cache() -> None:
     _CATALOG_CACHE.clear()
 
 
-def _catalog(path: str | Path, extras: bool = True) -> _Catalog:
+def _catalog(path: str | Path, extras: bool = True,
+             semantic_fields: bool = False) -> _Catalog:
     key = str(Path(path).resolve())
     cached = _CATALOG_CACHE.get(key)
     # A catalog built WITH extras is a superset: reuse it for lean requests too.
-    if cached is not None and (cached.extras or not extras):
+    # The same holds for the semantic fields, and both must be satisfied --
+    # reusing a lean catalog for a semantic request would leave sem_desc empty
+    # and silently serialize products without their descriptions.
+    if cached is not None and (cached.extras or not extras) \
+            and (cached.semantic_fields or not semantic_fields):
         return cached
     if cached is not None:
         cached.close()          # superseded by the richer build; do not leak it
-    _CATALOG_CACHE[key] = _Catalog(Path(path), extras=extras)
+    _CATALOG_CACHE[key] = _Catalog(Path(path), extras=extras,
+                                   semantic_fields=semantic_fields)
     return _CATALOG_CACHE[key]
 
 

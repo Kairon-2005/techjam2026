@@ -54,6 +54,17 @@ FEATURE_OF = {"w_bm25": "f_bm25", "w_cat": "f_cat", "w_exact": "f_exact",
 # sign lives here and in exactly one place.
 NEGATIVE = frozenset({"w_neg"})
 
+# slot_soft is a WEIGHT AND A COMPUTE GATE. retrieval.py reads
+# `if cfg["slot_soft"] and phrases:` before computing `dead`, so setting it to
+# 0 in the full Agent SKIPS that work rather than merely zero-weighting
+# f_slot. It stays in the searched set because the SCORED outcome is identical
+# either way -- f_slot contributes 0 whether it was computed and multiplied by
+# zero, or never computed -- and tests/test_a1_cache.py pins that both
+# configurations replay A0 exactly. The cache records f_slot from the kernel
+# regardless of any trial weight, so a trial setting slot_soft = 0 reweights a
+# recorded feature rather than losing it. Any latency difference from skipping
+# `dead` is an implementation detail and is NOT a quality gain.
+
 
 def default_weights() -> dict[str, float]:
     return {name: float(A.DEFAULTS[name]) for name in SEARCH_WEIGHTS}
@@ -101,14 +112,30 @@ def cached_mrr(sessions, weights: dict[str, float]) -> float:
     return statistics.fmean(scores)
 
 
-def is_no_op(weights: dict[str, float]) -> bool:
-    """Did the search return the shipped weights unchanged?
-
-    notes/44 revision 3, Step 0: a no-op is not a passing arm. It is recorded,
-    it stops before `sup-val`, and it does not consume the public run.
-    """
+def weights_unchanged(weights: dict[str, float]) -> bool:
+    """Are these literally the shipped weights? Diagnostic, NOT the no-op test."""
     base = default_weights()
     return all(abs(weights[name] - base[name]) < 1e-12 for name in SEARCH_WEIGHTS)
+
+
+def is_no_op(result: dict) -> bool:
+    """Did the search find any QUALITY improvement? Judged on delta_mrr.
+
+    Weight equality is NOT sufficient and was the first draft's error. The
+    tie-break can move many weights without improving the objective -- on a
+    corpus where no weight separates anything, every candidate ties and the
+    tie-break picks whichever vector it prefers. That vector differs from
+    DEFAULTS, so a `weights != DEFAULTS` test would call it a challenger while
+    `best_mrr == baseline_mrr`: an arm with no quality gain consuming the
+    single public confirmation.
+
+    notes/44 revision 3, Step 0: a no-op stops before `sup-val`.
+    """
+    return float(result.get("delta_mrr", 0.0)) <= 0.0
+
+
+def l1_distance(weights: dict[str, float], reference: dict[str, float]) -> float:
+    return sum(abs(weights[n] - reference[n]) for n in SEARCH_WEIGHTS)
 
 
 def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
@@ -119,9 +146,19 @@ def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
     so two runs over the same cache return the same vector.
     """
     original = default_weights()
+    baseline_mrr = cached_mrr(sessions, original)
     best = dict(original)
-    best_mrr = cached_mrr(sessions, best)
+    best_mrr = baseline_mrr
     trials = 0
+
+    def rank(weights: dict[str, float], mrr: float):
+        """Higher is better. Tie-break 1 is DISTANCE FROM THE DEFAULTS, not the
+        absolute L1 norm: with no quality gain the shipped vector must win, so
+        a tie cannot drift the weights for free. Tie-break 2 is the canonical
+        tuple, which makes the order total."""
+        return (mrr, -l1_distance(weights, original),
+                tuple(-weights[n] for n in SEARCH_WEIGHTS))
+
     for _ in range(int(sweeps)):
         for name in SEARCH_WEIGHTS:
             for value in candidate_values(name, original[name]):
@@ -129,15 +166,15 @@ def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
                 trial = dict(best)
                 trial[name] = value
                 mrr = cached_mrr(sessions, trial)
-                key = (mrr, -sum(abs(v) for v in trial.values()),
-                       tuple(-trial[n] for n in SEARCH_WEIGHTS))
-                best_key = (best_mrr, -sum(abs(v) for v in best.values()),
-                            tuple(-best[n] for n in SEARCH_WEIGHTS))
-                if key > best_key:
+                if rank(trial, mrr) > rank(best, best_mrr):
                     best, best_mrr = trial, mrr
-    return {"weights": best, "mrr": best_mrr, "trials": trials,
-            "sweeps": int(sweeps), "no_op": is_no_op(best),
-            "searched": list(SEARCH_WEIGHTS), "multipliers": list(MULTIPLIERS)}
+    result = {"weights": best, "baseline_mrr": baseline_mrr, "best_mrr": best_mrr,
+              "delta_mrr": best_mrr - baseline_mrr, "mrr": best_mrr,
+              "trials": trials, "sweeps": int(sweeps),
+              "weights_unchanged": weights_unchanged(best),
+              "searched": list(SEARCH_WEIGHTS), "multipliers": list(MULTIPLIERS)}
+    result["no_op"] = is_no_op(result)
+    return result
 
 
 def write_cache(sessions, path: Path) -> str:

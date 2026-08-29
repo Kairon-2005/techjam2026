@@ -45,7 +45,8 @@ import time
 from pathlib import Path
 
 # --------------------------------------------------------------------------
-from starter import context as _context  # noqa: E402
+from starter import context as _context
+from starter import semantic as _semantic  # noqa: E402
 from starter.dialogue import DialogueMixin  # noqa: E402
 from starter.retrieval import RetrievalMixin  # noqa: E402
 from starter.catalog import (  # noqa: F401,E402
@@ -382,7 +383,10 @@ class Agent(RetrievalMixin, DialogueMixin):
         extras = self.cfg.get("build_extras")
         if extras is None:
             extras = bool(self.cfg["w_pos"]) or bool(self.cfg["w_card"])
-        self.cat = _catalog(_resolve_catalog(catalog_path), extras=bool(extras))
+        # The semantic field store is built only when the cascade is armed, so
+        # the feature-off memory profile is unchanged.
+        self.cat = _catalog(_resolve_catalog(catalog_path), extras=bool(extras),
+                            semantic_fields=self._semantic_mode(self.cfg) == "on")
         self.conn = self.cat.conn
         self.stop = set(BASE_STOP)
         if self.cfg["chrome_stop"]:
@@ -454,7 +458,7 @@ class Agent(RetrievalMixin, DialogueMixin):
     def _semantic_mode(self, cfg: dict) -> str:
         """Validated mode; an unrecognised value degrades to "off", loudly."""
         mode = str(cfg.get("semantic_rerank_mode", "off"))
-        if mode in _context.SEMANTIC_MODES:
+        if mode in _semantic.SEMANTIC_MODES:
             return mode
         key = f"semantic:{mode}"
         if key not in self._warned_modes:
@@ -704,8 +708,28 @@ class Agent(RetrievalMixin, DialogueMixin):
         # a0_ranked is `ranked` and is NEVER replaced: the question controller,
         # the ContextSnapshot and _compose's pool logic all read it below.
         a0_ordered = ranked[:top_k]
-        ordered, semantic_reason = self._semantic_reorder(
+        ordered, semantic_reason, semantic_k = self._semantic_reorder(
             list(a0_ordered), state, turn_cfg, top_k)
+        if turn_cfg["trace"] and self._semantic_mode(turn_cfg) == "on":
+            # Frozen telemetry (notes/44 revision 3). Ten DISTINCT reasons:
+            # collapsing model_absent, load_failure and inference_failure would
+            # let a shard where the model never ran be reported as a quality
+            # result.
+            trace.update({
+                "semantic_reason": semantic_reason,
+                "semantic_effective_k": semantic_k,
+                "semantic_eligible": _semantic.eligible(
+                    state, self._uncredible(state)),
+                "semantic_invoked": semantic_reason in (
+                    _semantic.REASON_RERANKED, _semantic.REASON_BAD_PERMUTATION),
+                "semantic_invalidating": semantic_reason
+                in _semantic.INVALIDATING_REASONS,
+                # lambda = 0 must degenerate to A0 EXACTLY, asserted per turn
+                # rather than assumed: it is the fallback's correctness proof.
+                "semantic_lambda_zero_exact": (
+                    ordered == a0_ordered
+                    if semantic_reason == _semantic.REASON_LAMBDA_ZERO else None),
+            })
         if turn_cfg["trace"] and profile_decision is not None:
             # "First recommendation turn" is derived from the trace rather than
             # tracked in session state: a shadow feature that wrote a marker

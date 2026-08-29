@@ -128,24 +128,41 @@ class SearchTest(unittest.TestCase):
         sessions = [session(turn(5)), session(turn(2))]
         out = S.coordinate_search(sessions, sweeps=1)
         base = S.cached_mrr(sessions, S.default_weights())
-        self.assertGreaterEqual(out["mrr"], base)
+        self.assertGreaterEqual(out["best_mrr"], base)
+        self.assertEqual(out["baseline_mrr"], base)
 
-    def test_the_tie_break_prefers_the_lower_l1_norm(self) -> None:
-        # Every candidate ties on a corpus the weights cannot separate, so the
-        # smallest weight vector must win rather than whichever came first.
+
+
+    def test_no_op_is_judged_on_delta_mrr_not_weight_equality(self) -> None:
+        # The first draft's error: the tie-break can move many weights without
+        # improving the objective, so `weights != DEFAULTS` would call a
+        # zero-gain arm a challenger.
+        self.assertTrue(S.is_no_op({"delta_mrr": 0.0}))
+        self.assertTrue(S.is_no_op({"delta_mrr": -0.01}))
+        self.assertFalse(S.is_no_op({"delta_mrr": 1e-9}))
+
+    def test_a_corpus_with_no_discriminating_feature_is_a_no_op(self) -> None:
+        # Every candidate ties, so no weight vector can improve MRR. Even if
+        # the tie-break returns a DIFFERENT vector, the arm must be a no-op.
+        sessions = [session(turn(None)), session(turn(None))]
+        out = S.coordinate_search(sessions, sweeps=1)
+        self.assertEqual(out["baseline_mrr"], out["best_mrr"])
+        self.assertLessEqual(out["delta_mrr"], 0.0)
+        self.assertTrue(out["no_op"], "zero quality gain must be a no-op")
+
+    def test_a_tie_keeps_the_shipped_weights(self) -> None:
+        # Tie-break 1 is distance from the DEFAULTS, so a tie cannot drift the
+        # weights for free.
         sessions = [session(turn(None))]
         out = S.coordinate_search(sessions, sweeps=1)
-        base = S.default_weights()
-        self.assertLessEqual(sum(abs(v) for v in out["weights"].values()),
-                             sum(abs(v) for v in base.values()))
+        self.assertEqual(out["weights"], S.default_weights())
+        self.assertTrue(out["weights_unchanged"])
 
-    def test_a_no_op_result_is_detected(self) -> None:
-        # notes/44 revision 3, Step 0: weights identical to the defaults are a
-        # no-op, and a no-op must not reach sup-val or the public run.
-        self.assertTrue(S.is_no_op(S.default_weights()))
-        changed = dict(S.default_weights())
-        changed["w_bm25"] = changed["w_bm25"] * 2
-        self.assertFalse(S.is_no_op(changed))
+    def test_a_real_gain_is_not_a_no_op(self) -> None:
+        sessions = [session(turn(12, n=30))]
+        out = S.coordinate_search(sessions, sweeps=1)
+        if out["delta_mrr"] > 0:
+            self.assertFalse(out["no_op"])
 
 
 class CacheTest(unittest.TestCase):

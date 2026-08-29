@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 
 from starter.context import normalize_profile_tags
+from starter import semantic as _semantic
 from starter.evidence import TOKEN_RE, _norm, relaxation_order
 
 
@@ -30,6 +31,37 @@ class RetrievalMixin:
     """Mixed into Agent. Not instantiable alone -- see host capabilities above."""
 
 
+
+    # ---- Phase 7A-R1: the A2 semantic cascade ---------------------------
+    #
+    # Candidate ordering is retrieval's domain (Phase 5B), so the cascade lives
+    # here and in starter/semantic.py. DialogueMixin owns none of it: an ONNX
+    # session, a tokenizer, a product serialization and a rank fusion are not
+    # dialogue concerns.
+
+    def _semantic_scorer(self, model_dir: str, max_length: int):
+        """One Scorer per model directory, cached on the Agent."""
+        cached = getattr(self, "_semantic_cache", None)
+        if cached is not None and cached[0] == model_dir:
+            return cached[1]
+        scorer = _semantic.Scorer.load(model_dir, max_length)
+        self._semantic_cache = (model_dir, scorer)
+        return scorer
+
+    def _semantic_reorder(self, ordered: list[str], state: dict, cfg: dict,
+                          top_k: int) -> tuple[list[str], str, int]:
+        """A COPY of `ordered`, prefix-reordered. Returns (result, reason, k).
+
+        `cfg` is the RESOLVED turn config and is the only source: mode, lambda,
+        k, the model path and max_length must all come from the same place, or
+        a route override could arm the mode while the model path came from the
+        base config.
+        """
+        return _semantic.reorder(
+            ordered, cat=self.cat, cfg=cfg, state=state, top_k=top_k,
+            uncredible=self._uncredible(state),
+            scorer_for=self._semantic_scorer,
+            score_order=getattr(self, "_semantic_score_order", None))
 
     def _rotate(self, ranked: list[str], state: dict, cfg: dict) -> list[str]:
         """Honour "show me something else" without throwing away the good head.
@@ -417,7 +449,7 @@ class RetrievalMixin:
         return dict(self._rerank(cands, state, want_scores=True))
 
     def _rerank(self, cands: list[tuple[str, float]], state: dict,
-                want_scores: bool = False):
+                want_scores: bool = False, collect: list | None = None):
         cfg = self._route_cfg(state)
         phrases = [_norm(p) for p in state["phrases"]]
         phrases = [p for p in phrases if len(p) >= 3]
@@ -516,8 +548,12 @@ class RetrievalMixin:
         lo, hi = (min(raw_bm25), max(raw_bm25)) if raw_bm25 else (0.0, 1.0)
         span = (hi - lo) or 1.0
 
-        scored: list[tuple[float, int, str]] = []
-        for order, (asin, bm) in enumerate(cands):
+        # ONE feature kernel. `_rerank` scores from it and the Phase 7A-R1
+        # cache builder records it, so there is no second copy of these nine
+        # formulas to drift out of step with this one. The replay gate
+        # (lab/a1cache.py) re-ranks every cached turn with the default weights
+        # and requires the full A0 order back, which is what proves it.
+        def _features(asin: str, bm: float) -> dict:
             blob = self.cat.text.get(asin, "")
             f_bm25 = (bm - lo) / span
             f_phrase = f_exact = f_field = f_pos = f_card = f_soft = f_slot = 0.0
@@ -572,13 +608,32 @@ class RetrievalMixin:
                 # hard as an explicit rejection.
                 f_neg = sum(c for value, c in neg if value in blob) / len(neg)
             f_pop = self.cat.popularity(asin, cfg["pop_mode"])
-            total = (cfg["w_bm25"] * f_bm25 + cfg["w_phrase"] * f_phrase
-                     + cfg["w_idf"] * f_idf + cfg["w_cat"] * f_cat
-                     + cfg["w_pop"] * f_pop + cfg["w_exact"] * f_exact
-                     + cfg["w_field"] * f_field + cfg["w_pos"] * f_pos
-                     + cfg["w_card"] * f_card + w_soft_eff * f_soft
-                     + cfg["slot_soft"] * f_slot + w_prof * f_profile
-                     - cfg["w_neg"] * f_neg)
+            return {"f_bm25": f_bm25, "f_phrase": f_phrase, "f_idf": f_idf,
+                    "f_cat": f_cat, "f_pop": f_pop, "f_exact": f_exact,
+                    "f_field": f_field, "f_pos": f_pos, "f_card": f_card,
+                    "f_soft": f_soft, "f_slot": f_slot,
+                    "f_profile": f_profile, "f_neg": f_neg}
+
+        def _score(f: dict) -> float:
+            return (cfg["w_bm25"] * f["f_bm25"] + cfg["w_phrase"] * f["f_phrase"]
+                    + cfg["w_idf"] * f["f_idf"] + cfg["w_cat"] * f["f_cat"]
+                    + cfg["w_pop"] * f["f_pop"] + cfg["w_exact"] * f["f_exact"]
+                    + cfg["w_field"] * f["f_field"] + cfg["w_pos"] * f["f_pos"]
+                    + cfg["w_card"] * f["f_card"] + w_soft_eff * f["f_soft"]
+                    + cfg["slot_soft"] * f["f_slot"] + w_prof * f["f_profile"]
+                    - cfg["w_neg"] * f["f_neg"])
+
+        if collect is not None:
+            # The cache builder's hook. f_slot is computed here, INSIDE the
+            # kernel, from `dead` -- so a later trial setting slot_soft = 0
+            # cannot make it vanish from the cache: the trial reweights a
+            # recorded feature, it does not re-derive it.
+            for order, (asin, bm) in enumerate(cands):
+                collect.append((asin, _features(asin, bm)))
+
+        scored: list[tuple[float, int, str]] = []
+        for order, (asin, bm) in enumerate(cands):
+            total = _score(_features(asin, bm))
             scored.append((-total, order, asin))
         scored.sort()
         if want_scores:
