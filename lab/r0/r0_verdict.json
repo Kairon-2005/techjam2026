@@ -1,0 +1,40 @@
+{
+  "summary": {
+    "cross-encoder/ms-marco-MiniLM-L2-v2": {
+      "p95": 387.22,
+      "cold": 1.1294,
+      "rss": 656.850944,
+      "total": 16.739558,
+      "big": 15.062711715698242,
+      "det": true,
+      "n": 7
+    },
+    "cross-encoder/ms-marco-MiniLM-L6-v2": {
+      "p95": 1084.5152,
+      "cold": 1.5176,
+      "rss": 672.415744,
+      "total": 24.145876,
+      "big": 22.125926971435547,
+      "det": true,
+      "n": 7
+    },
+    "cross-encoder/ms-marco-TinyBERT-L2-v2": {
+      "p95": 69.678,
+      "cold": 0.981,
+      "rss": 210.78016,
+      "total": 5.463224,
+      "big": 4.308768272399902,
+      "det": true,
+      "n": 7
+    }
+  },
+  "eligible": [],
+  "caps": {
+    "artifact_total_mb": 120.0,
+    "largest_file_mib": 95.0,
+    "cold_load_add_s": 5.0,
+    "top30_p95_ms": 25.0,
+    "rss_add_mb": 400.0
+  },
+  "baseline_rss_bytes": 53821440
+}
