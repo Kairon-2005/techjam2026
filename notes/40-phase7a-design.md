@@ -1,31 +1,30 @@
 # Phase 7A design — reranker feasibility, and what it is allowed to prove
 
-**Revision 3. Design and pre-registration only.** No implementation, no
-dependency installed, no model downloaded, no weights changed, no A1 trial, no
-ceiling run, no public evaluation. Phase 6 is closed (`notes/39`) and is not
-modified.
+**Revision 4. Design and pre-registration only.** No dependency installed, no
+model downloaded, no R0 timing, no feature cache, no A1 trial, no `sup-val`
+run, no public evaluation. R0 has not begun. Phase 6 is closed (`notes/39`) and
+is not modified.
 
-Revision 3 corrects eight things. Items 1–4 are defects that would have
-contaminated the confirmation set or biased the search; 5–7 close
-pre-registration holes that would have let a decision be made after seeing the
-numbers it depends on; 8 is an overclaim.
+Revision 4 fixes one **code-grounded topology error** and one **compute-plan
+gap**, plus five consequences of them.
 
-1. **The ceiling measurements were pointed at the public set.** Revision 2 made
-   them "R1's first deliverable" on `clean` — a design input drawn from the
-   confirmation set. They move to supplementary.
-2. **The oracle was turn-level.** It is now defined at **session** level,
-   through the evaluator's own semantics.
-3. **The split was a global hash**, so scenario proportions were accidental. It
-   is now an exact **scenario-stratified 800/200**.
-4. **Coordinate descent had a zero trap.** A weight driven to 0 in sweep 1 could
-   never come back, because the grid multiplied the *current* value.
-5. **The R0 workload was unspecified**, so "latency" would have meant whatever
-   the first measurement happened to measure.
-6. **The A2 ceiling had no derivation rule.** Numeric caps and a total ordering
-   are fixed here, before any candidate is measured.
-7. **"Search Hugging Face"** is not a citation. Exact revisions and primary
-   sources are required.
-8. **"Not a retrieval problem"** overstated what HR@10 implies.
+1. **`pool_depth` is not the rerank input depth.** Revision 3 said Top-30
+   "matches `pool_depth`". It does not: `pool_depth = 30` is the window for the
+   **pool-aware asker** and the profile/shadow snapshots. `_rerank` receives the
+   **complete candidate list** — up to 100 normally, up to **1000** under the
+   starvation bypass.
+2. **A2 is now an explicit cascade** with its own isolated
+   `semantic_rerank_k`, so nothing Phase 7 does can reach `pool_depth`.
+3. **The R0 workload measured the wrong thing** — a literal `" [SEP] "` string
+   and batch 1 as "per-turn reality". Both are wrong.
+4. **The artifact cap counted only weights.** It now counts everything needed
+   offline, plus the largest individual file.
+5. **The A1 search had no compute plan.** Measured: 189 full-simulation trials
+   is **~6.4 h at median and ~17.7 h at the worst observed cell time**. A
+   cached-feature contract replaces it.
+6. **`f_phrase` was described wrong.** Under the shipped `phrase_idf=False` it
+   is confidence-weighted, not IDF-weighted.
+7. **`sup-val` needs a fresh paired A0** per arm, not a reused corpus number.
 
 ## The objective is MRR on the exact purchased item
 
@@ -50,6 +49,36 @@ Current heuristic, `clean`, citable (`p6c1-arm-a`, mode `off`):
 
 **Phase 7 holds retrieval fixed and tests how much additional score can be
 recovered by reordering the candidates it receives.**
+
+### The reranker's actual input, from source
+
+Revision 3 claimed a Top-30 workload "matching `pool_depth`". **That was
+wrong, and it is withdrawn.**
+
+```python
+limit  = max(top_k, depth) if turn_cfg["rerank"] else top_k
+cands, trace = self._candidates(state, turn_cfg, limit)
+ranked = self._rerank(cands, state)          # the COMPLETE list
+```
+
+`_rerank` scores **every** candidate it is handed. The depth comes from the
+retrieval decision, not from `pool_depth`:
+
+| | value | when |
+|---|---|---|
+| `candidates` | **100** | standard deep-funnel path (`funnel_top = 100`) |
+| `starved_candidates` | **1000** | starvation bypass |
+
+**`pool_depth = 30` is a different thing entirely** — `agent.py:82` calls it
+"candidates inspected by the pool-aware asker". Its consumers are the question
+controller (`dialogue.py:208, 233, 298, 486`), the profile window
+(`agent.py:677`) and the Phase 6A shadow snapshot (`context.py:486, 492`).
+**None of them is the reranker.**
+
+**Phase 7 does not change or reuse `pool_depth`.** Touching it would move
+question selection and the profile window, breaking the "retrieval and dialogue
+held fixed" contract and invalidating Phase 6B2-R2's and 6C1's evidence in the
+same stroke. Any Phase 7 depth is a **new, isolated** config value.
 
 That is the bounded claim, and revision 2's "not a retrieval problem" was not.
 A final HR@10 of 0.995 says most *remaining score headroom* is ranking-related,
@@ -117,40 +146,69 @@ against it could be re-run.
 
 #### The workload, fixed before any model is timed
 
-Revision 2 said "benchmark cold load, steady pair latency, RSS" without saying
-over *what*. "Latency" would then have meant whatever the first measurement
-happened to measure. **Every candidate runs the identical workload:**
+R0 benchmarks **the proposed cascade component**, not the current reranker and
+not a synthetic pair loop. For every candidate, the measured unit is
+**end-to-end scoring of a fixed Top-30 prefix**, including every step that
+would run in production:
+
+1. query construction and tokenization;
+2. **30 query–product pairs**;
+3. model inference;
+4. score extraction;
+5. deterministic ordering of the 30.
 
 | | specification |
 |---|---|
-| **query fixtures** | **32 synthetic, unlabelled** query strings, committed in the R0 fixture module, drawn from `sup-train` **message templates only** — no ground truth, no target, no label of any kind |
-| **product-text fixtures** | **100 product blobs** sampled deterministically from the catalog by `sha256(asin)` rank, committed as a frozen id list |
-| **serialization** | `"{query} [SEP] {title} {features} {details}"`, single space collapsed, `str.strip()` |
-| **candidate count** | **primary workload = Top-30**, matching `pool_depth`. Also recorded, not gated: Top-10 and Top-100 |
+| **query fixtures** | **32 synthetic, unlabelled** queries, committed in the R0 fixture module, built from `sup-train` message templates only — no ground truth, no target, no label |
+| **product-text fixtures** | **100 product blobs**, sampled deterministically from the catalog by `sha256(asin)` rank, committed as a frozen id list |
+| **pair construction** | the **tokenizer/model's own native pair API** — e.g. `tokenizer(query, passage)` for a cross-encoder. **No literal `" [SEP] "` string.** Revision 3 specified one, which is wrong: BERT, RoBERTa, DeBERTa and T5 families use different special-token contracts, and hard-coding one silently mis-tokenizes for every family that does not use it, producing a latency and quality number for a model nobody would ship |
+| **prefix size** | **Top-30**, chosen as a plausible `semantic_rerank_k` for timing purposes only. It is **not** a claim about the reranker's current input, and R1's actual `semantic_rerank_k` is chosen from `sup-train` coverage |
 | **max sequence length** | **256 tokens**, truncating the product side first |
-| **batch size** | **1** (per-turn reality) as the gated figure; batch 8 and 32 recorded as diagnostics |
-| **warm-up** | **20** pair scorings, discarded |
-| **measured repetitions** | **7 fresh processes**, alternating order, per `lab/benchmark.py` |
-| **cold load** | process start → first scored pair returned, **including** artifact load and tokenizer init |
-| **steady latency statistic** | **p95** over the Top-30 workload; median reported alongside |
+| **GATED workload** | the **fixed end-to-end Top-30 batch strategy that would actually ship** — the production turn receives all 30 candidates at once, so they are scored as one batched call |
+| **diagnostics, reported never gated** | batch **1**, **8**, **32**. Revision 3 gated batch 1 as "per-turn reality"; that was backwards. Batch 1 is a per-pair diagnostic, and gating it would have selected a model on a workload that never occurs |
+| **warm-up** | **20** end-to-end Top-30 scorings, discarded |
+| **measured repetitions** | **7 fresh processes**, alternating order, via `lab/benchmark.py` |
+| **cold load** | process start → first scored Top-30 returned, **including** artifact load and tokenizer init |
+| **steady latency statistic** | **p95** over the end-to-end Top-30 workload; median reported alongside |
 | **RSS** | `peak_rss_bytes` from the harness, minus the same measurement with the model absent |
-| **determinism tolerance** | **bit-identical** ranking order across processes, and scores equal to **1e-6** |
+| **determinism tolerance** | **bit-identical ordering** across processes, and scores equal to **1e-6** |
 
-#### Eligibility caps, fixed before any candidate is measured
+**Every candidate runs the identical workload.**
 
-Revision 2 said the A2 ceiling would be "set from R0's measurements", which has
-no derivation rule and would let the bar be drawn around whichever candidate
-happened to appear. **Hard caps, numeric, fixed now:**
+**Architecture parity.** If cross-encoders and bi-encoders are compared, each
+candidate's measurement must include **all work its architecture requires**:
+
+| | cross-encoder | bi-encoder |
+|---|---|---|
+| query encoding | per pair | once per turn |
+| product encoding | per pair | per candidate, **or** loading precomputed embeddings |
+| similarity / scoring | model head | dot product / cosine |
+| ordering | required | required |
+
+A bi-encoder that hides its product encoding in a precomputed index has moved
+that cost into the **artifact** and the **cold load**, not eliminated it, and
+both caps below count it.
+
+#### Artifact size — everything needed offline, not just weights
+
+The cap covers the **complete** vendored footprint:
+
+* model weights;
+* tokenizer files (vocab, merges, config, special-token map);
+* quantization metadata;
+* **precomputed product embeddings or index, if the candidate needs one**;
+* any other local model data required to load and score offline.
 
 | cap | limit |
 |---|---|
-| maximum local artifact size | **≤ 120 MB** on disk, vendored |
-| maximum additional cold load | **≤ 5.0 s** above the current ~10.7 s catalog load |
-| maximum Top-30 steady **p95** latency | **≤ 25 ms** per turn |
-| maximum additional RSS | **≤ 400 MB** above the model-absent baseline |
-| offline load | **must succeed** with networking unavailable |
-| determinism | **must** meet the tolerance above |
-| license | **must** permit redistribution of the weights with the submission |
+| **total** local artifact | **≤ 120 MB** |
+| **largest individual file** | **≤ 100 MB**, and recorded regardless |
+
+The per-file cap exists because **a 120 MB total containing one 115 MB file is
+not vendorable** through ordinary repository hosting. If an approved
+LFS or package-distribution path exists, the per-file cap is lifted **only by
+naming that path in R0's record** — never by observing that a candidate needs
+it.
 
 #### Selection rule, fixed now and applied mechanically
 
@@ -197,7 +255,7 @@ total = w_bm25·f_bm25 + w_phrase·f_phrase + w_idf·f_idf + w_cat·f_cat
 | feature | definition |
 |---|---|
 | `f_bm25` | min–max normalised BM25 within this candidate list |
-| `f_phrase` | IDF-weighted share of query phrases present in the blob |
+| `f_phrase` | **confidence-weighted** share of query phrases present in the blob. **Not IDF-weighted:** the IDF branch exists but is dead under the shipped `phrase_idf = False`, which revision 3 described wrongly |
 | `f_exact` | confidence-weighted share of phrases matching a structured value |
 | `f_field` | confidence-weighted share of phrases in the feature blob |
 | `f_idf` | IDF-weighted share of query terms present |
@@ -277,8 +335,12 @@ a weight search would relitigate a closed phase.
   in sweep 1 was pinned at 0 for every later sweep, because every multiplier of
   0 is 0. A weight can now be zeroed early and **restored** later, so sweep
   order cannot permanently delete a feature.
-* **Pinned, and not silently in the search:** `w_soft_lo`, `w_soft_hi` and
-  `soft_adaptive` keep their shipped values throughout. They govern how
+* **Pinned, and not silently in the search**, at their shipped values:
+  `phrase_idf = False`, `soft_adaptive = False`, `w_soft = 0.0`,
+  `w_soft_lo = 0.0`, `w_soft_hi = 2.5`. **A1 does not activate a currently
+  disabled feature** — it reweights what is already live, and turning on a dead
+  branch would be a new formulation wearing a reweighting's name.
+  `w_soft_lo`, `w_soft_hi` and `soft_adaptive` They govern how
   `w_soft_eff` is chosen at run time, so varying them would change the model's
   *structure* rather than reweight it — and would do so invisibly, since none
   of the three appears in the score expression by name.
@@ -298,14 +360,95 @@ a weight search would relitigate a closed phase.
   deterministic, so no seed is required — stated rather than assumed.
 * **Freeze.** The resulting weights are committed **before** any public
   confirmation run.
+
+#### The compute contract — cached features, and why
+
+Revision 3 said "189 trials on `sup-train`" without saying what a trial costs.
+**Measured from the ledger** (26 recorded `supplementary_dev` cells): a
+1,000-session cell takes a median **153.1 s**, worst observed **421.3 s**. At
+800 sessions that is ~123 s per trial at median, so **189 full-simulation
+trials ≈ 6.4 hours at median and ≈ 17.7 hours at the worst observed cell** —
+before the host starvation this project has already measured at 4×.
+
+**The adopted contract is the cached one:**
+
+1. **Run A0 once** on `sup-train`.
+2. **Record a frozen training cache**, per turn: candidate ids, **all 13
+   feature values**, the target id, and session/turn identity.
+3. **Hash the cache** and commit the hash before the first trial.
+4. **Run the 189 coordinate-descent trials over the cached feature matrices
+   only.** Each trial is then a linear re-score and a sort — milliseconds, not
+   minutes.
+5. **After the weights are frozen, run the real full Agent on `sup-val`.**
+6. **No retuning after that full-Agent validation.**
+
+**The cache stores FEATURES, never A0's final scores.** A cached score cannot
+be re-weighted; a cached feature vector can, and all nine searched weights must
+be recomputable exactly from it.
+
+**Cached objective, stated exactly.** Per session, take the turns in order;
+for each turn re-score its cached candidates with the trial weights; the
+session's reciprocal rank is `1/rank` of the target on the **earliest turn
+where it appears in the cached candidate list**, else 0. The objective is the
+**mean over `sup-train` sessions** — session-level, matching the evaluator's
+semantics rather than a turn-level average.
+
+**This is an off-policy approximation, and the document says so rather than
+discovering it later.** The cache is generated under **A0's** behaviour.
+Different weights would reorder candidates, which can change which product the
+simulated customer sees, which can change the clarification question asked,
+which can change later turns entirely. **The cached objective therefore
+estimates the effect of reweighting while holding the dialogue path fixed, and
+the real effect can differ.** That is exactly why step 5 exists: `sup-val` is
+run through the **full Agent**, on-policy, and it is `sup-val` — not the cached
+number — that is reported as A1's validation.
+
+If a full-simulation search is ever preferred instead, **record one trial's
+wall time and the projected total, and fix a compute budget, before starting.**
+Discovering at trial 80 that the search is infeasible and switching method
+mid-run would make the completed trials unusable and the method
+post-hoc.
 * **`sup-train` is never reported as validation.** It selected the weights; it
   cannot also measure them.
 
-### A2 — CPU-local semantic reranker, one candidate, selected by R0
+### A2 — CPU-local semantic reranker, as an explicit CASCADE
+
+A2 is **not** a replacement scorer over the whole candidate population. It is a
+second stage over a prefix, and the topology is pre-registered here:
+
+1. **A0 scores the complete candidate population exactly as today** — all 100,
+   or all 1000 under the starvation bypass. Unchanged, not reimplemented, not
+   re-weighted.
+2. **A2 receives only the first `semantic_rerank_k` candidates of A0's
+   ordering.**
+3. **A2 may reorder only that prefix.**
+4. **Candidates after the prefix keep A0's order**, appended unchanged.
+
+So the output is `A2(prefix) ++ A0(tail)`, and with `semantic_rerank_k = 0` the
+result is bit-identical to A0 — which is what makes the lexical fallback a
+genuine fallback rather than a claim.
+
+**`semantic_rerank_k` is a NEW, ISOLATED config value.** It must not affect
+`pool_depth`, retrieval depth, `candidates`, `starved_candidates`, or question
+policy. A test asserting that the question controller's and profile window's
+behaviour is invariant to it is part of R1's definition of done.
+
+**Consequence for the ceiling measurements.** They must measure target coverage
+**in the post-A0 prefix**, not in the raw retrieval pool, at candidate depths
+**10 / 30 / 50 / 100** — because the prefix is what A2 can actually reach. A
+target sitting at A0 rank 140 is invisible to a `semantic_rerank_k` of 100 no
+matter how good the model is.
+
+**`semantic_rerank_k` is frozen from `sup-train`** before `sup-val` or any
+public evaluation is run.
+
+**Deferred to R1, and required there before labelled validation:** whether A2
+uses **semantic-only order** over the prefix, or a **frozen fusion** of the A2
+score with A0's. If fusion, its formula and weight are fixed in R1 and **cannot
+be selected on the public set** — the same rule every other parameter obeys.
 
 `_DenseIndex` is **not** A2: it is a stdlib random-indexing *candidate source*
-with a measured BM25 overlap of 0.020, aimed at recall, where there is no
-headroom.
+with a measured BM25 overlap of 0.020, aimed at recall.
 
 ## `score_default` and `showcase_model`
 
@@ -432,6 +575,18 @@ guarantee either answer.
 | **role** | **VETO, not validation.** It can block adoption; its number is never reported as a score, and `record.py` carries `source`/`official` on every row so it cannot be mistaken for one |
 | **which split** | **`sup-val` only, for every arm.** Not just A1. Under revision 3 `sup-train` also supplies the ceiling diagnostics that fix the **rerank window depth**, and that depth applies to A0, A1 and A2 alike — so `sup-train` is a design input for all three and cannot serve as an unbiased veto for any of them. Revision 2 exempted only A1; that was too narrow |
 | **A0's own numbers** | A0 is the control, so its `sup-train` figures are diagnostics rather than a claim. Its **veto and validation numbers still come from `sup-val`**, so all three arms are judged on the same untouched split |
+
+**A fresh, paired A0 baseline per arm.** For every arm, A0 is re-run on the
+**same `sup-val` rows**, under the **same frozen `semantic_rerank_k` and window
+configuration**, and the **same evaluator version**, in the same session as the
+arm it is compared against.
+
+**An A1 or A2 `sup-val` number is never compared against an older
+full-corpus A0 result.** That comparison would differ in the population (200
+rows against 1,000), in the configuration, and possibly in the evaluator — three
+confounds at once, any of which could manufacture or hide the effect being
+claimed. The paired-delta guards in the quality gates assume a genuine pairing,
+and this is what makes them true.
 
 ## Every experiment reports the full set
 
