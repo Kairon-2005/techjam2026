@@ -38,18 +38,27 @@ window, same candidates. **Only the origin of the tags differs.**
 | one-sided exact binomial *p* | **0.847** | **~0** |
 | D2 median Jaccard | 0.40 | 0.00 |
 
-Arm A is **below chance**. Not "weakly positive", not "inconclusive": 27 of 61,
-with a median margin of exactly zero, on a test whose null is a coin flip.
+**The observed win rate was 27/61, below 50%.** Median margin was exactly zero.
+**Positive target alignment was not demonstrated.**
+
+**The experiment does not distinguish a neutral effect from a negative effect.**
+`p = 0.847` is the one-sided test D5 registered, whose alternative is
+`p > 0.5`; a large value there is an absence of evidence *for* alignment and
+nothing more. The reverse one-sided test, alternative `p < 0.5`, gives
+**`p = 0.221`**, which does not establish a negative effect either. The Wilson
+95% interval on the win rate is **[0.325, 0.567]** and **contains 0.5**. At
+n = 61 this study can only fail to find positive alignment; it cannot tell
+neutral from negative.
 
 Arm B2 is the same machinery scoring **61 of 61**. So the instrument is not
-blind, the kernel matches, the window is right, and the join works. **The
-official `preference_tags` carry no target-discriminating signal on this set.**
+blind, the kernel matches, the window is right, and the join works — which is
+what makes the *absence* on Arm A informative rather than merely unmeasured.
 
 This is exactly the separation D4 exists to provide, and exactly why D5 was
 added in revision 2: **Arm A passes D1 and D3.** A phase that stopped at D1–D3
 would have reported "credible tags exist in 92.5% of sessions" and moved on to
-design personalization on top of a signal that ranks the right product worse
-than a coin flip.
+design personalization on top of a signal for which no positive target
+alignment has been shown.
 
 ## D1 passed, and my pre-registered response was to distrust it
 
@@ -84,8 +93,8 @@ reason, which is precisely the artefact revision 2 changed the kernel to avoid.
 So D1 passes honestly, and the finding is sharper than the prediction was:
 **coverage-based credibility is necessary and nowhere near sufficient.** A tag
 in 13 of 30 candidates is "credible" by the rule while carrying no information
-about *which* of them this customer wants — because that same tag is in 81.5%
-of all customers' profiles.
+about *which* of them this customer wants — that same tag is in 81.5% of all
+customers' profiles, and D5 found no positive alignment from it.
 
 ## Category distribution, first recommendation turn, raw counts
 
@@ -200,12 +209,49 @@ above and reproduced the first run's figures closely (official-shape 1.4418 →
 1.4750 ms), which is corroboration and not a substitute for the missing
 repetition.
 
+## Correction — the statistical wording, 2026-08-29
+
+*Documentation-only. No measurement changed, no shard re-run, no history
+rewritten. Commit `fcad362` and its message stand as recorded; this section
+supersedes their statistical wording.*
+
+The first draft of this document, and `fcad362`'s message, said Arm A was
+**"below chance, not inconclusive"**, that the official tags **"carry no
+target-discriminating signal"**, and that they **"rank the right product worse
+than a coin flip"**. **All three overclaim.** They read a large p-value from a
+one-tailed test as evidence for the opposite direction, which it is not.
+
+| statistic | value |
+|---|---|
+| observed win rate | 27/61 = **0.443** |
+| one-sided `p`, alternative `p > 0.5` (**the registered D5 test**) | **0.847** |
+| one-sided `p`, alternative `p < 0.5` (the reverse test) | **0.221** |
+| Wilson 95% interval on the win rate | **[0.325, 0.567]**, contains 0.5 |
+
+The registered test asks only whether alignment is positive. It is not, at
+α = 0.01. The reverse test does not reach significance either, and the
+confidence interval spans 0.5. **The correct three sentences are:**
+
+* The observed win rate was 27/61, below 50%.
+* Positive target alignment was not demonstrated.
+* The experiment does not distinguish a neutral effect from a negative effect.
+
+**The phase conclusion is unchanged** — *target alignment was not demonstrated
+on the public clean set* — and so is the decision it drives: 6C2 is not
+designed. D5 was always a one-sided gate on positive alignment, and it failed;
+what was wrong was describing that failure as a finding about the opposite
+direction.
+
 ## What must not be quoted
 
 * **Any Arm B2 number as an achieved gain.** Its tags are read off the answer.
   It is an instrument check and an upper bound; it can never justify adoption.
 * **"The profile signal does not exist."** The supported claim is that target
   alignment was not demonstrated on the public clean set.
+* **"Below chance", "worse than a coin flip", or any claim of a NEGATIVE
+  effect.** See the correction above: the reverse one-sided test gives
+  `p = 0.221` and the 95% interval contains 0.5. The experiment does not
+  distinguish a neutral effect from a negative one.
 * **D1's 0.925 as evidence that personalization is viable.** It is evidence
   that the coverage rule is permissive, which D5 then contradicts.
 * **Robustness or supplementary numbers as gate evidence.** They are not, by
