@@ -180,19 +180,16 @@ class InertnessTest(ProfileIntegrationBase):
     def test_a_hostile_profile_changes_nothing(self) -> None:
         # Regex metacharacters, over-long tags, duplicates, non-strings.
         #
-        # NON-STRINGS are deliberately excluded, and not because 6C1
-        # mishandles them -- normalize_profile_tags drops None and coerces 42,
-        # and test_profile_primitives covers both. Any non-string in
-        # preference_tags crashes the agent at retrieval.py:454, `_norm(t)`,
-        # on a path that predates this phase and runs regardless of
-        # profile_context_mode or w_profile. That is a real robustness defect
-        # and it is REPORTED rather than patched here: notes/37 puts the
-        # reranker out of scope for Phase 6C, and a fix in a file this phase
-        # declared untouched is the quiet scope creep the phase structure
-        # exists to prevent. It is unreachable on the official data, whose
-        # tags are all strings.
+        # Non-strings were once excluded here, and not because 6C1 mishandled
+        # them -- normalize_profile_tags drops None and coerces 42, and
+        # test_profile_primitives covers both. They crashed the agent in the
+        # RERANKER, at `_norm(t)`, on a path that predates this phase and runs
+        # regardless of profile_context_mode or w_profile. That path now routes
+        # through the same normalizer, so this fixture carries the non-strings
+        # it always should have; the crash itself is pinned by
+        # test_a_non_string_tag_does_not_crash_the_agent.
         hostile = {"preference_tags": [".*", "(", "a" * 500, "silk", "silk",
-                                       "", "x" * 41] + ["t"] * 20}
+                                       "", "x" * 41, None, 42] + ["t"] * 20}
         A.clear_catalog_cache()
         base = self.outputs("off", trace=True)
         A.clear_catalog_cache()
@@ -201,6 +198,93 @@ class InertnessTest(ProfileIntegrationBase):
         got = [(r["message"], r["ask_attribute"],
                 tuple(d["parent_asin"] for d in r["recommendations"])) for r in out]
         self.assertEqual(base, got)
+
+    def test_a_non_string_tag_does_not_crash_the_agent(self) -> None:
+        # The reranker normalizes preference_tags on EVERY turn, BEFORE the
+        # w_profile check, so a non-string reached `_norm` -- and crashed --
+        # in both modes and at the shipped w_profile of 0.0. Unreachable on
+        # the official data, whose tags are all strings, and reachable from
+        # any other profile source.
+        hostile = {"preference_tags": ["silk", None, 42, ""]}
+        for mode in ("off", "shadow"):
+            with self.subTest(mode=mode):
+                A.clear_catalog_cache()
+                ag = self.agent(profile_context_mode=mode, trace=True)
+                out = self.turns(ag, profile=hostile)
+                self.assertEqual(len(out), 2)
+                for reply in out:
+                    self.assertIn("recommendations", reply)
+
+    def test_coercing_a_non_string_tag_changes_no_output(self) -> None:
+        # The guard is a crash guard and nothing more: at w_profile 0.0 the
+        # normalized tags are computed and discarded, so a profile carrying
+        # None, an int and "" must land on exactly the baseline output.
+        A.clear_catalog_cache()
+        base = self.outputs("off", trace=True)
+        A.clear_catalog_cache()
+        ag = self.agent(profile_context_mode="off", trace=True)
+        out = self.turns(ag, profile={"preference_tags": ["silk", None, 42, ""]})
+        got = [(r["message"], r["ask_attribute"],
+                tuple(d["parent_asin"] for d in r["recommendations"])) for r in out]
+        self.assertEqual(base, got)
+
+
+class RerankerTagNormalizationTest(ProfileIntegrationBase):
+    """The reranker's profile-tag handling: total, shared, and not eager."""
+
+    def normalize_calls(self, profile, **cfg) -> int:
+        import starter.retrieval as R
+        calls = []
+        original = R.normalize_profile_tags
+        R.normalize_profile_tags = lambda *a, _o=original, **k: (
+            calls.append(1), _o(*a, **k))[1]
+        try:
+            A.clear_catalog_cache()
+            ag = self.agent(**cfg)
+            self.turns(ag, profile=profile)
+        finally:
+            R.normalize_profile_tags = original
+        return len(calls)
+
+    def test_zero_weights_do_not_normalize_at_all(self) -> None:
+        # The requirement: at the shipped w_profile / w_profile_adaptive of
+        # 0.0, no branch reads these tags, so the work must be SKIPPED rather
+        # than done and discarded. Doing it eagerly is how a non-string
+        # crashed the agent while profile weighting was switched off.
+        self.assertEqual(
+            self.normalize_calls({"preference_tags": ["silk", None, 42]}), 0)
+
+    def test_a_non_zero_weight_does_normalize(self) -> None:
+        # And the guard must not have turned the feature off: with a weight
+        # set, the shared normalizer runs.
+        self.assertGreater(
+            self.normalize_calls({"preference_tags": ["silk"]}, w_profile=0.5), 0)
+        self.assertGreater(
+            self.normalize_calls({"preference_tags": ["silk"]},
+                                 w_profile_adaptive=0.5), 0)
+
+    def test_the_shipped_weights_are_still_zero(self) -> None:
+        self.assertEqual(A.DEFAULTS["w_profile"], 0.0)
+        self.assertEqual(A.DEFAULTS["w_profile_adaptive"], 0.0)
+
+    def test_the_reranker_uses_the_shared_normalizer(self) -> None:
+        # One definition of what a profile tag is. A second normalization here
+        # would let the reranker and the profile classifier disagree about the
+        # same tag, which is invisible until it changes a score.
+        import starter.context as C
+        import starter.retrieval as R
+        self.assertIs(R.normalize_profile_tags, C.normalize_profile_tags)
+
+    def test_hostile_tags_survive_a_non_zero_weight(self) -> None:
+        # With the weight ON, the path that used to crash is now exercised for
+        # real: None, an int, an empty string, duplicates and an over-long tag.
+        A.clear_catalog_cache()
+        ag = self.agent(w_profile=0.5)
+        out = self.turns(ag, profile={"preference_tags": [
+            "silk", None, 42, "", "silk", "z" * 500, ".*", "("]})
+        self.assertEqual(len(out), 2)
+        for reply in out:
+            self.assertIn("recommendations", reply)
 
 
 class TelemetryTest(ProfileIntegrationBase):

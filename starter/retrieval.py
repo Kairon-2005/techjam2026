@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 
+from starter.context import normalize_profile_tags
 from starter.evidence import TOKEN_RE, _norm, relaxation_order
 
 
@@ -451,8 +452,25 @@ class RetrievalMixin:
         cat_tokens = set(self._terms(state["category"] or ""))
         prof_tags: list[str] = []
         w_prof = cfg["w_profile"]
-        raw_tags = [_norm(t) for t in (state.get("profile") or {}).get("preference_tags") or []]
-        raw_tags = [t for t in raw_tags if t]
+        # NOT NORMALIZED UNCONDITIONALLY. At the shipped weights -- w_profile
+        # and w_profile_adaptive both 0.0 -- no branch below reads these tags,
+        # so the work is skipped entirely rather than done and discarded. The
+        # previous line normalized on EVERY turn before consulting either
+        # weight, which is how a non-string in preference_tags crashed the
+        # agent through `_norm` while profile weighting was switched off: the
+        # cost and the failure were both being paid for a feature that was not
+        # running.
+        #
+        # When a weight IS set, tags go through normalize_profile_tags -- the
+        # SAME normalizer the Phase 6C1 profile classifier uses. One definition
+        # of what a profile tag is: a second one here would let the reranker
+        # and the profile decision disagree about the same tag, and 6C1's
+        # shared-kernel rule exists precisely because that divergence is
+        # invisible until it changes a score.
+        raw_tags: list[str] = []
+        if cfg["w_profile"] or cfg["w_profile_adaptive"]:
+            raw_tags = list(normalize_profile_tags(
+                (state.get("profile") or {}).get("preference_tags")))
         if cfg["w_profile"]:
             prof_tags = raw_tags
         elif cfg["w_profile_adaptive"] and raw_tags:
