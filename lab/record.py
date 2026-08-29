@@ -38,7 +38,7 @@ METRICS = ("score", "hr10", "mrr", "mttc")
 RESULT_LOGS = {"lab/results.jsonl", "lab/capability.jsonl", "lab/experiments.jsonl",
                "lab/tuning_runs.jsonl", "lab/benchmarks.jsonl",
                "lab/a1builds.jsonl", "lab/a2builds.jsonl",
-               "lab/r1builds.jsonl", "lab/supval.jsonl",
+               "lab/r1builds.jsonl", "lab/supval.jsonl", "lab/public.jsonl",
                "lab/a1cache.meta.json"}
 
 
