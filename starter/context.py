@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import re
 from enum import Enum
 from typing import Mapping, Sequence
 
@@ -165,6 +166,123 @@ def summarize_categories(ranked: Sequence[str], category_by_asin: Mapping[str, s
     options = tuple(distinguishing(top))
     return CandidateCategorySummary(len(counts), round(entropy, 4), True,
                                     len(options), options)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6C1: pure profile primitives.
+#
+# `user_profile` arrives from outside the agent and nothing in this repository
+# guarantees its shape, so everything here is bounded against the input it is
+# GIVEN rather than the input the public set happens to contain.
+#
+# There is ONE match kernel. Credibility coverage, the lab's target-alignment
+# diagnostic and any future reranking all call it, because two implementations
+# of "does this tag match this product" would mean the thing measured in 6C1 is
+# not the thing acted on later -- a divergence that would surface as an
+# unexplained shadow/control gap and nothing else.
+# ---------------------------------------------------------------------------
+
+MAX_PROFILE_TAG_CHARS = 40
+_PROFILE_WS = re.compile(r"\s+")
+# Bounded so a long-running process cannot accumulate patterns without limit;
+# the working set is <= MAX_PROFILE_TAGS per decision, so this is never hot.
+_PROFILE_PATTERN_CACHE_MAX = 512
+_PROFILE_PATTERNS: dict[str, "re.Pattern[str]"] = {}
+
+
+def clear_profile_pattern_cache() -> None:
+    _PROFILE_PATTERNS.clear()
+
+
+def normalize_profile_tags(tags) -> tuple[str, ...]:
+    """External tags -> the bounded, deterministic tuple everything else uses.
+
+    normalize -> truncate -> drop empties -> stable-deduplicate -> cap, and the
+    ORDER is part of the contract:
+
+      * truncating BEFORE dedup collapses two tags differing only past
+        character 40 -- correct, because the kernel could not tell them apart;
+      * dedup BEFORE the cap means the cap admits eight DISTINCT tags rather
+        than eight slots a repeated tag could fill, which would silently
+        discard real signal;
+      * dropping empties before dedup keeps "" from claiming a slot.
+
+    Stable deduplication, never `set()`: set iteration order would make
+    classification depend on hash randomization, and "deterministic" would be
+    false in exactly the way that is hardest to reproduce.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in (tags or ()):
+        if raw is None:                       # absent, not a value someone meant
+            continue
+        text = _PROFILE_WS.sub(" ", str(raw)).strip().casefold()
+        text = text[:MAX_PROFILE_TAG_CHARS]
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+        if len(out) >= MAX_PROFILE_TAGS:
+            break
+    return tuple(out)
+
+
+def _profile_pattern(tag: str) -> "re.Pattern[str]":
+    r"""One compiled pattern per normalized tag, reused across the window.
+
+    `(?<!\w)...(?!\w)` rather than `\b...\b`: a tag may begin or end with a
+    non-word character -- "size (m)" ends in ")" -- and `\b` there demands an
+    adjacent word character, so the tag would never match its own text. The
+    lookarounds mean "not glued to a word", which is the actual rule.
+
+    re.escape because a tag is UNTRUSTED TEXT. Unescaped, "(" raises and ".*"
+    matches everything, classifying itself generic while quietly changing what
+    every other measurement means.
+    """
+    pattern = _PROFILE_PATTERNS.get(tag)
+    if pattern is None:
+        if len(_PROFILE_PATTERNS) >= _PROFILE_PATTERN_CACHE_MAX:
+            _PROFILE_PATTERNS.clear()
+        pattern = re.compile(rf"(?<!\w){re.escape(tag)}(?!\w)", re.IGNORECASE)
+        _PROFILE_PATTERNS[tag] = pattern
+    return pattern
+
+
+def profile_match(tag: str, text: str) -> bool:
+    """Does this tag occur as a whole word in this text? The whole kernel.
+
+    Word-boundary, not substring. `tag in blob` makes "fit" match outfit,
+    fitted and benefit -- which inflates coverage for exactly the tags whose
+    genericness is in question and would reject them FOR THE WRONG REASON.
+    """
+    if not tag:
+        return False
+    return _profile_pattern(tag).search(text or "") is not None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfileSupport:
+    """How much of the bounded window a tag matches. One pass, two views."""
+    match_count: int = 0
+    coverage: float = 0.0
+
+
+def profile_support(tag: str, window_texts: Sequence[str]) -> ProfileSupport:
+    """match_count and coverage from a SINGLE pass over the window.
+
+    coverage is match_count / |window| and is never computed separately: two
+    passes could disagree, and the classifier reads both.
+    """
+    texts = list(window_texts or ())
+    if not tag or not texts:
+        return ProfileSupport(0, 0.0)
+    pattern = _profile_pattern(tag)
+    hits = sum(1 for text in texts if pattern.search(text or ""))
+    return ProfileSupport(hits, round(hits / len(texts), 4))
+
+
+def match_count(tag: str, window_texts: Sequence[str]) -> int:
+    return profile_support(tag, window_texts).match_count
 
 
 def profile_coverage(tags: Sequence[str], ranked: Sequence[str],
