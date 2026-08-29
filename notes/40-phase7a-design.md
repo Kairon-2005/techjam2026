@@ -1,30 +1,16 @@
 # Phase 7A design — reranker feasibility, and what it is allowed to prove
 
-**Revision 4. Design and pre-registration only.** No dependency installed, no
-model downloaded, no R0 timing, no feature cache, no A1 trial, no `sup-val`
-run, no public evaluation. R0 has not begun. Phase 6 is closed (`notes/39`) and
-is not modified.
+**Revision 5. Design frozen; R0 is authorized on this document.** Phase 6 is
+closed (`notes/39`) and is not modified.
 
-Revision 4 fixes one **code-grounded topology error** and one **compute-plan
-gap**, plus five consequences of them.
+Revision 5 makes four things final:
 
-1. **`pool_depth` is not the rerank input depth.** Revision 3 said Top-30
-   "matches `pool_depth`". It does not: `pool_depth = 30` is the window for the
-   **pool-aware asker** and the profile/shadow snapshots. `_rerank` receives the
-   **complete candidate list** — up to 100 normally, up to **1000** under the
-   starvation bypass.
-2. **A2 is now an explicit cascade** with its own isolated
-   `semantic_rerank_k`, so nothing Phase 7 does can reach `pool_depth`.
-3. **The R0 workload measured the wrong thing** — a literal `" [SEP] "` string
-   and batch 1 as "per-turn reality". Both are wrong.
-4. **The artifact cap counted only weights.** It now counts everything needed
-   offline, plus the largest individual file.
-5. **The A1 search had no compute plan.** Measured: 189 full-simulation trials
-   is **~6.4 h at median and ~17.7 h at the worst observed cell time**. A
-   cached-feature contract replaces it.
-6. **`f_phrase` was described wrong.** Under the shipped `phrase_idf=False` it
-   is confidence-weighted, not IDF-weighted.
-7. **`sup-val` needs a fresh paired A0** per arm, not a reused corpus number.
+1. **`semantic_rerank_k = 30`, frozen now.** It is no longer selected from
+   `sup-train` and is no longer "a timing convenience".
+2. **The repository delivery cap stands** — no LFS exists to lift it.
+3. **The cached A1 objective was wrong**: it awarded conversions at ranks the
+   evaluator never scores.
+4. **The R0 shortlist is frozen to three named models**, before any download.
 
 ## The objective is MRR on the exact purchased item
 
@@ -120,6 +106,37 @@ that produces a score.
 score, because a candidate chosen even partly on quality would already have
 spent the confirmation set's independence.
 
+#### The shortlist is frozen HERE, before any download
+
+Exactly these three candidates. **No fourth may be added, and none substituted,
+once R0 begins:**
+
+| # | model ID |
+|---|---|
+| 1 | `cross-encoder/ms-marco-TinyBERT-L2-v2` |
+| 2 | `cross-encoder/ms-marco-MiniLM-L2-v2` |
+| 3 | `cross-encoder/ms-marco-MiniLM-L6-v2` |
+
+All three run the **identical** configuration:
+
+| | |
+|---|---|
+| runtime | **ONNX Runtime, CPU** |
+| quantization | **dynamic INT8**, appropriate for ARM64 |
+| tokenization | the model's **native pair encoding** |
+| max length | **256** |
+| workload | the **identical end-to-end Top-30** defined below |
+
+**Expected preference is TinyBERT-L2** as the smallest and fastest, **and that
+expectation carries no weight in the decision.** R0 applies the frozen
+eligibility caps and the mechanical ordering rule; if TinyBERT-L2 fails a cap
+or another candidate is faster on the measured workload, the rule decides and
+the expectation is simply recorded as having been wrong.
+
+**Before any benchmarking**, resolve and record for each: the **immutable
+Hugging Face revision hash**, the **license**, the **complete artifact size**
+(per the accounting above), and the **primary-source URLs**.
+
 #### Documentation research — exact sources, not "search Hugging Face"
 
 For **each** of at most three candidates, cite:
@@ -162,7 +179,7 @@ would run in production:
 | **query fixtures** | **32 synthetic, unlabelled** queries, committed in the R0 fixture module, built from `sup-train` message templates only — no ground truth, no target, no label |
 | **product-text fixtures** | **100 product blobs**, sampled deterministically from the catalog by `sha256(asin)` rank, committed as a frozen id list |
 | **pair construction** | the **tokenizer/model's own native pair API** — e.g. `tokenizer(query, passage)` for a cross-encoder. **No literal `" [SEP] "` string.** Revision 3 specified one, which is wrong: BERT, RoBERTa, DeBERTa and T5 families use different special-token contracts, and hard-coding one silently mis-tokenizes for every family that does not use it, producing a latency and quality number for a model nobody would ship |
-| **prefix size** | **Top-30**, chosen as a plausible `semantic_rerank_k` for timing purposes only. It is **not** a claim about the reranker's current input, and R1's actual `semantic_rerank_k` is chosen from `sup-train` coverage |
+| **prefix size** | **Top-30** — the frozen `semantic_rerank_k`, so this timing is of the component that would actually ship. It remains **not** a claim about A0's input, which is the full 100/1000 list |
 | **max sequence length** | **256 tokens**, truncating the product side first |
 | **GATED workload** | the **fixed end-to-end Top-30 batch strategy that would actually ship** — the production turn receives all 30 candidates at once, so they are scored as one batched call |
 | **diagnostics, reported never gated** | batch **1**, **8**, **32**. Revision 3 gated batch 1 as "per-turn reality"; that was backwards. Batch 1 is a per-pair diagnostic, and gating it would have selected a model on a workload that never occurs |
@@ -202,13 +219,22 @@ The cap covers the **complete** vendored footprint:
 | cap | limit |
 |---|---|
 | **total** local artifact | **≤ 120 MB** |
-| **largest individual file** | **≤ 100 MB**, and recorded regardless |
+| **largest individual file** | **< 95 MiB**, and recorded regardless |
 
-The per-file cap exists because **a 120 MB total containing one 115 MB file is
-not vendorable** through ordinary repository hosting. If an approved
-LFS or package-distribution path exists, the per-file cap is lifted **only by
-naming that path in R0's record** — never by observing that a candidate needs
-it.
+**The cap stands, and R0 may not lift it.** Verified in this repository:
+
+* both remotes are **GitHub** (`origin`, `submission`);
+* **`git lfs` is not installed** — the subcommand does not exist;
+* there is **no `.gitattributes`**, so no LFS filter is configured for any path.
+
+So there is **no verified large-file delivery path**, and 95 MiB is the safe
+per-file limit for ordinary GitHub hosting. A 120 MB total containing one
+115 MB file is not vendorable, and a candidate that needs one is **not
+eligible**.
+
+**A future approved packaging mechanism would require a separate
+pre-registered change** — not a decision taken during R0, and not one taken
+because a candidate turned out to need it.
 
 #### Selection rule, fixed now and applied mechanically
 
@@ -386,12 +412,25 @@ before the host starvation this project has already measured at 4×.
 be re-weighted; a cached feature vector can, and all nine searched weights must
 be recomputable exactly from it.
 
-**Cached objective, stated exactly.** Per session, take the turns in order;
-for each turn re-score its cached candidates with the trial weights; the
-session's reciprocal rank is `1/rank` of the target on the **earliest turn
-where it appears in the cached candidate list**, else 0. The objective is the
-**mean over `sup-train` sessions** — session-level, matching the evaluator's
-semantics rather than a turn-level average.
+**Cached objective, stated exactly — and corrected.** Revision 4 credited the
+target on "the earliest turn where it appears in the cached candidate list".
+**That is wrong and would have awarded conversions the evaluator never
+awards:** `evaluator/local_evaluator.py:16` sets `TOP_K = 10`, and the
+composite is `0.50 × HR@10 + 0.30 × MRR + 0.20 × efficiency`. A target at rank
+40 scores **zero**, not `1/40`.
+
+Per cached session, for a trial weight vector:
+
+1. Process cached turns **in order**.
+2. Re-score that turn's cached candidates with the trial weights and rank them.
+3. **If the target's rank is 1–10: record `1/rank` and STOP the session.**
+4. **If the target's rank is > 10: continue to the next cached turn.**
+5. **If no turn places the target in the Top 10: record 0.**
+
+The objective is the **mean over `sup-train` sessions**. The stop-on-conversion
+rule is what makes it session-level in the evaluator's sense rather than a
+turn-level average, and step 4 is what makes MTTC-shaped behaviour visible: a
+session that converts on turn 3 is not the same as one that converts on turn 1.
 
 **This is an off-policy approximation, and the document says so rather than
 discovering it later.** The cache is generated under **A0's** behaviour.
@@ -439,8 +478,23 @@ behaviour is invariant to it is part of R1's definition of done.
 target sitting at A0 rank 140 is invisible to a `semantic_rerank_k` of 100 no
 matter how good the model is.
 
-**`semantic_rerank_k` is frozen from `sup-train`** before `sup-val` or any
-public evaluation is run.
+#### `semantic_rerank_k = 30`, frozen here
+
+**The shipped topology under test is exactly:**
+
+```
+A0(full 100 / 1000)  →  A2(A0 Top-30)  ++  A0 tail
+```
+
+**It is not selected from `sup-train`, and it is not a timing convenience.**
+Freezing it now has two consequences worth stating plainly:
+
+* **R0's Top-30 timing measures the actual proposed component**, so there is no
+  second latency experiment after quality selection — which would have been a
+  latency number chosen in the knowledge of which depth scored best.
+* **Coverage at 10 / 30 / 50 / 100 stays diagnostic and cannot move it.** If
+  Top-30 coverage proves insufficient, **A2 fails honestly**. Expanding to 50 or
+  100 after seeing labels is exactly the move this freeze exists to prevent.
 
 **Deferred to R1, and required there before labelled validation:** whether A2
 uses **semantic-only order** over the prefix, or a **frozen fusion** of the A2
