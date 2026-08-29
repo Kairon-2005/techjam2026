@@ -245,6 +245,13 @@ DEFAULTS = {
     # "control" works with trace=False.
     "question_context_mode": "control",
     "profile_context_mode": "off",
+    # Phase 7A-R1. A2 semantic cascade, OFF by default and off in
+    # score_default until a pre-registered gate says otherwise.
+    "semantic_rerank_mode": "off",     # off | on
+    "semantic_rerank_k": 10,           # frozen by notes/42; clamped by top_k
+    "semantic_lambda": 0.0,            # 0.0 == byte-exact A0
+    "semantic_model_dir": "",          # empty -> no model -> A0 fallback
+    "semantic_max_length": 256,
     # Records the candidate list itself. LAB ONLY: the harness uses it to
     # compute Recall@N against ground truth, which the agent must never see.
     "trace_candidates": False,
@@ -441,6 +448,18 @@ class Agent(RetrievalMixin, DialogueMixin):
         if key not in self._warned_modes:
             self._warned_modes.add(key)
             print(f"[agent] warning: unknown question_context_mode {mode!r}; "
+                  f"falling back to 'off'", file=sys.stderr)
+        return "off"
+
+    def _semantic_mode(self, cfg: dict) -> str:
+        """Validated mode; an unrecognised value degrades to "off", loudly."""
+        mode = str(cfg.get("semantic_rerank_mode", "off"))
+        if mode in _context.SEMANTIC_MODES:
+            return mode
+        key = f"semantic:{mode}"
+        if key not in self._warned_modes:
+            self._warned_modes.add(key)
+            print(f"[agent] warning: unknown semantic_rerank_mode {mode!r}; "
                   f"falling back to 'off'", file=sys.stderr)
         return "off"
 
@@ -682,7 +701,11 @@ class Agent(RetrievalMixin, DialogueMixin):
         else:
             ranked = [a for a, _ in cands]
         ranked = self._rotate(ranked, state, turn_cfg)
-        ordered = ranked[:top_k]
+        # a0_ranked is `ranked` and is NEVER replaced: the question controller,
+        # the ContextSnapshot and _compose's pool logic all read it below.
+        a0_ordered = ranked[:top_k]
+        ordered, semantic_reason = self._semantic_reorder(
+            list(a0_ordered), state, turn_cfg, top_k)
         if turn_cfg["trace"] and profile_decision is not None:
             # "First recommendation turn" is derived from the trace rather than
             # tracked in session state: a shadow feature that wrote a marker

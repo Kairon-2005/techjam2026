@@ -285,6 +285,63 @@ def match_count(tag: str, window_texts: Sequence[str]) -> int:
     return profile_support(tag, window_texts).match_count
 
 
+# ---------------------------------------------------------------------------
+# Phase 7A-R1: rank-based fusion for the A2 semantic cascade.
+#
+# RANKS, never scores. Raw cross-encoder logits are unbounded and their scale
+# varies across runtimes and quantizations, so an ordering that depends on
+# their magnitude is not portable between the machine that tuned it and the
+# machine that runs it. Reciprocal-rank fusion consumes positions only, so the
+# same two orderings fuse identically everywhere.
+# ---------------------------------------------------------------------------
+
+SEMANTIC_MODES = ("off", "on")
+RRF_K = 60          # the standard RRF damping constant
+
+
+def rrf_fuse(a0_order: Sequence[str], semantic_order: Sequence[str],
+             lam: float, k: int = RRF_K) -> list[str]:
+    """Weighted reciprocal-rank fusion of two orderings of the SAME items.
+
+        score(c) = (1 - lam) / (k + rank_a0(c)) + lam / (k + rank_sem(c))
+
+    Ranks are 1-based. Ties break on ascending A0 rank, which makes the order
+    total and stable: without it two candidates with equal fused scores would
+    be ordered by whatever `sorted` happened to see first.
+
+    lam = 0 reproduces `a0_order` exactly, which is what makes the disabled
+    path and the fallback path provably identical rather than merely similar.
+    lam = 1 is semantic order -- by RANK, never by logit magnitude.
+
+    `semantic_order` must be a permutation of `a0_order`; a caller that cannot
+    guarantee that must check first, because this function trusts it.
+    """
+    a0 = list(a0_order)
+    if not a0:
+        return []
+    a0_rank = {asin: i + 1 for i, asin in enumerate(a0)}
+    sem_rank = {asin: i + 1 for i, asin in enumerate(semantic_order)}
+    lam = float(lam)
+
+    def score(asin: str) -> float:
+        ra = a0_rank[asin]
+        rs = sem_rank.get(asin, ra)
+        return (1.0 - lam) / (k + ra) + lam / (k + rs)
+
+    return sorted(a0, key=lambda asin: (-score(asin), a0_rank[asin]))
+
+
+def is_permutation(a: Sequence[str], b: Sequence[str]) -> bool:
+    """Same multiset, same length. NOT a set comparison.
+
+    A set cannot see a duplicated or dropped element: {a,b,c} equals both
+    [a,b,c] and [a,b,c,c] minus its duplicate. The A2 guard depends on telling
+    those apart, so this counts.
+    """
+    from collections import Counter
+    return len(a) == len(b) and Counter(a) == Counter(b)
+
+
 PROFILE_MODES = ("off", "shadow")
 # No "control". 6C1 measures; it does not act. A mode that could be switched on
 # would be switched on before the evidence existed, which is the whole failure
