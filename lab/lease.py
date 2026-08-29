@@ -60,6 +60,10 @@ LOCK_PATH = Path("lab/.experiment.lock")
 # reached through a symlink -- exactly the kind of indirection that hides a
 # swapped file. public_set.jsonl is here because a silently regenerated
 # dataset would otherwise be invisible.
+# The pinned cross-encoder, fetched by lab/r1_artifact.py at revision
+# 81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc.
+MODEL_DIR = "lab/r0/artifacts/ms-marco-TinyBERT-L2-v2"
+
 WATCHED = (
     "starter/agent.py",
     "lab/scenarios.py",
@@ -83,12 +87,20 @@ WATCHED = (
     "lab/split.py",
     "lab/a1search.py",
     "lab/a1cache.py",
+    # The A2 artifact. Exactly the two files Scorer.load() reads -- the ONNX
+    # graph and the tokenizer -- because watching files nobody opens would
+    # dilute the set rather than strengthen it. The other four are pinned by
+    # sha256 in lab/r0/artifacts/digests.json.
+    MODEL_DIR + "/onnx/model_qint8_arm64.onnx",
+    MODEL_DIR + "/tokenizer.json",
 )
 
 # Gitignored inputs the checkout has no copy of. Linked rather than copied --
 # the runs only read them, and the link targets are fingerprinted above, so a
 # repoint mid-flight is caught.
-LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl")
+LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl",
+                 MODEL_DIR + "/onnx/model_qint8_arm64.onnx",
+                 MODEL_DIR + "/tokenizer.json")
 
 # Ledgers churn by definition -- appending a row, or an invalidation for one,
 # dirties the tree -- so they are excluded from the fingerprint's dirty set.

@@ -8,6 +8,12 @@ data/catalog.jsonl
 # `python3 -m lab.a1driver`. Its sha256 is what gets committed, in
 # lab/a1cache.meta.json and in the lab/a1builds.jsonl row.
 lab/a1cache.jsonl
+# The A2 virtualenv and the vendored cross-encoder artifact. Both are
+# reproducible from pinned versions: lab/r01/r01-requirements.txt and
+# `python3 -m lab.r1_artifact`, whose sha256 digests ARE committed in
+# lab/r0/artifacts/digests.json.
+.venv/
+lab/r0/artifacts/*/
 data/releases/
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
