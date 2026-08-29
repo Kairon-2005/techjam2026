@@ -79,6 +79,7 @@ def run_session(agent, sample: str | dict, capture: CACHE.Capture,
     hit_turn: int | None = None
     best_rank: int | None = None
     turns: list[int] = []
+    rotated_turns: list[int] = []
     for turn in range(1, E.MAX_TURNS + 1):
         capture.key = (sample_id, turn)
         try:
@@ -89,6 +90,13 @@ def run_session(agent, sample: str | dict, capture: CACHE.Capture,
             response = {"message": "", "ask_attribute": None, "recommendations": []}
         turns.append(turn)
         ranked = E.normalize_recommendations(response.get("recommendations"), catalog_ids)
+        # `_rotate` runs AFTER `_rerank`, so the emitted Top-10 and the order
+        # the cache records are the same list only while no turn asks for
+        # alternatives. Measured rather than assumed: this is the whole reason
+        # the cached objective and the evaluator's MRR can differ.
+        snap = capture.snapshots.get((sample_id, turn))
+        if snap is not None and ranked != list(snap.live_order)[:E.TOP_K]:
+            rotated_turns.append(turn)
         if override_applied and target in ranked:
             best_rank = ranked.index(target) + 1
             hit_turn = turn
@@ -108,7 +116,7 @@ def run_session(agent, sample: str | dict, capture: CACHE.Capture,
                 effective, response.get("ask_attribute"), disclosed, boundary_used)
     return {"sample_id": sample_id, "scenario": str(sample["scenario_type"]),
             "target": target, "turns": turns, "hit_turn": hit_turn,
-            "best_rank": best_rank,
+            "best_rank": best_rank, "rotated_turns": rotated_turns,
             "reciprocal_rank": 0.0 if best_rank is None else 1.0 / best_rank}
 
 
@@ -159,6 +167,50 @@ def evaluator_mrr(outcomes) -> float:
     return statistics.fmean([o["reciprocal_rank"] for o in outcomes]) if outcomes else 0.0
 
 
+def rotation_diagnostic(outcomes, sessions, snapshots) -> dict:
+    """How far `_rotate` moved the emitted order away from the cached one.
+
+    The cached objective is defined over `_rerank`'s order (notes/40 section 6,
+    "cached evaluator semantics"); the evaluator scores the order the customer
+    was shown, which `_rotate` may have refreshed. The gap between the two is
+    NOT a defect and NOT an error bar -- it is the size of the off-policy
+    approximation the pre-registration accepted, and it belongs in the record
+    with a number rather than a shrug.
+    """
+    rotated = [o for o in outcomes if o["rotated_turns"]]
+    by_id = {s["sample_id"]: s for s in sessions}
+    moved: list[dict] = []
+    for outcome in outcomes:
+        session = by_id.get(outcome["sample_id"])
+        if session is None:
+            continue
+        cached_rr = 0.0
+        for turn in session["turns"]:
+            snap = snapshots.get((session["sample_id"], turn["turn"]))
+            if snap is None:
+                continue
+            order = list(snap.live_order)
+            rank = order.index(turn["target"]) + 1 if turn["target"] in order else None
+            if rank is not None and rank <= E.TOP_K:
+                cached_rr = 1.0 / rank
+                break
+        if cached_rr != outcome["reciprocal_rank"]:
+            moved.append({"sample_id": outcome["sample_id"],
+                          "scenario": outcome["scenario"],
+                          "cached_rr": cached_rr,
+                          "evaluator_rr": outcome["reciprocal_rank"]})
+    by_scenario: dict[str, int] = {}
+    for row in moved:
+        by_scenario[row["scenario"]] = by_scenario.get(row["scenario"], 0) + 1
+    return {
+        "rotated_sessions": len(rotated),
+        "rotated_turns": sum(len(o["rotated_turns"]) for o in outcomes),
+        "sessions_whose_rr_moved": len(moved),
+        "rr_moved_by_scenario": dict(sorted(by_scenario.items())),
+        "rr_moved_examples": moved[:5],
+    }
+
+
 def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
     """Write the cache, run the replay gate, and assemble the manifest."""
     sessions = built["sessions"]
@@ -180,6 +232,8 @@ def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
         "live_a0_mrr": result["live_a0_mrr"],
         "delta_mrr": result["delta_mrr"],
         "evaluator_mrr_diagnostic": evaluator_mrr(built["outcomes"]),
+        "rotation_diagnostic": rotation_diagnostic(
+            built["outcomes"], sessions, built["capture"].snapshots),
         "cache_sha256": written["sha256"],
         "cache_path": str(cache_path),
         "cache_sessions": written["sessions"],
@@ -209,6 +263,12 @@ def report(manifest: dict) -> None:
                   "evaluator_mrr_diagnostic", "cache_sha256", "split_train_hash",
                   "agent_commit", "agent_sha256", "catalog_sha256"):
         print(f"  {field:<26} {manifest.get(field)}")
+    rot = manifest.get("rotation_diagnostic") or {}
+    if rot:
+        print(f"  {'rotated turns':<26} {rot.get('rotated_turns')}"
+              f"  (sessions {rot.get('rotated_sessions')})")
+        print(f"  {'sessions whose RR moved':<26} {rot.get('sessions_whose_rr_moved')}"
+              f"  {rot.get('rr_moved_by_scenario')}")
     if manifest.get("first_mismatch"):
         print(f"  FIRST MISMATCH             {manifest['first_mismatch']}")
     print(f"  VERDICT                    {'PASS' if manifest['ok'] else 'STOP'}")
