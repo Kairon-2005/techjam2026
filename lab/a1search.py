@@ -129,7 +129,8 @@ def is_no_op(result: dict) -> bool:
     `best_mrr == baseline_mrr`: an arm with no quality gain consuming the
     single public confirmation.
 
-    notes/44 revision 3, Step 0: a no-op stops before `sup-val`.
+    notes/44 revision 4, section 0.1 and section 7b Step 0: a no-op stops
+    before `sup-val`, and the condition is delta_mrr -- not weight equality.
     """
     return float(result.get("delta_mrr", 0.0)) <= 0.0
 
@@ -142,8 +143,9 @@ def coordinate_search(sessions, sweeps: int = SWEEPS) -> dict:
     """Deterministic coordinate descent over the cached feature matrices.
 
     Fixed sweep order, seven grid points per weight, no RNG. The tie-break is
-    total: highest MRR, then lowest L1 norm, then the canonical weight tuple --
-    so two runs over the same cache return the same vector.
+    total: highest MRR, then lowest L1 DISTANCE FROM THE DEFAULTS, then the
+    canonical weight tuple -- so two runs over the same cache return the same
+    vector, and a run that finds no gain returns the shipped one.
     """
     original = default_weights()
     baseline_mrr = cached_mrr(sessions, original)

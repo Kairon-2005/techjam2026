@@ -231,6 +231,7 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
     out.update(_shadow_telemetry(turns))
     out.update(_retrieval_decision_telemetry(turns))
     out.update(_question_decision_telemetry(turns))
+    out.update(_semantic_telemetry(turns))
     # Route-topology evidence. The Pillar I claim rests on these and not on a
     # route label, so they are recorded for every arm including the ones with
     # no dense source at all.
@@ -267,6 +268,46 @@ def _telemetry(agent, samples, session_to_sample: dict | None = None) -> dict:
                     "recall_pool": round(hits["pool"] / scored, 4),
                     "recall_turns": scored})
     return out
+
+
+def _semantic_telemetry(turns: list) -> dict:
+    """Phase 7A-R1 arm A2, as COUNTS. Descriptive -- and one hard tripwire.
+
+    `semantic_invalidating_turns` is the only field here a gate reads, and it
+    reads it in exactly one direction: greater than zero means the shard did not
+    measure the semantic arm, so lab/provenance.py refuses to quote the row at
+    all. Everything else -- activation, effective_k, the reason histogram -- is
+    description, and notes/44 section 9b forbids using any of it to move the
+    eligibility gate, the query, `semantic_rerank_k` or lambda.
+
+    Reported as counts and not as rates, for the reason 6B1 learned: a rate of
+    0.9997 reads as a pass while naming three broken turns.
+    """
+    rows = [t for t in turns if "semantic_reason" in t]
+    if not rows:
+        return {}
+    reasons: dict[str, int] = {}
+    ks: dict[str, int] = {}
+    for trace in rows:
+        reason = str(trace.get("semantic_reason") or "?")
+        reasons[reason] = reasons.get(reason, 0) + 1
+        ks[str(trace.get("semantic_effective_k"))] = \
+            ks.get(str(trace.get("semantic_effective_k")), 0) + 1
+    invalidating = [t for t in rows if t.get("semantic_invalidating")]
+    # A lambda=0 turn that did NOT reproduce A0 byte-for-byte is a defect in
+    # the fallback, so it is counted rather than averaged away. False is a
+    # violation; None means the turn was not a lambda=0 turn and is not one.
+    lambda_zero_broken = [t for t in rows
+                          if t.get("semantic_lambda_zero_exact") is False]
+    return {
+        "semantic_total_turns": len(rows),
+        "semantic_eligible_turns": sum(1 for t in rows if t.get("semantic_eligible")),
+        "semantic_invoked_turns": sum(1 for t in rows if t.get("semantic_invoked")),
+        "semantic_invalidating_turns": len(invalidating),
+        "semantic_lambda_zero_violations": len(lambda_zero_broken),
+        "semantic_reason_counts": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+        "semantic_effective_k_counts": dict(sorted(ks.items(), key=lambda kv: -kv[1])),
+    }
 
 
 def _question_decision_telemetry(turns: list) -> dict:

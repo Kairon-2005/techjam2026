@@ -711,7 +711,7 @@ class Agent(RetrievalMixin, DialogueMixin):
         ordered, semantic_reason, semantic_k = self._semantic_reorder(
             list(a0_ordered), state, turn_cfg, top_k)
         if turn_cfg["trace"] and self._semantic_mode(turn_cfg) == "on":
-            # Frozen telemetry (notes/44 revision 3). Ten DISTINCT reasons:
+            # Frozen telemetry (notes/44 revision 4). Ten DISTINCT reasons:
             # collapsing model_absent, load_failure and inference_failure would
             # let a shard where the model never ran be reported as a quality
             # result.
@@ -720,10 +720,12 @@ class Agent(RetrievalMixin, DialogueMixin):
                 "semantic_effective_k": semantic_k,
                 "semantic_eligible": _semantic.eligible(
                     state, self._uncredible(state)),
-                "semantic_invoked": semantic_reason in (
-                    _semantic.REASON_RERANKED, _semantic.REASON_BAD_PERMUTATION),
-                "semantic_invalidating": semantic_reason
-                in _semantic.INVALIDATING_REASONS,
+                # Both predicates live in semantic.py so the classification
+                # has ONE definition. `inference_failure` counts as invoked --
+                # the batch was fed and the forward pass raised -- while
+                # `load_failure` does not, because no session was ever built.
+                "semantic_invoked": _semantic.is_invoked(semantic_reason),
+                "semantic_invalidating": _semantic.is_invalidating(semantic_reason),
                 # lambda = 0 must degenerate to A0 EXACTLY, asserted per turn
                 # rather than assumed: it is the fallback's correctness proof.
                 "semantic_lambda_zero_exact": (

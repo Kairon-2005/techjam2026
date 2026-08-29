@@ -104,6 +104,25 @@ def _why(row: dict, marks: dict[str, dict]) -> str:
     missing = [f for f in FINGERPRINTS if not row.get(f)]
     if missing:
         return "missing input fingerprints: " + ", ".join(missing)
+
+    # Phase 7A-R1 arm A2. A shard that fell back to A0 on even one turn did not
+    # measure the semantic arm, and the production path's fail-open is exactly
+    # what makes that invisible in the score: the row looks like a clean A2
+    # result and is A0's quality wearing A2's name. The four invalidating
+    # reasons are model_absent, load_failure, inference_failure and
+    # bad_permutation (starter/semantic.py). Fix the environment and re-run from
+    # a fixed commit -- the row is never repaired in place, because results are
+    # never rewritten.
+    telemetry = row.get("telemetry") or {}
+    fell_back = telemetry.get("semantic_invalidating_turns") or 0
+    if fell_back:
+        return (f"semantic fallback on {fell_back} turn(s): the shard did not "
+                f"measure arm A2 and yields no A2 quality verdict "
+                f"({telemetry.get('semantic_reason_counts') or {}})")
+    broke = telemetry.get("semantic_lambda_zero_violations") or 0
+    if broke:
+        return (f"lambda=0 failed to reproduce A0 byte-for-byte on {broke} "
+                f"turn(s): the fallback's correctness proof did not hold")
     return ""
 
 

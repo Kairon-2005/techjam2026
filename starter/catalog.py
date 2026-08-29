@@ -25,7 +25,10 @@ from starter.evidence import (
     ATTR_VOCAB, COLOR_RE, MATERIAL_RE, TOKEN_RE, WS_RE, _norm,
 )
 
-_CATALOG_CACHE: dict[str, "_Catalog"] = {}
+# (resolved path, extras, semantic_fields) -> catalog. The capability is part
+# of the key so a richer build never has to displace -- or close -- a leaner
+# one that a live Agent is still using. See _catalog() below.
+_CATALOG_CACHE: dict[tuple[str, bool, bool], "_Catalog"] = {}
 
 
 def _text(value: object) -> str:
@@ -648,7 +651,12 @@ class _DenseIndex:
 
 
 def clear_catalog_cache() -> None:
-    """Drop cached catalogs, closing their connections first."""
+    """Drop cached catalogs, closing their connections first.
+
+    THE ONLY PLACE A CACHED CATALOG IS EVER CLOSED. A shared cache cannot know
+    who still holds a reference to what it evicts, so eviction here is the
+    caller's explicit statement that nothing does.
+    """
     for cat in list(_CATALOG_CACHE.values()):
         cat.close()
     _CATALOG_CACHE.clear()
@@ -656,17 +664,34 @@ def clear_catalog_cache() -> None:
 
 def _catalog(path: str | Path, extras: bool = True,
              semantic_fields: bool = False) -> _Catalog:
-    key = str(Path(path).resolve())
+    """One catalog per (resolved path, extras, semantic_fields) CAPABILITY.
+
+    THE KEY CARRIES THE CAPABILITY, and nothing cached is ever closed here.
+    Keying on the path alone meant a richer build SUPERSEDED a leaner one and
+    closed it on the way out -- so constructing a semantic-on A2 Agent pulled
+    the SQLite connection out from under an A0 Agent that was still live and
+    still holding the old object. That is a shared-cache lifetime defect, not a
+    test artefact: the A0 Agent had done nothing wrong and had no way to know.
+
+    Different capability versions now coexist. `clear_catalog_cache()` is the
+    single place that closes anything, and it closes everything at once.
+    """
+    key = (str(Path(path).resolve()), bool(extras), bool(semantic_fields))
     cached = _CATALOG_CACHE.get(key)
+    if cached is not None:
+        return cached
     # A catalog built WITH extras is a superset: reuse it for lean requests too.
     # The same holds for the semantic fields, and both must be satisfied --
     # reusing a lean catalog for a semantic request would leave sem_desc empty
-    # and silently serialize products without their descriptions.
-    if cached is not None and (cached.extras or not extras) \
-            and (cached.semantic_fields or not semantic_fields):
-        return cached
-    if cached is not None:
-        cached.close()          # superseded by the richer build; do not leak it
+    # and silently serialize products without their descriptions. Candidates
+    # are scanned in sorted order so which superset answers a lean request is
+    # deterministic rather than dict-insertion order.
+    for other_key in sorted(_CATALOG_CACHE):
+        other_path, other_extras, other_semantic = other_key
+        if other_path != key[0]:
+            continue
+        if (other_extras or not extras) and (other_semantic or not semantic_fields):
+            return _CATALOG_CACHE[other_key]
     _CATALOG_CACHE[key] = _Catalog(Path(path), extras=extras,
                                    semantic_fields=semantic_fields)
     return _CATALOG_CACHE[key]

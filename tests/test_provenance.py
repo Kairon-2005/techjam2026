@@ -55,6 +55,14 @@ FORGERIES = {
     "no_scenario_hash": dict(scenario_sha256="",                   score=0.9114),
     "no_dataset_hash": dict(dataset_sha256="",                     score=0.9115),
     "no_catalog_hash": dict(catalog_sha256="",                     score=0.9116),
+    # Phase 7A-R1 arm A2: a shard that fell back to A0 on even one turn did not
+    # measure the semantic arm, and the production path's fail-open is exactly
+    # what makes that invisible in the score.
+    "semantic_fallback": dict(
+        telemetry={"semantic_invalidating_turns": 1,
+                   "semantic_reason_counts": {"model_absent": 1}}, score=0.9117),
+    "lambda_zero_drift": dict(
+        telemetry={"semantic_lambda_zero_violations": 3},          score=0.9118),
 }
 
 
@@ -168,6 +176,49 @@ class ForgeryTest(unittest.TestCase):
         row = _row(tag="drift", agent_commit="deadbee", lease=_lease(isolated="abc1234"))
         why = P.reasons([row], marks={})[P.row_key(row)]
         self.assertIn("does not match the isolated commit", why)
+
+
+class SemanticShardTest(unittest.TestCase):
+    """An A2 shard that silently ran A0 yields no A2 quality verdict.
+
+    The number looks like a clean A2 result and is A0's quality wearing A2's
+    name, so the refusal belongs in the ONE citability predicate rather than in
+    whichever report happens to remember to check.
+    """
+
+    def test_a_clean_semantic_shard_is_citable(self) -> None:
+        row = _row(tag="a2", telemetry={
+            "semantic_total_turns": 120, "semantic_invoked_turns": 40,
+            "semantic_invalidating_turns": 0,
+            "semantic_lambda_zero_violations": 0,
+            "semantic_reason_counts": {"ineligible": 80, "reranked": 40}})
+        self.assertEqual(len(P.citable([row], marks={})), 1)
+
+    def test_one_invalidating_turn_is_enough(self) -> None:
+        # Not a rate and not a threshold. One turn on which the model did not
+        # run is one turn of A0 reported as A2.
+        row = _row(tag="a2", telemetry={"semantic_invalidating_turns": 1})
+        self.assertEqual(P.citable([row], marks={}), [])
+        why = P.reasons([row], marks={})[P.row_key(row)]
+        self.assertIn("did not measure arm A2", why)
+
+    def test_the_reason_names_the_fallback_counts(self) -> None:
+        row = _row(tag="a2", telemetry={
+            "semantic_invalidating_turns": 7,
+            "semantic_reason_counts": {"model_absent": 7}})
+        why = P.reasons([row], marks={})[P.row_key(row)]
+        self.assertIn("7", why)
+        self.assertIn("model_absent", why)
+
+    def test_a_broken_lambda_zero_degeneracy_is_not_citable(self) -> None:
+        row = _row(tag="a2", telemetry={"semantic_lambda_zero_violations": 2})
+        self.assertEqual(P.citable([row], marks={}), [])
+        self.assertIn("byte-for-byte",
+                      P.reasons([row], marks={})[P.row_key(row)])
+
+    def test_a_row_with_no_semantic_telemetry_is_unaffected(self) -> None:
+        # Every A0 and A1 row predates this field and must stay citable.
+        self.assertEqual(len(P.citable([_row(tag="a0")], marks={})), 1)
 
 
 class ReportPathTest(unittest.TestCase):

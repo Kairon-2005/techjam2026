@@ -8,7 +8,7 @@ DialogueMixin. This module owns them and RetrievalMixin calls it.
 Imports only `starter.context` (for the pure fusion kernel), so the import
 graph stays acyclic: context imports nothing from the package.
 
-THE TOPOLOGY, frozen in notes/44 revision 3:
+THE TOPOLOGY, frozen in notes/44 revision 3 and unchanged by revision 4:
 
     A0(full candidate population)  ->  rerank of a COPY of the prefix
                                    ->  unchanged A0 tail
@@ -49,8 +49,56 @@ REASONS = (REASON_MODE_OFF, REASON_LAMBDA_ZERO, REASON_PREFIX_TOO_SHORT,
 # A shard where any of these fired did not measure the semantic arm. The
 # production path fails open to A0, but an EXPERIMENT that silently fell back
 # would report A0's quality under A2's name.
-INVALIDATING_REASONS = frozenset({REASON_LOAD_FAILURE, REASON_INFERENCE_FAILURE,
+#
+# `model_absent` IS INVALIDATING. It was first classified as "a configuration
+# fact", which is true and beside the point: an A2 shard whose model directory
+# was missing measured A0 on every turn, and a configuration fact that produces
+# a quality number under the wrong arm's name is exactly what this set exists to
+# catch. The distinction that matters downstream is not blame -- it is whether
+# the shard measured what it claims. It did not.
+INVALIDATING_REASONS = frozenset({REASON_MODEL_ABSENT, REASON_LOAD_FAILURE,
+                                  REASON_INFERENCE_FAILURE,
                                   REASON_BAD_PERMUTATION})
+
+# Turns on which the MODEL ITSELF RAN, or was asked to. `inference_failure`
+# means the session existed, the batch was fed and the forward pass raised --
+# the model was invoked and failed. `load_failure` is the opposite: the session
+# was never constructed, so nothing was invoked. Counting a load failure as an
+# invocation would inflate the denominator of every per-invocation cost or
+# activation figure with turns on which no inference happened.
+INVOKED_REASONS = frozenset({REASON_INFERENCE_FAILURE, REASON_BAD_PERMUTATION,
+                             REASON_RERANKED})
+
+# Legitimate non-invocations. The cascade decided, correctly and by design, not
+# to call the model. These are DESCRIPTIVE and never invalidate a shard:
+# `ineligible` is the frozen robustness gate doing its job, `empty_query` is a
+# turn with no accepted evidence to ask about, and `prefix_too_short` is a
+# window of fewer than two items, where a permutation cannot exist.
+#
+# `lambda_zero` and `mode_off` are also legitimate: lambda = 0 is a real
+# `sup-train` OUTCOME meaning the semantic signal failed to beat A0, reported as
+# such rather than retried -- and notes/44 Step 0 then eliminates A2 as a no-op.
+# A legitimate result and a disqualifying one are not in tension; the arm ran,
+# and what it found was nothing.
+LEGITIMATE_UNINVOKED_REASONS = frozenset({REASON_MODE_OFF, REASON_LAMBDA_ZERO,
+                                          REASON_PREFIX_TOO_SHORT,
+                                          REASON_INELIGIBLE, REASON_EMPTY_QUERY})
+
+assert set(REASONS) == (INVALIDATING_REASONS | INVOKED_REASONS
+                        | LEGITIMATE_UNINVOKED_REASONS), "a reason is unclassified"
+assert not (INVALIDATING_REASONS & LEGITIMATE_UNINVOKED_REASONS)
+assert not (INVOKED_REASONS & LEGITIMATE_UNINVOKED_REASONS)
+assert REASON_LOAD_FAILURE not in INVOKED_REASONS
+
+
+def is_invalidating(reason: str) -> bool:
+    """Did this turn fail to measure the semantic arm?"""
+    return reason in INVALIDATING_REASONS
+
+
+def is_invoked(reason: str) -> bool:
+    """Was the model asked to run on this turn?"""
+    return reason in INVOKED_REASONS
 
 
 def mode_of(cfg) -> str:

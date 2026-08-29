@@ -1,0 +1,245 @@
+"""Build the A1 feature cache over the OPERATIVE sup-train split, and gate it.
+
+WHAT THIS REFUSES TO DO. It refuses to run on any split that is not the one
+`notes/40` registered. The corpus contains 1,000 sessions and the notes contain
+two splits -- the operative stratified 800/200 and a SUPERSEDED global-hash
+806/194 -- so "800 sessions" is not a thing to check afterwards in a report. It
+is asserted here, at startup, against pre-registered per-scenario counts and
+two pre-registered id hashes, before a single session runs.
+
+WHAT IT CAPTURES. At each `_rerank` call, a deep-copied snapshot of the exact
+input: the candidate list in retrieval order with its BM25 scores, the whole
+session state, and a field-level fingerprint of every SlotValue. Not a
+reference -- the live state keeps mutating for the rest of the session -- and
+not a reconstruction from the trace afterwards. The features come from the same
+call through `_rerank`'s own `collect` hook, so the cache and the live ordering
+are one execution of one kernel.
+
+WHAT IT PROVES BEFORE TRIAL 0. `lab/a1cache.replay_gate` re-derives every
+turn's full candidate order twice, from the snapshot and from the cached
+features, and requires A0's live order both times; then requires cached MRR to
+equal A0's own MRR exactly. The manifest carries the cache hash, the split
+hash, the agent commit and sha, and the catalog sha, so the number the search
+optimises can be traced to the inputs that produced it.
+
+    python3 -m lab.a1driver --limit 20 --out /tmp/probe   # smoke, unleased
+    python3 -m lab.a1driver                               # the real build
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+import time
+from pathlib import Path
+
+import starter.agent as A
+from evaluator import local_evaluator as E
+from lab import a1cache as CACHE
+from lab import a1search as S
+from lab import record as R
+from lab import split as SPLIT
+
+CATALOG = Path("data/catalog.jsonl")
+CACHE_PATH = Path("lab/a1cache.jsonl")
+MANIFEST_PATH = Path("lab/a1cache.meta.json")
+
+
+def run_session(agent, sample: str | dict, capture: CACHE.Capture,
+                catalog_ids, categories, products) -> dict:
+    """One session, driven exactly as `evaluator.local_evaluator.evaluate` does.
+
+    The loop is replicated rather than called because the cache needs a hook at
+    each turn and `evaluate()` offers none. Every customer-side decision -- the
+    opening message, the reply, the override turn, the boundary refusal, the
+    stop-at-first-hit -- comes from the evaluator's own functions, so there is
+    no second definition of how a customer behaves.
+
+    The one deliberate difference: `session_id` is derived from the sample id
+    rather than a uuid4, so a rebuild of this cache is reproducible. Nothing in
+    the agent reads it beyond dictionary identity.
+    """
+    sample_id = str(sample["sample_id"])
+    session_id = f"suptrain_{sample_id}"
+    agent.reset(session_id, sample["user_profile"])
+    target = str(sample["ground_truth"]["parent_asin"])
+    card, behavior = E.materialize_hidden_fields(sample, products)
+    effective = {**sample, "intent_card": card, "behavior": behavior}
+    disclosed: set[str] = set()
+    boundary_used = False
+    override_applied = sample["scenario_type"] != "intent_override"
+    user_message = E.initial_message(
+        effective, E.coarse_category(categories.get(target, [])), disclosed)
+    hit_turn: int | None = None
+    best_rank: int | None = None
+    turns: list[int] = []
+    for turn in range(1, E.MAX_TURNS + 1):
+        capture.key = (sample_id, turn)
+        try:
+            response = agent.respond(session_id, user_message, turn, E.TOP_K)
+        finally:
+            capture.key = None
+        if not isinstance(response, dict) or not isinstance(response.get("message"), str):
+            response = {"message": "", "ask_attribute": None, "recommendations": []}
+        turns.append(turn)
+        ranked = E.normalize_recommendations(response.get("recommendations"), catalog_ids)
+        if override_applied and target in ranked:
+            best_rank = ranked.index(target) + 1
+            hit_turn = turn
+            break
+        if turn == E.MAX_TURNS:
+            break
+        override = effective.get("behavior", {}).get("override") or {}
+        if not override_applied and turn + 1 == int(override.get("turn", 3)):
+            override_applied = True
+            new_value = str(override.get("new_value", ""))
+            if new_value:
+                disclosed.add(new_value)
+            user_message = str(override.get("message",
+                                            "Actually, please ignore my earlier preference."))
+        else:
+            user_message, boundary_used = E.customer_reply(
+                effective, response.get("ask_attribute"), disclosed, boundary_used)
+    return {"sample_id": sample_id, "scenario": str(sample["scenario_type"]),
+            "target": target, "turns": turns, "hit_turn": hit_turn,
+            "best_rank": best_rank,
+            "reciprocal_rank": 0.0 if best_rank is None else 1.0 / best_rank}
+
+
+def build(rows, catalog: Path = CATALOG, config: dict | None = None,
+          progress_every: int = 50) -> dict:
+    """Run every row, capture every turn, and assemble the cache sessions."""
+    catalog_ids, categories, products = E.catalog_index(catalog)
+    agent = A.Agent(str(catalog), config=dict(config or {}))
+    capture = CACHE.Capture()
+    outcomes: list[dict] = []
+    started = time.time()
+    with CACHE.capturing(agent, capture):
+        for i, sample in enumerate(rows, 1):
+            outcomes.append(run_session(agent, sample, capture,
+                                        catalog_ids, categories, products))
+            # The agent keeps every session it has ever seen in `_sessions`,
+            # and 800 of them with full trace logs is memory this build has no
+            # use for: the snapshots are the record.
+            agent._sessions.clear()
+            if progress_every and i % progress_every == 0:
+                print(f"  {i}/{len(rows)} sessions, {time.time() - started:.0f}s",
+                      flush=True)
+    sessions: list[dict] = []
+    for outcome in outcomes:
+        turn_rows = []
+        for turn in outcome["turns"]:
+            key = (outcome["sample_id"], turn)
+            row = capture.rows.get(key)
+            if row is None:
+                # A turn that never reached `_rerank` -- an empty candidate
+                # pool, or rerank switched off. It is not a cached turn, and
+                # inventing an empty one would put a session in the objective
+                # with turns it never had.
+                continue
+            turn_rows.append({**row, "target": outcome["target"]})
+        sessions.append({"sample_id": outcome["sample_id"],
+                         "scenario": outcome["scenario"], "turns": turn_rows})
+    return {"sessions": sessions, "capture": capture, "agent": agent,
+            "outcomes": outcomes, "seconds": round(time.time() - started, 1)}
+
+
+def evaluator_mrr(outcomes) -> float:
+    """The evaluator's own MRR over these sessions -- POST-rotate, from the
+    emitted recommendations. A diagnostic, not the gate: the cache records
+    `_rerank`'s order and `_rotate` runs after it, so the two coincide only
+    while no session asks for alternatives. Reported so that stops being an
+    assumption."""
+    return statistics.fmean([o["reciprocal_rank"] for o in outcomes]) if outcomes else 0.0
+
+
+def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
+    """Write the cache, run the replay gate, and assemble the manifest."""
+    sessions = built["sessions"]
+    written = CACHE.write(sessions, cache_path)
+    if not written["ok"]:
+        return {"ok": False, "stage": "schema", **written}
+    result = CACHE.replay_gate(sessions, built["agent"], built["capture"].snapshots)
+    fingerprints = R.git_state(dataset=str(SPLIT.DEV))
+    manifest = {
+        "phase": "7A-R1",
+        "arm": "A1",
+        "ok": bool(result["ok"]) and result["delta_mrr"] == 0.0
+              and not built["capture"].duplicate_keys,
+        "checked_sessions": result["checked_sessions"],
+        "checked_turns": result["checked_turns"],
+        "full_order_mismatches": result["mismatches"],
+        "first_mismatch": result["first_mismatch"],
+        "cached_default_mrr": result["cached_default_mrr"],
+        "live_a0_mrr": result["live_a0_mrr"],
+        "delta_mrr": result["delta_mrr"],
+        "evaluator_mrr_diagnostic": evaluator_mrr(built["outcomes"]),
+        "cache_sha256": written["sha256"],
+        "cache_path": str(cache_path),
+        "cache_sessions": written["sessions"],
+        "cache_turns": written["turns"],
+        "split": "sup-train",
+        "split_train_hash": split.train_hash,
+        "split_val_hash": split.val_hash,
+        "split_train_n": len(split.train),
+        "split_val_n": len(split.val),
+        "agent_commit": fingerprints["agent_commit"],
+        "agent_sha256": fingerprints["agent_sha256"],
+        "agent_in_worktree": fingerprints["agent_in_worktree"],
+        "code_dirty": fingerprints["code_dirty"],
+        "catalog_sha256": fingerprints["catalog_sha256"],
+        "dataset_sha256": fingerprints["dataset_sha256"],
+        "duplicate_rerank_keys": [list(k) for k in built["capture"].duplicate_keys],
+        "orphan_rerank_calls": built["capture"].orphan_calls,
+        "build_seconds": built["seconds"],
+    }
+    return manifest
+
+
+def report(manifest: dict) -> None:
+    print("\n=== A1 default replay gate ===")
+    for field in ("checked_sessions", "checked_turns", "full_order_mismatches",
+                  "cached_default_mrr", "live_a0_mrr", "delta_mrr",
+                  "evaluator_mrr_diagnostic", "cache_sha256", "split_train_hash",
+                  "agent_commit", "agent_sha256", "catalog_sha256"):
+        print(f"  {field:<26} {manifest.get(field)}")
+    if manifest.get("first_mismatch"):
+        print(f"  FIRST MISMATCH             {manifest['first_mismatch']}")
+    print(f"  VERDICT                    {'PASS' if manifest['ok'] else 'STOP'}")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="lab.a1driver")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="smoke mode: first N sup-train rows, NEVER a build")
+    ap.add_argument("--out", default="", help="write cache/manifest elsewhere")
+    args = ap.parse_args(argv)
+
+    # HARD ASSERTIONS FIRST. Row count, per-scenario counts, both id hashes,
+    # overlap, union, corpus namespace, and the superseded 806/194 tripwire.
+    # A failure here raises SplitError and nothing runs.
+    split, rows = SPLIT.operative()
+    by_id = {str(r["sample_id"]): r for r in rows}
+    train = [by_id[i] for i in split.train]
+    print(f"sup-train {len(train)} rows, hash {split.train_hash}")
+    print(f"sup-val   {len(split.val)} rows, hash {split.val_hash}")
+
+    cache_path = Path(args.out or CACHE_PATH.parent) / CACHE_PATH.name \
+        if args.out else CACHE_PATH
+    manifest_path = Path(args.out) / MANIFEST_PATH.name if args.out else MANIFEST_PATH
+    if args.limit:
+        train = train[: args.limit]
+        print(f"SMOKE MODE: {len(train)} rows. This is not a cache build.")
+    built = build(train)
+    manifest = gate(built, split, cache_path)
+    manifest["smoke"] = bool(args.limit)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+    report(manifest)
+    return 0 if manifest["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,7 +1,7 @@
 """Phase 7A-R1: the A2 cascade, and the invariants that make it safe.
 
 Written before the implementation. Every case here is a rule from
-notes/44-phase7a-r1-prereg.md revision 3, and the ones that matter most are the
+notes/44-phase7a-r1-prereg.md revision 4, and the ones that matter most are the
 two that revision 1 of that document got WRONG:
 
   * "every state key identical" is FALSE -- state["shown"] records display
@@ -475,13 +475,81 @@ class TelemetryTest(SemanticBase):
         self.assertEqual(len({SEM.REASON_MODEL_ABSENT, SEM.REASON_LOAD_FAILURE,
                               SEM.REASON_INFERENCE_FAILURE}), 3)
 
-    def test_the_invalidating_set_excludes_model_absent(self) -> None:
-        # A model that was never installed is a configuration fact; a model
-        # that failed to load or infer invalidates the shard.
-        self.assertNotIn(SEM.REASON_MODEL_ABSENT, SEM.INVALIDATING_REASONS)
-        for reason in (SEM.REASON_LOAD_FAILURE, SEM.REASON_INFERENCE_FAILURE,
-                       SEM.REASON_BAD_PERMUTATION):
-            self.assertIn(reason, SEM.INVALIDATING_REASONS)
+    def test_the_invalidating_set_is_the_four_failure_modes(self) -> None:
+        # model_absent INCLUDED. An A2 shard whose model directory was missing
+        # measured A0 on every turn; that it was a configuration mistake rather
+        # than a crash does not make the number an A2 number.
+        self.assertEqual(SEM.INVALIDATING_REASONS,
+                         frozenset({SEM.REASON_MODEL_ABSENT,
+                                    SEM.REASON_LOAD_FAILURE,
+                                    SEM.REASON_INFERENCE_FAILURE,
+                                    SEM.REASON_BAD_PERMUTATION}))
+
+    def test_invoked_means_the_model_ran_or_was_asked_to(self) -> None:
+        # inference_failure IS an invocation: the batch was fed and the forward
+        # pass raised. load_failure is NOT: no session was ever constructed, so
+        # counting it would put turns with no inference in the denominator of
+        # every per-invocation figure.
+        self.assertEqual(SEM.INVOKED_REASONS,
+                         frozenset({SEM.REASON_INFERENCE_FAILURE,
+                                    SEM.REASON_BAD_PERMUTATION,
+                                    SEM.REASON_RERANKED}))
+        self.assertNotIn(SEM.REASON_LOAD_FAILURE, SEM.INVOKED_REASONS)
+
+    def test_the_legitimate_non_invocations_are_not_invalidating(self) -> None:
+        self.assertEqual(SEM.LEGITIMATE_UNINVOKED_REASONS,
+                         frozenset({SEM.REASON_MODE_OFF, SEM.REASON_LAMBDA_ZERO,
+                                    SEM.REASON_PREFIX_TOO_SHORT,
+                                    SEM.REASON_INELIGIBLE,
+                                    SEM.REASON_EMPTY_QUERY}))
+        for reason in (SEM.REASON_INELIGIBLE, SEM.REASON_EMPTY_QUERY,
+                       SEM.REASON_PREFIX_TOO_SHORT):
+            self.assertFalse(SEM.is_invalidating(reason), reason)
+            self.assertFalse(SEM.is_invoked(reason), reason)
+
+    def test_lambda_zero_is_a_legitimate_result_not_a_failure(self) -> None:
+        # notes/44 section 5: lambda = 0 means the semantic signal failed to
+        # beat A0, and is reported as such rather than retried. Step 0 then
+        # eliminates A2 as a no-op -- a separate decision, downstream.
+        self.assertIn(SEM.REASON_LAMBDA_ZERO, SEM.LEGITIMATE_UNINVOKED_REASONS)
+        self.assertFalse(SEM.is_invalidating(SEM.REASON_LAMBDA_ZERO))
+
+    def test_every_reason_is_classified_exactly_once(self) -> None:
+        # A tenth reason added without a class would silently be neither
+        # invalidating nor invoked nor legitimate.
+        buckets = (SEM.INVALIDATING_REASONS, SEM.INVOKED_REASONS,
+                   SEM.LEGITIMATE_UNINVOKED_REASONS)
+        self.assertEqual(set(SEM.REASONS), set().union(*buckets))
+        self.assertEqual(SEM.INVALIDATING_REASONS & SEM.LEGITIMATE_UNINVOKED_REASONS,
+                         frozenset())
+        self.assertEqual(SEM.INVOKED_REASONS & SEM.LEGITIMATE_UNINVOKED_REASONS,
+                         frozenset())
+
+    def test_model_absent_is_recorded_as_invalidating_in_the_trace(self) -> None:
+        A.clear_catalog_cache()
+        ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0,
+                        semantic_model_dir="/nonexistent", trace=True)
+        self.turns(ag)
+        rows = [t for t in ag._sessions["s"]["trace_log"]
+                if t.get("semantic_reason") == SEM.REASON_MODEL_ABSENT]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertIs(row["semantic_invalidating"], True)
+            self.assertIs(row["semantic_invoked"], False)
+
+    def test_an_inference_failure_is_recorded_as_invoked_and_invalidating(self) -> None:
+        A.clear_catalog_cache()
+        ag = self.agent(semantic_rerank_mode="on", semantic_lambda=1.0, trace=True)
+        def explode(query, prefix):
+            raise RuntimeError("forward pass")
+        ag._semantic_score_order = explode
+        self.turns(ag)
+        rows = [t for t in ag._sessions["s"]["trace_log"]
+                if t.get("semantic_reason") == SEM.REASON_INFERENCE_FAILURE]
+        self.assertTrue(rows, "the inference failure never reached the trace")
+        for row in rows:
+            self.assertIs(row["semantic_invoked"], True)
+            self.assertIs(row["semantic_invalidating"], True)
 
     def test_off_records_no_semantic_telemetry(self) -> None:
         A.clear_catalog_cache()

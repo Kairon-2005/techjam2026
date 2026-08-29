@@ -7,6 +7,7 @@ miss, and they run before the first trial.
 """
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import starter.agent as A
 from lab import a1cache as CACHE
 from lab import a1search as S
+from starter.evidence import SlotValue
 from tests.test_indexes import _catalog_file
 
 FEATURES = {k: 0.0 for k in CACHE.FEATURE_KEYS}
@@ -116,41 +118,60 @@ class ReplayGateTest(unittest.TestCase):
         A.clear_catalog_cache()
         cls._tmp.cleanup()
 
-    def build(self):
-        """One real turn, captured through _rerank's own collect hook."""
+    def build(self, turns: int = 1):
+        """Real turns, captured through the driver's own hook on `_rerank`."""
         ag = A.Agent(self.path)
         ag.reset("s", {})
-        ag.respond("s", "I'm looking for Clothing Women Dresses, "
-                        "but I'm still exploring.", 1, 10)
-        state = ag._sessions["s"]
-        cands, _ = ag._candidates(state, ag.cfg, 50)
-        collected: list = []
-        ag._rerank(cands, state, collect=collected)
-        turn_row = {"turn": 1, "target": collected[0][0],
-                    "candidates": [a for a, _ in collected],
-                    "features": [f for _, f in collected]}
-        sessions = [{"sample_id": "s", "scenario": "clean", "turns": [turn_row]}]
-        return ag, sessions, {("s", 1): (cands, state)}
+        cap = CACHE.Capture()
+        messages = ["I'm looking for Clothing Women Dresses, but I'm still exploring.",
+                    "For that, what matters is: silk; color: black."]
+        with CACHE.capturing(ag, cap):
+            for turn in range(1, turns + 1):
+                cap.key = ("s", turn)
+                ag.respond("s", messages[turn - 1], turn, 10)
+            cap.key = None
+        turn_rows = []
+        for turn in range(1, turns + 1):
+            row = dict(cap.rows[("s", turn)])
+            row["target"] = row["candidates"][0]
+            turn_rows.append(row)
+        sessions = [{"sample_id": "s", "scenario": "clean", "turns": turn_rows}]
+        return ag, sessions, cap
 
     def test_the_collect_hook_records_every_candidate(self) -> None:
-        ag, sessions, inputs = self.build()
-        cands, _ = inputs[("s", 1)]
-        self.assertEqual(len(sessions[0]["turns"][0]["candidates"]), len(cands))
+        _, sessions, cap = self.build()
+        snap = cap.snapshots[("s", 1)]
+        self.assertEqual(len(sessions[0]["turns"][0]["candidates"]), len(snap.cands))
+
+    def test_the_hook_is_removed_when_the_block_exits(self) -> None:
+        ag, _, _ = self.build()
+        self.assertNotIn("_rerank", vars(ag),
+                         "the instance attribute shadowing _rerank outlived the block")
 
     def test_the_cache_schema_is_valid(self) -> None:
         _, sessions, _ = self.build()
         self.assertEqual(CACHE.validate_schema(sessions), [])
 
     def test_default_weight_replay_reproduces_the_full_a0_order(self) -> None:
-        ag, sessions, inputs = self.build()
-        got = CACHE.replay_gate(sessions, ag, inputs)
+        ag, sessions, cap = self.build()
+        got = CACHE.replay_gate(sessions, ag, cap.snapshots)
         self.assertTrue(got["ok"], got.get("reason"))
-        self.assertGreater(got["checked"], 0)
+        self.assertGreater(got["checked_turns"], 0)
+        self.assertEqual(got["mismatches"], 0)
+
+    def test_cached_and_live_mrr_agree_exactly(self) -> None:
+        ag, sessions, cap = self.build()
+        got = CACHE.replay_gate(sessions, ag, cap.snapshots)
+        # Not "close": the cache re-derives the same ranking from the same
+        # features, so any difference at all is a defect and not a rounding
+        # question.
+        self.assertEqual(got["delta_mrr"], 0.0)
+        self.assertEqual(got["cached_default_mrr"], got["live_a0_mrr"])
 
     def test_the_gate_catches_a_corrupted_cache(self) -> None:
         # A gate that cannot fail is not a gate: swap two candidates and
         # require the replay to notice.
-        ag, sessions, inputs = self.build()
+        ag, sessions, cap = self.build()
         cands = sessions[0]["turns"][0]["candidates"]
         feats = sessions[0]["turns"][0]["features"]
         cands[0], cands[1] = cands[1], cands[0]
@@ -158,8 +179,9 @@ class ReplayGateTest(unittest.TestCase):
         # Swapping BOTH keeps the pairing, so re-rank still matches. Now break
         # the pairing by dropping one feature value.
         feats[0] = {**feats[0], "f_bm25": feats[0]["f_bm25"] + 10.0}
-        got = CACHE.replay_gate(sessions, ag, inputs)
+        got = CACHE.replay_gate(sessions, ag, cap.snapshots)
         self.assertFalse(got["ok"])
+        self.assertEqual(got["first_mismatch"]["check"], "cache")
         self.assertIn("diverges", got["reason"])
 
     def test_a_missing_a0_input_stops_the_gate(self) -> None:
@@ -167,6 +189,137 @@ class ReplayGateTest(unittest.TestCase):
         got = CACHE.replay_gate(sessions, ag, {})
         self.assertFalse(got["ok"])
         self.assertIn("no A0 input", got["reason"])
+
+
+class SnapshotTest(unittest.TestCase):
+    """The captured input must be the input AT THE CALL, not a live handle.
+
+    This is the defect the class exists to make impossible: `states_by_key[key]
+    = (cands, state)` stored the session dict itself, so every later turn kept
+    editing it and the replay ran turn 1 against the state as it stood at the
+    end of the session.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        A.clear_catalog_cache()
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.path = _catalog_file(Path(cls._tmp.name))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        A.clear_catalog_cache()
+        cls._tmp.cleanup()
+
+    def two_turns(self):
+        ag = A.Agent(self.path)
+        ag.reset("s", {})
+        cap = CACHE.Capture()
+        with CACHE.capturing(ag, cap):
+            cap.key = ("s", 1)
+            ag.respond("s", "I'm looking for Clothing Women Dresses, "
+                            "but I'm still exploring.", 1, 10)
+            cap.key = ("s", 2)
+            ag.respond("s", "For that, what matters is: silk; color: black.", 2, 10)
+            cap.key = None
+        return ag, cap
+
+    def test_the_snapshot_is_not_the_live_state_object(self) -> None:
+        ag, cap = self.two_turns()
+        live = ag._sessions["s"]
+        snap = cap.snapshots[("s", 1)]
+        self.assertIsNot(snap.state, live)
+        for key in ("slots", "terms", "phrases", "shown", "provenance"):
+            self.assertIsNot(snap.state[key], live[key], key)
+
+    def test_mutating_the_live_state_leaves_the_snapshot_unchanged(self) -> None:
+        ag, cap = self.two_turns()
+        live = ag._sessions["s"]
+        snap = cap.snapshots[("s", 1)]
+        before_terms = list(snap.state["terms"])
+        before_phrases = list(snap.state["phrases"])
+        before_slots = snap.slots
+
+        live["terms"].append("invented")
+        live["phrases"].append("invented phrase")
+        live["shown"].append("ZZZ")
+        live["slots"].append(SlotValue(attribute="material", value="leather"))
+        for slot in live["slots"]:
+            slot.active = False
+            slot.polarity = -1
+            slot.soft_ok = False
+            slot.confidence = 0.01
+            slot.hardness = "soft"
+            slot.source_turn = 99
+
+        self.assertEqual(snap.state["terms"], before_terms)
+        self.assertEqual(snap.state["phrases"], before_phrases)
+        self.assertEqual(CACHE.slot_fingerprint(snap.state), before_slots)
+        self.assertNotIn("ZZZ", snap.state["shown"])
+
+    def test_the_snapshot_records_slot_fields_as_they_were_at_the_call(self) -> None:
+        _, cap = self.two_turns()
+        turn2 = cap.snapshots[("s", 2)]
+        self.assertTrue(turn2.slots, "turn 2 stated constraints and recorded no slot")
+        for slot in turn2.slots:
+            recorded = dict(slot)
+            for name in ("active", "polarity", "hardness", "confidence",
+                         "soft_ok", "source_turn"):
+                self.assertIn(name, recorded)
+            self.assertTrue(recorded["active"])
+            self.assertEqual(recorded["polarity"], 1)
+            self.assertEqual(recorded["source_turn"], 2)
+        self.assertEqual(cap.snapshots[("s", 1)].slots, (),
+                         "turn 1 stated no constraint and must record no slot")
+
+    def test_slot_fields_cover_every_slotvalue_field(self) -> None:
+        # A field added to SlotValue and not added here would be silently
+        # absent from the fingerprint, so the fingerprint would stop being a
+        # statement about the whole slot.
+        self.assertEqual(set(CACHE.SLOT_FIELDS),
+                         {f.name for f in dataclasses.fields(SlotValue)})
+
+    def test_cands_keep_their_retrieval_order_and_bm25_score(self) -> None:
+        ag, cap = self.two_turns()
+        snap = cap.snapshots[("s", 1)]
+        live_cands, _ = ag._candidates(snap.state, ag.cfg,
+                                       int(ag.cfg["pool_depth"]))
+        self.assertEqual([a for a, _ in snap.cands], [a for a, _ in live_cands])
+        self.assertEqual([round(s, 10) for _, s in snap.cands],
+                         [round(s, 10) for _, s in live_cands])
+
+    def test_the_gate_catches_a_snapshot_that_kept_a_live_reference(self) -> None:
+        # The regression test for the original defect, built by re-creating it:
+        # point turn 1's snapshot at the LIVE state, which turn 2 has since
+        # extended with `silk` and `color: black`, and require the gate to
+        # notice that turn 1 no longer replays to the order A0 emitted.
+        ag, cap = self.two_turns()
+        live = ag._sessions["s"]
+        snap = cap.snapshots[("s", 1)]
+        poisoned = dict(cap.snapshots)
+        poisoned[("s", 1)] = dataclasses.replace(snap, state=live)
+        row = dict(cap.rows[("s", 1)])
+        row["target"] = row["candidates"][0]
+        sessions = [{"sample_id": "s", "scenario": "clean", "turns": [row]}]
+
+        clean = CACHE.replay_gate(sessions, ag, cap.snapshots)
+        self.assertTrue(clean["ok"], clean.get("reason"))
+
+        got = CACHE.replay_gate(sessions, ag, poisoned)
+        self.assertFalse(got["ok"], "a live-reference snapshot passed the gate")
+        self.assertEqual(got["first_mismatch"]["check"], "snapshot")
+        self.assertIn("no longer reproduces the live order", got["reason"])
+
+    def test_a_second_rerank_for_one_turn_is_recorded_not_merged(self) -> None:
+        ag = A.Agent(self.path)
+        ag.reset("s", {})
+        cap = CACHE.Capture()
+        with CACHE.capturing(ag, cap):
+            cap.key = ("s", 1)
+            ag.respond("s", "I'm looking for Clothing Women Dresses.", 1, 10)
+            ag.respond("s", "I'm looking for Clothing Women Dresses.", 2, 10)
+            cap.key = None
+        self.assertEqual(cap.duplicate_keys, [("s", 1)])
 
 
 class SlotSoftTest(unittest.TestCase):

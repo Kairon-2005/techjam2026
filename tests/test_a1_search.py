@@ -1,7 +1,7 @@
 """Phase 7A-R1: the A1 feature cache and its deterministic coordinate search.
 
 Written before the implementation. The rules come from
-notes/44-phase7a-r1-prereg.md revision 3, and three of them are the ones a
+notes/44-phase7a-r1-prereg.md revision 4, and three of them are the ones a
 plausible-looking implementation gets wrong:
 
   * the cached objective must use the EVALUATOR's Top-10 semantics -- a target

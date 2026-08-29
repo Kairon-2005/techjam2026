@@ -1,5 +1,17 @@
 # Phase 7A-R1 pre-registration — quality evaluation of A0, A1 and A2-10
 
+**Revision 4. PRE-DATA CORRECTION, committed 2026-08-30.** No cache has been
+built, no trial has been run, no `sup-val` and no public row has been touched.
+Revision 4 exists because revision 3's text and the implementation had come
+apart on five points, and an experiment that runs under one contract while its
+report quotes another is not a pre-registered experiment. Every correction below
+is made **before** the first measurement and is listed in §0 so the difference
+between revision 3 and revision 4 is a diff and not a memory.
+
+Revision 3's own summary is kept verbatim below, so what changed stays visible.
+
+---
+
 **Revision 3. Design and pre-registration.** R1 implementation begins on this
 document; no further review round is required.
 
@@ -22,6 +34,219 @@ Both feasibility conclusions stand and neither is edited:
 | **A2-10** | **PASS** every frozen cap, 7/7 — 15.23 ms, `notes/43` |
 
 **Three arms, fixed: A0, A1, A2-10.** A2-30 never enters quality evaluation.
+
+## 0. Revision 4 — the five pre-data corrections
+
+Nothing here is a result, a threshold change, or a gate loosened after seeing a
+number. Each item names what revision 3 said, what is true instead, and why the
+difference could have produced a wrong claim.
+
+### 0.1 The A1 no-op condition is `best_mrr <= baseline_mrr`
+
+**Revision 3, §7b Step 0, said:** *"the final nine weights are exactly identical
+to the original defaults"*.
+
+**Revision 4 says:** A1 is a no-op iff
+
+```
+delta_mrr = best_mrr - baseline_mrr <= 0
+```
+
+both measured on the `sup-train` cache under the cached evaluator semantics of
+§6. **Weight equality is a DIAGNOSTIC and is not the test.** It is still
+recorded, as `weights_unchanged`, and it is still informative — but it cannot
+decide the question.
+
+**Why the revision 3 wording was wrong, concretely.** The search's tie-break can
+move many weights without improving the objective. On a corpus where no weight
+separates anything, every candidate ties on MRR and the tie-break returns
+whichever vector it prefers. That vector differs from the defaults, so a
+`weights != DEFAULTS` test would report a challenger while `best_mrr ==
+baseline_mrr` — an arm with **no quality gain at all** consuming the single
+public confirmation. The condition has to be about the objective, because the
+objective is what the arm is claiming to improve.
+
+`delta_mrr <= 0`, not `< 0`: an arm that exactly ties the baseline has not been
+shown to work, and Step 0 exists to stop exactly that.
+
+### 0.2 Ties keep the default vector, by an L1 distance tie-break
+
+The search's ordering is, in full:
+
+| rank key | |
+|---|---|
+| 1 | **`sup-train` cached MRR**, higher wins |
+| 2 | **lowest L1 distance from the ORIGINAL DEFAULT weights** |
+| 3 | the canonical weight tuple, so the order is total |
+
+Tie-break 2 is **distance from the defaults**, not the absolute L1 norm.
+With the norm, a tie on MRR is broken by whichever vector happens to be smaller,
+so the weights drift for free and a no-op arm arrives at `sup-val` looking
+tuned. With distance from the defaults, **equal MRR returns the shipped vector
+exactly**, and "the search found nothing" is represented by the vector that says
+so.
+
+### 0.3 The operative split is 800/200 and nothing else may run
+
+`notes/40` registered a scenario-stratified split and superseded a global
+`sha256 % 5` split that gave **806/194**. Both numbers appear in the notes; only
+one is operative, and any driver reporting 806 has run the retired one.
+
+| | train | val |
+|---|---|---|
+| `buying` | 320 | 80 |
+| `browsing` | 320 | 80 |
+| `intent_override` | 120 | 30 |
+| `boundary` | 40 | 10 |
+| **total** | **800** | **200** |
+
+| | |
+|---|---|
+| `sup-train` id hash | `48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d` |
+| `sup-val` id hash | `82e0470ee83d2cf8883399ededda11b5ddb4fa762685196b36a9fe521a105a73` |
+
+**The driver asserts all of this at startup, before a session runs**, and raises
+otherwise: row counts, per-scenario counts, both id hashes, `train ∩ val = ∅`,
+`|train ∪ val| = 1000`, no id outside `supplementary_dev_`, and no `public_` or
+`supplementary_holdout_` id anywhere. **806 or 194 on either side is refused by
+count alone**, named as the superseded split rather than reported as a near
+miss. Membership in the forbidden corpora is a **namespace test**: a guard that
+had to open the sealed holdout to prove it was untouched would be touching it.
+
+A negative test constructs the retired 806/194 split and requires the guard to
+reject it — a guard that has never rejected anything is a comment.
+
+### 0.4 The cache captures a frozen snapshot, not a live reference
+
+The cache builder recorded `states_by_key[(sample_id, turn)] = (cands, state)`,
+storing the **live session dict**. The session keeps mutating it for the rest of
+the run — appending slots, flipping `active`, extending `terms`, rewriting
+`shown` — so every cached turn would have replayed against the session's FINAL
+state. Turn 2 would have been checked against an input that only existed after
+turn 5, and it would have passed, because both sides would be wrong the same
+way.
+
+**Required instead:**
+
+* the snapshot is a **deep copy taken at the exact `_rerank` call site**, before
+  `_rerank` is entered;
+* it carries every `SlotValue` field as it stood **at that call** — `active`,
+  `polarity`, `hardness`, `confidence`, `soft_ok`, `source_turn`, and the rest —
+  as a comparable fingerprint, not only inside an object graph;
+* `cands` keeps its **retrieval order and BM25 scores** exactly as received;
+* nothing is reconstructed from the trace afterwards;
+* the replay reads the frozen snapshot and never the live session.
+
+A test mutates the live state after capture — appending slots, inverting every
+polarity, clearing every `active` and `soft_ok` — and requires the snapshot to
+be unchanged. A second test recreates the defect by pointing turn 1's snapshot
+at the live state and requires the gate to fail.
+
+**The default replay gate must print, before trial 0:**
+
+| | |
+|---|---|
+| checked sessions | **800** |
+| checked turns | recorded |
+| full-order mismatches | **0** |
+| cached default MRR | recorded |
+| live A0 MRR | recorded |
+| delta | **exactly 0** |
+| cache sha256 | recorded |
+| `sup-train` split hash | recorded |
+| agent commit and sha256 | recorded |
+| catalog sha256 | recorded |
+
+Each turn is checked **twice against one ground truth** — the order `_rerank`
+actually returned during the session. Re-running `_rerank` on the frozen
+snapshot must return it (this is what fails if the snapshot was a live
+reference), and re-scoring the cached features with the default weights must
+return it too (this is what fails if the cache dropped a feature or mis-mapped a
+weight). Both compare the **full candidate order, element for element**, not the
+Top-10. **Every turn is checked**, so a reported count of zero is a statement
+about the whole cache; any mismatch stops the phase before the first trial.
+
+**`live A0 MRR` is A0's own order under the cached evaluator semantics**, not
+the evaluator's post-`_rotate` number. Those are different quantities — the
+cache records `_rerank`'s order and `_rotate` runs after it — so the evaluator's
+MRR over `sup-train` is reported alongside as a **diagnostic**, which turns "the
+two coincide because nothing asked for alternatives" from an assumption into a
+recorded fact.
+
+### 0.5 Telemetry: what invalidates a shard, and what counts as an invocation
+
+| | |
+|---|---|
+| **experiment-invalidating** | `model_absent`, `load_failure`, `inference_failure`, `bad_permutation` |
+| **model-invoked** | `inference_failure`, `bad_permutation`, `reranked` |
+| **legitimate non-invocation** | `mode_off`, `lambda_zero`, `prefix_too_short`, `ineligible`, `empty_query` |
+
+Two corrections against revision 3:
+
+* **`model_absent` is now invalidating.** Revision 3 called it "a configuration
+  fact", which is true and beside the point: an A2 shard whose model directory
+  was missing measured **A0 on every turn**, and the production path's fail-open
+  is exactly what makes that invisible in the score. The question the set
+  answers is not who is to blame, it is whether the shard measured what it
+  claims. It did not.
+* **`inference_failure` now counts as invoked, and `load_failure` does not.**
+  An inference failure means the session existed, the batch was fed and the
+  forward pass raised — the model was invoked. A load failure means no session
+  was ever constructed. Counting a load failure as an invocation would put turns
+  with no inference into the denominator of every per-invocation figure.
+
+`ineligible`, `empty_query` and `prefix_too_short` are the cascade correctly
+declining to call the model, and are descriptive only.
+
+**λ = 0 is a legitimate outcome, and A2 is then eliminated.** Both, without
+tension: §5 says λ = 0 means the semantic signal failed to beat A0 and is
+reported as such rather than retried; §7b Step 0 then disqualifies A2 as a
+no-op. The arm ran, and what it found was nothing.
+
+**Any invalidating reason with a count above zero makes the shard
+non-citable.** Not a rate and not a threshold — one turn on which the model did
+not run is one turn of A0 reported as A2. The rule lives in the single
+citability predicate (`lab/provenance.py`), so it cannot be forgotten by a
+report that did not think to check:
+
+* the shard is **invalid and non-citable**;
+* it produces **no A2 quality verdict**;
+* the environment is fixed and the shard is **re-run from a fixed commit**. The
+  row is never repaired in place, because results are never rewritten.
+
+The same applies to a λ = 0 turn that did not reproduce A0 byte-for-byte: that
+is the fallback's correctness proof failing, and it is counted, not averaged.
+
+### 0.6 Two operational rules that follow
+
+**The catalog cache may not close an object a live Agent still holds.** The
+shared cache was keyed on the resolved path alone, so a request for richer
+semantic fields superseded a cached catalog **and closed its SQLite connection**
+— pulling it out from under an A0 Agent that was still live and had done nothing
+wrong. In R1 the A0 and A2 arms are constructed against the same catalog **by
+design**, so this is on the experiment's path and not a test artefact. The key
+now carries the capability, `(resolved_path, extras, semantic_fields)`,
+capability versions coexist, and **`clear_catalog_cache()` is the only place
+anything is closed**.
+
+**Each arm of a paired `sup-val` run gets its own leased process.** Shared
+module-level singletons — the catalog cache, an ONNX session, a tokenizer —
+are exactly the surface on which one arm's construction can perturb another's,
+and a paired comparison is worth nothing if the pairing is the thing that broke
+it.
+
+### 0.7 What revision 4 supersedes
+
+| superseded | by |
+|---|---|
+| revision 3 §7b Step 0, *"the final nine weights are exactly identical to the original defaults"* | §0.1 — `delta_mrr <= 0` |
+| revision 3 §9b, `model_absent` as a non-invalidating configuration fact | §0.5 — invalidating |
+| `notes/40`, *"the public 200 is a CONFIRMATION set, evaluated **once per arm**"* | **notes/44 §7b Step 3 — ONE finalist, one run, one number.** `notes/44` is the operative contract for R1 wherever the two documents differ |
+| `notes/40`'s superseded 806/194 global-hash split | §0.3 — the stratified 800/200 split, asserted at startup |
+
+`notes/40` remains the design document. **Where `notes/40` and `notes/44`
+disagree, `notes/44` governs R1**, and the disagreements are the four rows
+above.
 
 ## 1. A2 topology, frozen
 
@@ -358,16 +583,18 @@ confirmation.**
 | arm | no-op condition | consequence |
 |---|---|---|
 | **A2-10** | `sup-train` selects **λ = 0** | recorded as **"semantic signal failed"**. A2 **stops immediately**: no `sup-val` run, **not finalist-eligible** |
-| **A1** | the final nine weights are **exactly identical to the original defaults** | recorded as a **no-op**. A1 **stops immediately**: no `sup-val` run, **not finalist-eligible** |
+| **A1** | **`delta_mrr = best_mrr - baseline_mrr <= 0`** on the `sup-train` cache (revision 4, §0.1; revision 3's *"weights exactly identical to the original defaults"* is **superseded** and survives only as the `weights_unchanged` diagnostic) | recorded as a **no-op**. A1 **stops immediately**: no `sup-val` run, **not finalist-eligible** |
 
 Checked **after freezing and before any `sup-val` run**, so a no-op costs
 nothing beyond the `sup-train` search that produced it.
 
 λ = 0 is a legitimate `sup-train` outcome (§5) and this is what it *means*
 downstream: legitimate to select, and disqualifying to carry forward. The same
-holds for an A1 weight vector that coordinate descent returns unchanged — the
-search ran, found nothing better than the shipped weights, and that is a
-result, not a candidate.
+holds for an A1 search that returns no MRR gain — the search ran, found nothing
+better than the shipped weights, and that is a result, not a candidate. Under
+revision 4's tie-break (§0.2) such a search also returns the shipped weights
+themselves, so the diagnostic and the verdict agree; when they do not, **the
+verdict is `delta_mrr`**.
 
 **If both arms are no-ops:** A0 remains the default, no public confirmation
 runs, and Phase 7A ends as a **negative result**.
@@ -506,7 +733,7 @@ Recorded per turn and aggregated **by scenario and by official slice**:
 |---|---|
 | `a2_eligible_turns` / `a2_total_turns` | how often the robustness gate opened |
 | `a2_model_invoked_turns` | turns where the model actually ran — differs from eligible when the prefix is empty or `effective_k < 2` |
-| `a2_fallback_count`, **by reason** | `model_absent`, `load_failure`, `inference_failure`, `empty_query`, `prefix_too_short`, `ineligible` |
+| `a2_fallback_count`, **by reason** | `model_absent`, `load_failure`, `inference_failure`, `bad_permutation`, `empty_query`, `prefix_too_short`, `ineligible`. The first four are **experiment-invalidating** (§0.5) and make the shard non-citable |
 | `a2_empty_query_count` | turns where the semantic query assembled to `""` |
 | `a2_effective_k_distribution` | histogram of `effective_k`, so a silent clamp to 0 or 1 is visible |
 | `a2_lambda_zero_degenerate` | whether λ = 0 reproduced A0 **byte-for-byte**, asserted per turn rather than assumed |
@@ -524,12 +751,17 @@ classifier**, not resolved by editing the gate.
 
 ## 10. Stop conditions
 
-Stop if: any frozen parameter is searched alongside λ; the eligibility rule is
-changed after seeing activation counts; A1 and A2 are combined; `sup-val` is
+Stop if: the driver runs any split but the operative 800/200, or reports 806/194
+anywhere; the cache stores a live state reference rather than a frozen snapshot;
+the default replay gate reports a non-zero mismatch count or a non-zero delta
+and a trial runs anyway; an A2 shard with a non-zero invalidating-reason count
+is quoted as an A2 quality verdict; any frozen parameter is searched alongside
+λ; the eligibility rule is changed after seeing activation counts; A1 and A2 are combined; `sup-val` is
 run before both arms are frozen; the public 200 is touched by anything but the
 single confirmation run; the sealed holdout is touched at all; HR@10 or MTTC
 moves for A2-10 and is explained as a trade-off; more than one arm is run on
 the public 200; the eligibility gate is modified after seeing activation
 counts; `score_default` moves to an arm that did not clear +0.010 on public
-`clean` MRR; a no-op arm is carried past Step 0; or an arm that met the floors
-without qualifying is run on the public 200.
+`clean` MRR; a no-op arm is carried past Step 0 — judged on `delta_mrr`, not on
+weight equality; or an arm that met the floors without qualifying is run on the
+public 200.
