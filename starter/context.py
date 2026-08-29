@@ -285,6 +285,123 @@ def match_count(tag: str, window_texts: Sequence[str]) -> int:
     return profile_support(tag, window_texts).match_count
 
 
+class ProfileTagCategory(str, Enum):
+    CONFLICTING = "conflicting"
+    DUPLICATED_SESSION_EVIDENCE = "duplicated_session_evidence"
+    UNSUPPORTED = "unsupported"
+    GENERIC = "generic"
+    SPECIFIC_INFORMATIVE = "specific_informative"
+
+
+# The contract, in order. First match wins. Declared as data rather than left
+# implicit in an if-chain so a test can assert the ORDER, not just the outcomes
+# -- `unsupported` before `generic` is the rule revision 1 lacked entirely.
+PROFILE_CATEGORY_PRECEDENCE: tuple[ProfileTagCategory, ...] = (
+    ProfileTagCategory.CONFLICTING,
+    ProfileTagCategory.DUPLICATED_SESSION_EVIDENCE,
+    ProfileTagCategory.UNSUPPORTED,
+    ProfileTagCategory.GENERIC,
+    ProfileTagCategory.SPECIFIC_INFORMATIVE,
+)
+
+
+class ProfileSessionVerdict(str, Enum):
+    # The customer gave us nothing to classify.
+    NO_SIGNAL = "no_signal"
+    # They gave us tags and none survived. A FINDING about the tags, not their
+    # absence -- collapsing this into NO_SIGNAL would make a data gap and a
+    # result indistinguishable in the telemetry.
+    NO_CREDIBLE_TAG = "no_credible_tag"
+    HAS_CREDIBLE_TAG = "has_credible_tag"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfileSnapshot:
+    """Session facts only. Deliberately no candidate identity and no target."""
+    tags: tuple[str, ...] = ()
+    stated_values: tuple[str, ...] = ()      # active positive slot values
+    negated_values: tuple[str, ...] = ()     # explicit negatives, polarity < 0
+    blocked_values: tuple[str, ...] = ()     # superseded by an override
+    turn: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfilePolicy:
+    profile_max_coverage: float = 0.5
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfileTagVerdict:
+    tag: str
+    category: ProfileTagCategory
+    match_count: int
+    coverage: float
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ProfileDecision:
+    tags: tuple[ProfileTagVerdict, ...] = ()
+    session_verdict: ProfileSessionVerdict = ProfileSessionVerdict.NO_SIGNAL
+    credible_tags: tuple[str, ...] = ()
+    window_size: int = 0
+
+    def counts(self) -> dict[str, int]:
+        """Raw per-category counts. Never a rate: `0.9997` reads as a pass."""
+        out = {c.value: 0 for c in PROFILE_CATEGORY_PRECEDENCE}
+        for verdict in self.tags:
+            out[verdict.category.value] += 1
+        return out
+
+
+def classify_profile(snapshot: ProfileSnapshot, policy: ProfilePolicy,
+                     window_texts: Sequence[str]) -> ProfileDecision:
+    """Classify each tag, then the session. Pure, bounded, deterministic.
+
+    Receives no Agent, no catalog, no session dict, no index, no callback and
+    no ground truth. `window_texts` is the text of the bounded PRE-RERANK
+    candidate window, already extracted by the host -- passing texts rather
+    than asins is what keeps candidate identity, and therefore the target, out
+    of reach of this function entirely.
+
+    At most MAX_PROFILE_TAGS x |window| = 8 x 30 = 240 shared-kernel match
+    checks, one compiled pattern per tag.
+    """
+    texts = list(window_texts or ())
+    stated = frozenset(snapshot.stated_values)
+    negated = frozenset(snapshot.negated_values)
+    blocked = frozenset(snapshot.blocked_values)
+
+    verdicts: list[ProfileTagVerdict] = []
+    for tag in snapshot.tags:
+        support = profile_support(tag, texts)
+        if tag in negated or tag in blocked:
+            category = ProfileTagCategory.CONFLICTING
+        elif tag in stated:
+            category = ProfileTagCategory.DUPLICATED_SESSION_EVIDENCE
+        elif support.match_count == 0:
+            # Zero support and too much support fail for OPPOSITE reasons, and
+            # a coverage threshold cannot tell them apart: 0.0 is not > 0.5.
+            category = ProfileTagCategory.UNSUPPORTED
+        elif support.coverage > policy.profile_max_coverage:
+            category = ProfileTagCategory.GENERIC
+        else:
+            category = ProfileTagCategory.SPECIFIC_INFORMATIVE
+        verdicts.append(ProfileTagVerdict(tag=tag, category=category,
+                                          match_count=support.match_count,
+                                          coverage=support.coverage))
+
+    credible = tuple(v.tag for v in verdicts
+                     if v.category is ProfileTagCategory.SPECIFIC_INFORMATIVE)
+    if not snapshot.tags:
+        session = ProfileSessionVerdict.NO_SIGNAL
+    elif credible:
+        session = ProfileSessionVerdict.HAS_CREDIBLE_TAG
+    else:
+        session = ProfileSessionVerdict.NO_CREDIBLE_TAG
+    return ProfileDecision(tags=tuple(verdicts), session_verdict=session,
+                           credible_tags=credible, window_size=len(texts))
+
+
 def profile_coverage(tags: Sequence[str], ranked: Sequence[str],
                      text_by_asin: Mapping[str, str], pool_depth: int) -> dict[str, float]:
     """Share of the ranked window mentioning each tag.
