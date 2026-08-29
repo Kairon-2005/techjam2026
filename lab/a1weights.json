@@ -145,10 +145,10 @@
       "weight": "w_phrase"
     }
   ],
-  "agent_commit": "791511a",
+  "agent_commit": "47d6c8c",
   "agent_in_worktree": true,
   "agent_sha256": "0ad7f7f9c9a08235",
-  "agent_source": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-lease-kr9ts6z1/tree/starter/agent.py",
+  "agent_source": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-lease-2hn98z41/tree/starter/agent.py",
   "arm": "A1",
   "baseline_mrr": 0.20282688492063491,
   "best_mrr": 0.42251984126984127,
@@ -172,8 +172,26 @@
     "w_pop": 4.0
   },
   "delta_mrr": 0.21969295634920635,
-  "harness_commit": "791511a",
+  "harness_commit": "47d6c8c",
   "l1_distance_from_defaults": 25.1,
+  "mrr_by_scenario_default": {
+    "boundary": 0.115446,
+    "browsing": 0.199479,
+    "buying": 0.225548,
+    "intent_override": 0.180291
+  },
+  "mrr_by_scenario_delta": {
+    "boundary": 0.186042,
+    "browsing": 0.204394,
+    "buying": 0.199546,
+    "intent_override": 0.325433
+  },
+  "mrr_by_scenario_frozen": {
+    "boundary": 0.301488,
+    "browsing": 0.403873,
+    "buying": 0.425094,
+    "intent_override": 0.505724
+  },
   "multipliers": [
     0.0,
     0.25,
@@ -200,14 +218,20 @@
     "w_pop",
     "slot_soft"
   ],
-  "seconds": 112.1,
+  "seconds": 98.7,
   "seeds": [],
+  "sessions_by_scenario": {
+    "boundary": 40,
+    "browsing": 320,
+    "buying": 320,
+    "intent_override": 120
+  },
   "split_train_hash": "48d14de25a4adf90adbcd9ad621ea2e1d143bd5632a8be67fed239ff4822290d",
   "step": "sup-train coordinate search",
   "sweeps": 3,
   "tag": "p7a-r1-a1trials",
   "trials": 189,
-  "ts": "2026-08-30T01:57:18",
+  "ts": "2026-08-30T02:00:38",
   "verdict": "CHALLENGER: A1 is frozen at these weights and proceeds to sup-val, where it must still clear the floors and show a strictly positive MRR delta to qualify.",
   "weights": {
     "slot_soft": 0.0,
