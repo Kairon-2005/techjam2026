@@ -113,26 +113,30 @@ class PostHoldoutInfluenceManifestTest(unittest.TestCase):
         }
 
     def _make_history(self) -> list[dict]:
-        self._write("starter/agent.py", self.HARDENED_AGENT)
-        self._write(
-            "tests/test_agent.py",
-            "def test_environment_cannot_change_bare_agent():\n    pass\n",
-        )
-        hardened = self._commit("Freeze bare agent config against environment")
+        hardened = self._commit_environment_hardening(self.HARDENED_AGENT)
         self._write("starter/agent.py", self.DOCSTRING_AGENT)
         wording = self._commit("Clarify model weight claim")
         return [
-            self._entry(
-                hardened,
-                "environment_hardening",
-                "Independent release review removed ambient configuration input.",
-            ),
+            hardened,
             self._entry(
                 wording,
                 "docstring_only",
                 "Independent release review corrected module documentation.",
             ),
         ]
+
+    def _commit_environment_hardening(self, agent_source: str) -> dict:
+        self._write("starter/agent.py", agent_source)
+        self._write(
+            "tests/test_agent.py",
+            "def test_environment_cannot_change_bare_agent():\n    pass\n",
+        )
+        commit = self._commit("Freeze bare agent config against environment")
+        return self._entry(
+            commit,
+            "environment_hardening",
+            "Independent release review removed ambient configuration input.",
+        )
 
     def _commit_manifest(self, entries: list[dict]) -> tuple[Path, str]:
         manifest = {
@@ -205,6 +209,43 @@ class PostHoldoutInfluenceManifestTest(unittest.TestCase):
 
         self.assertFalse(got["ok"])
         self.assertIn("not docstring-only", got["evidence"])
+
+    def test_environment_hardening_cannot_hide_a_defaults_change(self) -> None:
+        changed = self.HARDENED_AGENT.replace(
+            'DEFAULTS = {"weight": 1}', 'DEFAULTS = {"weight": 2}'
+        )
+        path, digest = self._commit_manifest([
+            self._commit_environment_hardening(changed)
+        ])
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("protected DEFAULTS", got["evidence"])
+
+    def test_environment_hardening_cannot_hide_an_agent_change(self) -> None:
+        changed = self.HARDENED_AGENT.replace(
+            "return value * DEFAULTS", "return value + DEFAULTS"
+        )
+        path, digest = self._commit_manifest([
+            self._commit_environment_hardening(changed)
+        ])
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("protected Agent class", got["evidence"])
+
+    def test_environment_hardening_cannot_hide_unrelated_top_level_code(self) -> None:
+        changed = textwrap.dedent(self.HARDENED_AGENT) + "\nUNRELATED = True\n"
+        path, digest = self._commit_manifest([
+            self._commit_environment_hardening(changed)
+        ])
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("outside _load_config", got["evidence"])
 
 
 class ExternalStatusManifestTest(unittest.TestCase):
