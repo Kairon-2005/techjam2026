@@ -329,6 +329,13 @@ DEFAULTS = {
 # DEFAULTS, nothing more: no key here changes DEFAULTS, config resolution, the
 # score default, or the fact that the dense route ships off. See
 # notes/22-final-configurations.md.
+# The pinned A2-10 artifact. Named here so the showcase profile and the
+# packaging documentation cannot drift apart, and read by NOTHING in
+# score_default -- an absent artifact must never affect the scored path.
+SEMANTIC_MODEL_DIR = "lab/r0/artifacts/ms-marco-TinyBERT-L2-v2"
+SEMANTIC_MODEL_ID = "cross-encoder/ms-marco-TinyBERT-L2-v2"
+SEMANTIC_MODEL_REVISION = "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc"
+
 PROFILES: dict[str, dict] = {
     # The submission configuration, and the only one whose score is claimed.
     "score_default": {},
@@ -338,7 +345,24 @@ PROFILES: dict[str, dict] = {
     "showcase_dense": {"dense_browsing": True,
                        "dense_mixed": True,
                        "dense_fusion": "dense_only"},
+    # Architecture demonstration only -- Phase 7A-R1 arm A2-10, frozen at
+    # lambda = 1.0 on sup-train and eliminated at finalist selection, so it has
+    # NO public number and claims no public gain. Supplementary evidence only:
+    # sup-val MRR +0.008248, HR@10 and MTTC exactly invariant. Requires the
+    # pinned artifact; without it the cascade falls back byte-exactly to A0,
+    # which is why score_default never sets semantic_model_dir and never
+    # depends on the file existing.
+    "showcase_semantic": {"semantic_rerank_mode": "on",
+                          "semantic_rerank_k": 10,
+                          "semantic_lambda": 1.0,
+                          "semantic_model_dir": SEMANTIC_MODEL_DIR},
 }
+
+# The three profiles are DISJOINT by rule, not by accident: no combined
+# dense + semantic + personalization configuration exists, because no such
+# configuration was ever measured and a label over an unmeasured combination is
+# a claim about it.
+SHOWCASE_PROFILES = ("showcase_dense", "showcase_semantic")
 
 
 def _load_config(config: dict | None) -> dict:
