@@ -5,18 +5,18 @@
     "lab/a2cache.jsonl": true,
     "lab/r0/artifacts/ms-marco-TinyBERT-L2-v2": true
   },
-  "agent_construct_s": 11.479,
-  "catalog_index_s": 0.578,
-  "cold_start_s": 11.834,
-  "commit": "754074717284456404f505e15915ad9eeeeaa6df",
-  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-ubfv5_8l/tree",
-  "evaluation_s": 31.29,
+  "agent_construct_s": 10.593,
+  "catalog_index_s": 0.551,
+  "cold_start_s": 11.423,
+  "commit": "9de5271b2862376f918f51ec4db4e439e78819db",
+  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-alf68_kp/tree",
+  "evaluation_s": 30.25,
   "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
   "machine": "arm64",
   "matches_expected": true,
   "ok": true,
   "origin_dirty": false,
-  "peak_rss_mb": 648.9,
+  "peak_rss_mb": 702.7,
   "platform": "darwin",
   "python": "3.14.6",
   "result": {
@@ -37,7 +37,7 @@
   "standard_library_only": true,
   "tests": {
     "returncode": 0,
-    "summary": "Ran 741 tests in 93.633s",
+    "summary": "Ran 741 tests in 85.796s",
     "verdict": "OK"
   },
   "tests_pass": true,
@@ -48,6 +48,6 @@
     "total_tokens": 0
   },
   "tree_is_clean": true,
-  "warm_turn_p50_ms": 30.75,
-  "warm_turn_p95_ms": 36.185
+  "warm_turn_p50_ms": 25.723,
+  "warm_turn_p95_ms": 39.317
 }
