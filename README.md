@@ -18,14 +18,14 @@ described as such throughout.
 | HR@10 | 0.995 |
 | MRR | 0.852556 |
 | MTTC | 2.06 turns |
-| cold start | 6.134 s |
-| warm turn | 13.401 ms p50 · 14.176 ms p95 |
-| full 200-session evaluation | 15.59 s |
-| peak RSS | 575.7 MB |
+| cold start | 11.755 s |
+| warm turn | 29.681 ms p50 · 31.139 ms p95 |
+| full 200-session evaluation | 31.11 s |
+| peak RSS | 716.0 MB |
 | tokens / network calls / API cost | **0 / 0 / 0** |
 
 This one performance set comes from the detached clean-checkout verification of
-commit `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6` on Python 3.14.6 / Darwin arm64
+commit `4d85dc5b3d229a6698bea53f61c9ae8c7de539f7` on Python 3.14.6 / Darwin arm64
 — see [`docs/FINAL_VERIFICATION.md`](docs/FINAL_VERIFICATION.md). The separate
 [Linux portability run](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542)
 succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
@@ -293,7 +293,7 @@ demo/               python3 -m demo
 lab/                experiment harness: leases, ledgers, provenance, scenarios, benchmarks
 notes/              46 numbered design, pre-registration and results documents
 docs/               verification, model card, architecture, limitations, submission checklist
-tests/              813 tests, all executed on a committed tree, including
+tests/              827 tests, all executed on a committed tree, including
                     exact score locks and the configuration lock
 ```
 

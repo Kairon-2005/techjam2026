@@ -4,7 +4,7 @@
     "lab/a1cache.jsonl": true,
     "lab/a2cache.jsonl": true
   },
-  "agent_construct_s": 5.704,
+  "agent_construct_s": 10.864,
   "artifact_intact": true,
   "bundled_artifact": {
     "LICENSE": "ok",
@@ -15,17 +15,17 @@
     "tokenizer_config.json": "ok",
     "vocab.txt": "ok"
   },
-  "catalog_index_s": 0.286,
-  "cold_start_s": 6.134,
-  "commit": "96efae3f6ed0da9e0a7c95236fae17295d8ef7d6",
-  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-1zla6ubd/tree",
-  "evaluation_s": 15.59,
+  "catalog_index_s": 0.589,
+  "cold_start_s": 11.755,
+  "commit": "4d85dc5b3d229a6698bea53f61c9ae8c7de539f7",
+  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-0_g4zta0/tree",
+  "evaluation_s": 31.11,
   "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
   "machine": "arm64",
   "matches_expected": true,
   "ok": true,
   "origin_dirty": false,
-  "peak_rss_mb": 575.7,
+  "peak_rss_mb": 716.0,
   "platform": "darwin",
   "python": "3.14.6",
   "result": {
@@ -48,7 +48,7 @@
   "standard_library_only": true,
   "tests": {
     "returncode": 0,
-    "summary": "Ran 813 tests in 43.854s",
+    "summary": "Ran 827 tests in 94.488s",
     "verdict": "OK"
   },
   "tests_pass": true,
@@ -59,6 +59,6 @@
     "total_tokens": 0
   },
   "tree_is_clean": true,
-  "warm_turn_p50_ms": 13.401,
-  "warm_turn_p95_ms": 14.176
+  "warm_turn_p50_ms": 29.681,
+  "warm_turn_p95_ms": 31.139
 }

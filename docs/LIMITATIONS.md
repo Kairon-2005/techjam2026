@@ -67,7 +67,7 @@ self-modifying code, or any public gain from profile weighting.
 ## 5. Portability evidence is path-specific
 
 * The quality, latency and memory set quoted in the submission comes from the
-  detached clean-checkout run at commit `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6`
+  detached clean-checkout run at commit `4d85dc5b3d229a6698bea53f61c9ae8c7de539f7`
   on **Python 3.14.6 / Darwin arm64**. Latency and RSS on other hosts are
   unmeasured.
 * `score_default` also passed the full suite, reproduced TechnicalScore

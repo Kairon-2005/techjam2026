@@ -12,13 +12,15 @@ CPython's bundled SQLite provides on all mainstream builds.
 
 | environment | status | evidence |
 |---|---|---|
-| **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, **813 tests executed, 0 skipped**, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
+| **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, **827 tests executed, 0 skipped**, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
 | **Python 3.13.7, Darwin arm64** | **VERIFIED** | **813 tests executed, 0 skipped**; the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
 | **Python 3.9.6, Darwin arm64** | **FAILS, and this is the floor** | `starter/context.py` uses `dataclasses.dataclass(slots=True)`, added in 3.10: `TypeError: dataclass() got an unexpected keyword argument 'slots'` |
 | **Linux (Ubuntu), Python 3.10 / 3.11** | **VERIFIED** | both jobs succeeded in [GitHub Actions run 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542): full suite, exact TechnicalScore 0.932067 reproduction, and zero third-party imports |
 
-**On the test count.** The suite has **813 tests and every one of them
-executes** on a committed tree. One test -- `LeaseIsolationTest`, which needs a
+**On the current test count.** The release suite has **827 tests and every one
+executes** in the current committed-tree verification. The earlier Python 3.13.7
+portability run exercised the 813-test suite that existed at that commit. One
+test -- `LeaseIsolationTest`, which needs a
 committed tree in order to isolate a worktree -- skips itself when the working
 copy is dirty, so a run taken mid-edit reports `813 ... OK (skipped=1)`. Both
 verification environments above were committed trees, so both report 0 skipped;
@@ -29,10 +31,10 @@ verification environments above were committed trees, so both report 0 skipped;
 "Python 3.10 or later is recommended".
 
 The headline performance set is still the detached clean-checkout run at commit
-`96efae3f6ed0da9e0a7c95236fae17295d8ef7d6` on Python 3.14.6 / Darwin arm64:
+`4d85dc5b3d229a6698bea53f61c9ae8c7de539f7` on Python 3.14.6 / Darwin arm64:
 TechnicalScore 0.932067, HR@10 0.995, MRR 0.852556, MTTC 2.06, cold start
-6.134 s, warm-turn p50/p95 13.401/14.176 ms, full evaluation 15.59 s and peak
-RSS 575.7 MB. The Linux CI is an independent portability result on published
+11.755 s, warm-turn p50/p95 29.681/31.139 ms, full evaluation 31.11 s and peak
+RSS 716.0 MB. The Linux CI is an independent portability result on published
 commit `eb314bb7b06f2c93d49381f4d96734d6aed3b0f1`; it confirms the exact score
 and dependency/test gates, not Darwin latency or memory.
 
