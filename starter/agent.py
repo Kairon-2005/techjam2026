@@ -25,7 +25,7 @@ Pipeline:  constraint-state tracking -> FTS5/BM25 retrieval of N candidates
            -> feature-based reranking -> top-10.
 
 Everything runs locally: Python standard library only, no network, no GPU,
-no model weights. Every behavioural choice is a config knob so that
+no learned or neural model weights. Every behavioural choice is a config knob so that
 lab/sweep.py can run controlled ablations.
 
 Config resolution: explicit arg > DEFAULTS.
