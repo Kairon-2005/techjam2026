@@ -8,11 +8,11 @@ developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
 
 | | |
 |---|---|
-| commit | `06af0f11446b3156d3f35193960832aabfd810d0` |
-| origin tree clean at verification | **FAIL** |
+| commit | `590664124817e915778ef98a880b45e72e029c26` |
+| origin tree clean at verification | PASS |
 | Python | **3.14.6** |
 | platform | darwin / arm64 |
-| overall | **FAIL** |
+| overall | PASS |
 
 Only the Python version above was exercised. No claim is made about any other.
 
@@ -30,13 +30,13 @@ pinned revision:
 
 | file | |
 |---|---|
-| `LICENSE` | **FAIL** |
-| `config.json` | **FAIL** |
-| `onnx/model_qint8_arm64.onnx` | **FAIL** |
-| `special_tokens_map.json` | **FAIL** |
-| `tokenizer.json` | **FAIL** |
-| `tokenizer_config.json` | **FAIL** |
-| `vocab.txt` | **FAIL** |
+| `LICENSE` | PASS |
+| `config.json` | PASS |
+| `onnx/model_qint8_arm64.onnx` | PASS |
+| `special_tokens_map.json` | PASS |
+| `tokenizer.json` | PASS |
+| `tokenizer_config.json` | PASS |
+| `vocab.txt` | PASS |
 
 **`score_default` never reads it.** `semantic_model_dir` resolves to the empty
 string (PASS) and `semantic_rerank_mode` to `off`
@@ -72,13 +72,13 @@ No problems found.
 
 | | |
 |---|---|
-| evaluator catalog index | 0.565 s |
-| agent construction (FTS5 index build) | 10.52 s |
-| cold start (process start → first response) | **11.364 s** |
-| warm turn p50 | **26.155 ms** |
-| warm turn p95 | **29.528 ms** |
-| full 200-session evaluation | **31.09 s** |
-| peak RSS | **720.4 MB** |
+| evaluator catalog index | 0.593 s |
+| agent construction (FTS5 index build) | 11.144 s |
+| cold start (process start → first response) | **12.05 s** |
+| warm turn p50 | **30.145 ms** |
+| warm turn p95 | **33.203 ms** |
+| full 200-session evaluation | **31.41 s** |
+| peak RSS | **691.7 MB** |
 | network calls | **0** |
 | API cost | **0** |
 | tokens | **0** |
@@ -96,6 +96,6 @@ accident. The semantic showcase imports them **inside `Scorer.load`**, which
 ## 6. Test suite, in the clean worktree
 
 ```
-Ran 741 tests in 87.510s
+Ran 754 tests in 87.716s
 OK
 ```

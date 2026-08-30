@@ -4,28 +4,28 @@
     "lab/a1cache.jsonl": true,
     "lab/a2cache.jsonl": true
   },
-  "agent_construct_s": 10.52,
-  "artifact_intact": false,
+  "agent_construct_s": 11.144,
+  "artifact_intact": true,
   "bundled_artifact": {
-    "LICENSE": "MISSING",
-    "config.json": "MISSING",
-    "onnx/model_qint8_arm64.onnx": "MISSING",
-    "special_tokens_map.json": "MISSING",
-    "tokenizer.json": "MISSING",
-    "tokenizer_config.json": "MISSING",
-    "vocab.txt": "MISSING"
+    "LICENSE": "ok",
+    "config.json": "ok",
+    "onnx/model_qint8_arm64.onnx": "ok",
+    "special_tokens_map.json": "ok",
+    "tokenizer.json": "ok",
+    "tokenizer_config.json": "ok",
+    "vocab.txt": "ok"
   },
-  "catalog_index_s": 0.565,
-  "cold_start_s": 11.364,
-  "commit": "06af0f11446b3156d3f35193960832aabfd810d0",
-  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-74maf1_q/tree",
-  "evaluation_s": 31.09,
+  "catalog_index_s": 0.593,
+  "cold_start_s": 12.05,
+  "commit": "590664124817e915778ef98a880b45e72e029c26",
+  "cwd": "/private/var/folders/2h/hs161q394f7dlp6hnw68v9t40000gn/T/techjam-verify-e1e5c1f8/tree",
+  "evaluation_s": 31.41,
   "executable": "/opt/homebrew/opt/python@3.14/bin/python3.14",
   "machine": "arm64",
   "matches_expected": true,
-  "ok": false,
-  "origin_dirty": true,
-  "peak_rss_mb": 720.4,
+  "ok": true,
+  "origin_dirty": false,
+  "peak_rss_mb": 691.7,
   "platform": "darwin",
   "python": "3.14.6",
   "result": {
@@ -48,7 +48,7 @@
   "standard_library_only": true,
   "tests": {
     "returncode": 0,
-    "summary": "Ran 741 tests in 87.510s",
+    "summary": "Ran 754 tests in 87.716s",
     "verdict": "OK"
   },
   "tests_pass": true,
@@ -59,6 +59,6 @@
     "total_tokens": 0
   },
   "tree_is_clean": true,
-  "warm_turn_p50_ms": 26.155,
-  "warm_turn_p95_ms": 29.528
+  "warm_turn_p50_ms": 30.145,
+  "warm_turn_p95_ms": 33.203
 }
