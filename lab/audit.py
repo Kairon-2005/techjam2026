@@ -166,14 +166,32 @@ def check_tree_clean(paths) -> dict:
     return {"ok": not dirty, "evidence": dirty.splitlines()[:5] or "clean"}
 
 
+# What the clean-checkout verification actually verifies. A commit that touches
+# only documentation cannot invalidate it -- and no document can contain the
+# hash of the commit that contains it, so requiring an exact match would be a
+# check nothing could ever pass.
+VERIFIED_TREES = ("starter/", "evaluator/", "tests/", "demo/", "lab/",
+                  "requirements.txt", "requirements-semantic.txt")
+
+
 def check_verification_current(paths) -> dict:
     report = json.loads(Path("docs/FINAL_VERIFICATION.md.json").read_text())
     head = _sh("git", "rev-parse", "HEAD").strip()
-    same = report.get("commit") == head
-    return {"ok": bool(report.get("ok")),
-            "evidence": (f"PASS at {report['commit'][:7]}"
-                         + ("" if same else f"; HEAD is now {head[:7]} — "
-                                            f"re-run lab.verify_clean before tagging"))}
+    at = report.get("commit", "")
+    if not report.get("ok"):
+        return {"ok": False, "evidence": f"the recorded run FAILED at {at[:7]}"}
+    if at == head:
+        return {"ok": True, "evidence": f"PASS at HEAD {head[:7]}"}
+    moved = _sh("git", "diff", "--name-only", at, "HEAD", "--",
+                *VERIFIED_TREES).strip()
+    if moved:
+        return {"ok": False,
+                "evidence": f"verified at {at[:7]}, but code changed since: "
+                            + ", ".join(moved.splitlines()[:4])
+                            + " — re-run lab.verify_clean"}
+    return {"ok": True,
+            "evidence": f"PASS at {at[:7]}; only documentation changed since "
+                        f"(HEAD {head[:7]}), so the verified code is unchanged"}
 
 
 def check_readme_commands(paths) -> dict:
