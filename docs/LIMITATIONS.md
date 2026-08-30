@@ -71,9 +71,11 @@ self-modifying code, or any public gain from profile weighting.
 * Thread sensitivity **was** measured for the semantic showcase (1/2/4/default
   cores), and every setting cleared its 25 ms cap — that is the one portability
   risk we retired with data.
-* **English only.** One catalog category (`Clothing_Shoes_and_Jewelry`), 50,000
-  products. Nothing here shows the approach transfers across languages or
-  verticals.
+* **Evaluated on English-language sessions only.** The corpus is one catalog
+  category (`Clothing_Shoes_and_Jewelry`), 50,000 products, with English
+  simulator messages. Nothing here shows the approach transfers to other
+  languages or verticals -- and nothing here shows it fails to, either. It was
+  simply not tested.
 
 ## 6. Robustness is measured against simulators we wrote
 

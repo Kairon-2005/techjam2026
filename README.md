@@ -5,8 +5,11 @@ Top-10 within at most 10 turns, by **tracking typed evidence across turns**,
 **asking the question that actually splits the candidate pool**, and **letting
 runtime context decide how deep to retrieve**.
 
-**It runs on the Python standard library. No LLM, no API key, no network, no
-GPU, zero tokens, zero cost.**
+**`score_default` -- the submitted, scored configuration -- runs on the Python
+standard library alone. No LLM, no API key, no network, no GPU, no learned or
+neural model weights, zero tokens, zero cost.** The project also ships optional
+capabilities that do use a model; they are off in `score_default` and are
+described as such throughout.
 
 | | |
 |---|---|
@@ -38,10 +41,31 @@ discipline that turned them off is what makes 0.932067 trustworthy.
 
 ## Setup
 
+Every command below is run from a fresh clone and nothing else.
+
 ```bash
-git clone <this repo> && cd conversational-search
-# Download catalog.jsonl.gz from the GitHub Release attached to this repository
+git clone https://github.com/Kairon-2005/techjam2026.git
+cd techjam2026
+```
+
+The catalog is organizer data and is not in the repository. Download it from the
+**organizer's official release** (we publish no catalog asset of our own):
+
+```bash
+curl -L -o catalog.jsonl.gz https://github.com/TechJam2026/techjam-conversational-search/releases/download/participant-kit/catalog.jsonl.gz
+```
+
+Verify it before decompressing, then verify the decompressed file:
+
+```bash
+echo "07fd142631fd6b03e2b4d09988c3eb7d53720e9d57010c79db48eeaada50a8f8  catalog.jsonl.gz" | shasum -a 256 -c -
 gzip -dk catalog.jsonl.gz && mv catalog.jsonl data/catalog.jsonl
+echo "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67  data/catalog.jsonl" | shasum -a 256 -c -
+```
+
+(On Linux, `sha256sum -c -` in place of `shasum -a 256 -c -`.)
+
+```bash
 pip install -r requirements.txt          # a no-op: there are no dependencies
 ```
 
@@ -50,6 +74,20 @@ pip install -r requirements.txt          # a no-op: there are no dependencies
 ```bash
 python3 -m evaluator.local_evaluator --catalog data/catalog.jsonl --dataset data/public_set.jsonl
 ```
+
+Expected, exactly: `recommended_technical_score` **0.932067**,
+`hit_rate_at_10` 0.995, `mrr` 0.852556, `mttc` 2.06 over 200 sessions.
+
+### The submission entry point
+
+```python
+from starter.agent import Agent      # entry point: starter.agent:Agent
+agent = Agent("data/catalog.jsonl")  # no config argument == score_default
+```
+
+`starter.agent:Agent` implements `reset(session_id, user_profile)` and
+`respond(session_id, user_message, turn, top_k)` exactly as the contract in
+[`docs/agent_api_contract.json`](docs/agent_api_contract.json) specifies.
 
 ### One command shows the system working
 
@@ -67,7 +105,7 @@ latency per turn. See [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
 |---|---|---|
 | weak BM25 starter | 0.10671 | provided baseline |
 | + ask `other`, keep evidence on override | 0.7536 | **7.1×** — override-preceding hits score nothing, so the two interact super-additively |
-| + feature reranking | 0.9280 | recall@200 was already 1.000; **the bottleneck was never retrieval, it was ranking** |
+| + feature reranking | 0.9280 | on the public development set, recall@200 was already 1.000, so **the bottleneck there was ranking, not retrieval** |
 | + routing, deep funnel, context controllers | **0.932067** | shipped |
 
 Popularity is the single strongest feature (+0.114): target products sit at the
@@ -78,12 +116,18 @@ insight.
 
 ## The four pillars
 
-| pillar | shipped in `score_default` | implemented, measured, **off** |
+| pillar | enabled in `score_default` | implemented and evaluated, **disabled by default** |
 |---|---|---|
-| **I · Intent routing & hybrid pipeline** | Buying/Browsing/Mixed/Override routing, dynamic Browsing→Buying retarget, BM25 + category/facet signals, deterministic funnel | dense candidate source + RRF fusion; TinyBERT semantic rerank |
+| **I · Intent routing & hybrid pipeline** | Buying/Browsing/Mixed/Override routing, dynamic Browsing→Buying retarget, BM25 over FTS5, category/facet signals, deterministic funnel, feature reranking | dense candidate source + RRF fusion (`showcase_dense`); TinyBERT ONNX semantic reranking (`showcase_semantic`) — **architecture and demo evidence, not part of `score_default`** |
 | **II · Multi-turn scenario evolution** | typed `SlotValue` state, negation, contradiction safety, abandonment/suppression, request-more rotation, over-generality detection, pool-aware questioning, starvation-aware widening | targeted override erasure (`on_override='slot'`) |
-| **III · Dynamic context programming** | `ContextSnapshot`/`PreRetrievalSnapshot`, retrieval controller **on**, question controller **on**, profile normalization and credibility classification | profile ranking weight |
+| **III · Dynamic context programming** | **bounded context snapshots** (`PreRetrievalSnapshot`, `ContextSnapshot`) with the **retrieval controller and the question controller both enabled** (`retrieval_context_mode="control"`, `question_context_mode="control"`) | profile normalization and credibility classification — implemented and evaluated, then **disabled by default** (`profile_context_mode="off"`, `w_profile=0.0`) because the official profiles showed **no target-discriminating signal** |
 | **IV · Evaluation matrix** | leases, append-only ledgers, one citability predicate, pre-registration, negative results kept | — |
+
+**The semantic-ranking component of Pillar I is satisfied by the optional offline
+ONNX profile** (`showcase_semantic`): a pinned, locally bundled TinyBERT
+cross-encoder that reranks the visible Top-10 with no network access. It is
+implemented, measured and demonstrable, and it is **off in `score_default`** —
+see [Three configurations](#three-configurations-kept-apart-on-purpose).
 
 ### Runtime flow, per turn
 
@@ -130,6 +174,13 @@ python3 -m demo --extra semantic
 `onnxruntime` or `tokenizers`, and does not require the artifact to exist.
 Verified: third-party packages loaded during a full evaluation — **none**.
 
+**The narrow, verified fallback claim:** when `showcase_semantic` is enabled and
+the model is absent, fails to load, fails inference, or returns a
+non-permutation, **the semantic reranker returns A0's ordering byte-exactly**,
+with a distinct reason code per case. That is a property of the optional semantic
+reranker, and it is not a claim that every component of the system degrades
+gracefully under every failure.
+
 ## Negative results
 
 Kept because they are the evidence, not despite it.
@@ -137,7 +188,7 @@ Kept because they are the evidence, not despite it.
 | we tried | result | shipped? |
 |---|---|---|
 | **A1** — refit the 9 ranking weights on supplementary data | sup-val MRR **+0.229**, public MRR **−0.116**, every slice and every robustness scenario regressed | **no** |
-| **A2-10** — TinyBERT Top-10 cross-encoder rerank | feasible (15.95 ms p95), HR@10/MTTC provably invariant, sup-val MRR **+0.008**, **no public number** | **no** |
+| **A2-10** — TinyBERT Top-10 cross-encoder rerank | feasible (15.95 ms p95 on Darwin arm64), HR@10/MTTC provably invariant, sup-val MRR **+0.008**, **no public number** | **no** |
 | **A2-30** — the same at Top-30 | 69.68 ms against a frozen 25 ms cap | **no** |
 | **dense retrieval + RRF** | Browsing MRR up, Boundary MRR 1.000 → 0.870, fails the contradiction guard | **no** |
 | **profile ranking weight** | no demonstrated target alignment (Phase 6C1) | **no**, weight pinned at 0.0 |
@@ -196,10 +247,20 @@ stayed A0.
   ranking weight.
 * **A2-10 has no public number** and cannot be given one — the pre-registration
   allows exactly one public confirmation, and A1 spent it.
-* **One host, one Python.** 3.14.6 on darwin/arm64. Latency and RSS elsewhere are
-  unmeasured; thread sensitivity was recorded for the semantic showcase and every
-  setting cleared its cap.
-* **English-only**, one catalog category, 50,000 products.
+* **Portability is reported separately for the two paths** — full table in
+  [`docs/PORTABILITY.md`](docs/PORTABILITY.md).
+  * `score_default`: **verified on Python 3.14.6 and 3.13.7, Darwin arm64**
+    (0.932067 exactly on both, zero third-party imports). **Minimum supported
+    version is Python 3.10**, established by a concrete failure on 3.9.6 rather
+    than by inspection. **Linux is not yet verified**: no Linux machine or
+    container runtime was available here, so a GitHub Actions job for Python
+    3.10/3.11 is written and **pending publication**. No result is claimed for it.
+  * `showcase_semantic`: measured on **Darwin arm64 only**, using an
+    `arm64`-quantized ONNX file. **No cross-platform semantic performance is
+    claimed**; the artifact's own name says which architecture it targets.
+* **Evaluated on English-language sessions only**, in one catalog category
+  (`Clothing_Shoes_and_Jewelry`), over 50,000 products. Nothing here shows the
+  approach transfers to other languages or verticals; it was not tested.
 
 ## Repository map
 
@@ -210,7 +271,8 @@ demo/               python3 -m demo
 lab/                experiment harness: leases, ledgers, provenance, scenarios, benchmarks
 notes/              46 numbered design, pre-registration and results documents
 docs/               verification, model card, architecture, limitations, submission checklist
-tests/              766 tests, including exact score locks and the configuration lock
+tests/              812 tests executed (1 environment-dependent skip), including
+                    exact score locks and the configuration lock
 ```
 
 ## Data attribution
@@ -221,8 +283,9 @@ Derived from **Amazon Reviews 2023** (McAuley Lab, UCSD),
 private organizer labels.
 
 The optional semantic showcase bundles
-`cross-encoder/ms-marco-TinyBERT-L2-v2` @ `81d1926f…` under **Apache-2.0**, with
-its license, revision and per-file SHA-256 recorded — see
+`cross-encoder/ms-marco-TinyBERT-L2-v2` @ `81d1926f…` under **Apache-2.0** — a
+**4.5 MB ONNX file** inside a **5.46 MB complete bundle** — with its license,
+revision and per-file SHA-256 recorded. See
 [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md).
 
 ## Team

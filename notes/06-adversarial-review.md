@@ -1,58 +1,86 @@
-# 06 — 三路对抗审查：发现、修复与裁定
+# 06 — Three-way adversarial review: findings, fixes and rulings
 
-三个独立 subagent（代码正确性 / 方法论统计 / 提交合规）交叉审查后的归档。
-全部发现均经主线复核，修复后 0.9280 精确回归。
+An archive of the cross-checks by three independent subagents (code correctness /
+statistical methodology / submission compliance). Every finding was re-verified
+on the main line, and after the fixes 0.9280 reproduces exactly.
 
-## A. 代码审查 → 已修复
+## A. Code review — fixed
 
-| 严重度 | 发现 | 处置 |
+| severity | finding | disposition |
 |---|---|---|
-| MED | `w_pos` 分支变量遮蔽：`order`（tiebreak 索引）被商品特征列表覆盖，排序平局按特征字符串字典序而非召回序打破；`w_pos` 的历史消融数字不可信 | 改名 `ordered_vals`；`w_pos` 本就默认关闭 |
-| MED | `Agent.__init__` 不在评测器的 try/except 保护内：错误 cwd → FileNotFoundError；宿主机残留的坏 `TJ_CONFIG` → JSONDecodeError；任一都会废掉整场评测而非一轮 | 目录路径按 `__file__` 回退解析；TJ_CONFIG 容错解析 |
-| LOW | 契约 `maxItems:100` 可被非常规 top_k 突破；非字符串 message 抛 AttributeError；`term_cap=0` 触发 FTS5 语法错误 | 全部钳制/守卫 |
-| — | 审查确认安全：FTS5 注入不可行（TOKEN_RE 白名单）、除零全防护、正则无灾难回溯（200KB 消息 ≤118ms）、纯标准库属实、返回结构全契约合规、8 线程并发通过 |
+| MED | `w_pos` branch variable shadowing: `order` (the tie-break index) was overwritten by the product's feature list, so ranking ties broke on feature-string lexicographic order rather than recall order. The historical `w_pos` ablation numbers are therefore untrustworthy | renamed to `ordered_vals`; `w_pos` was already off by default |
+| MED | `Agent.__init__` runs outside the evaluator's try/except: a wrong working directory gives FileNotFoundError, and a stale bad `TJ_CONFIG` on the host gives JSONDecodeError. Either kills the whole evaluation rather than one turn | catalog paths now resolve relative to `__file__`; `TJ_CONFIG` is parsed tolerantly |
+| LOW | the contract's `maxItems:100` could be exceeded with an unusual `top_k`; a non-string message raised AttributeError; `term_cap=0` triggered an FTS5 syntax error | all clamped or guarded |
+| — | the review confirmed as safe: FTS5 injection is impossible (`TOKEN_RE` allowlist), division by zero is guarded everywhere, no catastrophic regex backtracking (a 200KB message takes under 118ms), standard-library-only is accurate, every return structure is contract-compliant, and 8-thread concurrency passes |
 
-## B. 方法论审查 → 措辞裁定（最重要）
+## B. Methodology review — wording rulings (the most important part)
 
-1. **[被采纳] "CV 0.9280" 是训练分重述。** 同一配置在全部 5 折训练集上胜出，
-   折均值与全集分恒等；且停用词表、cue 正则、特征定义、~112 次全集评测的决策路径
-   全部看着 200 条做出，折过程覆盖不到。正确表述：*"开发集分数 0.9280；5 折检查
-   确认权重配置对 160 条子采样稳定（折分 0.898–0.959），但这不是无偏泛化估计。"*
-2. **[被采纳] ±0.005 不成立。** σ 只有 4 个自由度（95% CI [0.012,0.058]），
-   叠加约 112 次自适应比较的赢家膨胀 ~0.02–0.03。诚实区间：
-   **同分布私有集 0.90–0.93；未见过的改写风格 0.67–0.86（修复前压力数字）；
-   模拟器内部实现不同则不设下界。**
-3. **[被采纳] 压力测试是循环论证。** cue/噪声正则逐条对应三种测试风格（`any \w+ is
-   fine` 与测试句 s2 逐字相同）。已把 stress.py 重新标注为回归套件，修复前数字
-   作为 unseen 风格的诚实估计并列呈现。
-4. **[被采纳] "约束原文保留"是我们的假设，不是规格承诺。** 规格那句话讲的是计分
-   而非消息措辞。已在 stress.py 顶部显式声明为假设。
-5. **[被采纳+已修] ask="other" 的灾难分支。** 若私有模拟器把 "other" 实现为
-   "仅匹配未归类约束"（对本数据 = 0 条），旧 agent 会永远干问。已加运行时
-   fallback：连续 2 次干回复后退化为轮询具体属性。干净模拟器上零成本（实测 0.9280
-   不变）。
-6. **[被采纳] 热门度先验措辞降级**：方向可迁移（真实推荐系统同样存在热门度偏置），
-   但幅度（目标中位于 99.5 百分位）是 5-core 采样的构造性产物，且 README 未承诺
-   私有集同分布。降级依据：`no_pop` 仍 0.867、`half_pop` 0.925——失效是渐进的。
-7. **[被采纳] 上界推导错误**：browsing/boundary 实测有第 1 轮命中，min MTTC 应为
-   1.390 而非 1.890。已改 notes/04。
-8. 数字复核全部通过（基线、0.7536、0.9280、各消融 Δ、超可加、w_card +0.0033）。
-   记录修正：调参运行实为 58 次而非笔记所写 30 次。
+1. **[adopted] "CV 0.9280" is a restatement of the training split.** The same
+   configuration wins on all 5 training folds, so the fold mean is identically
+   the full-set score; and the stopword list, cue regular expressions, feature
+   definitions and the decision path of roughly 112 full-set evaluations were all
+   made while looking at the same 200 sessions, which the fold procedure cannot
+   cover. Correct phrasing: *"development-set score 0.9280; a 5-fold check
+   confirms the weight configuration is stable under 160-session subsampling
+   (fold scores 0.898-0.959), but this is not an unbiased estimate of
+   generalization."*
+2. **[adopted] The +/-0.005 does not hold.** The standard deviation has only 4
+   degrees of freedom (95% CI [0.012, 0.058]), and roughly 112 adaptive
+   comparisons add winner's-curse inflation of about 0.02-0.03. Honest interval:
+   **0.90-0.93 on an in-distribution private set; 0.67-0.86 under unseen
+   paraphrase styles (the pre-fix stress numbers); no lower bound at all if the
+   simulator's internals differ.**
+3. **[adopted] The stress test is circular.** The cue and noise regular
+   expressions correspond one-to-one with the three test styles (`any \w+ is
+   fine` is word-for-word identical to test sentence s2). `stress.py` has been
+   relabelled as a regression suite, and the pre-fix numbers are presented
+   alongside as the honest estimate for unseen styles.
+4. **[adopted] "Constraint text is preserved verbatim" is our assumption, not a
+   guarantee in the specification.** The sentence in the spec is about scoring,
+   not about message wording. This is now declared explicitly as an assumption at
+   the top of `stress.py`.
+5. **[adopted and fixed] The `ask="other"` disaster branch.** If the private
+   simulator implemented "other" as "match only unclassified constraints" (which
+   for this data is 0), the old agent would ask dry questions forever. A runtime
+   fallback was added: after 2 consecutive dry replies it degrades to cycling
+   concrete attributes. Zero cost on the clean simulator (0.9280 measured
+   unchanged).
+6. **[adopted] The popularity-prior wording is downgraded.** The direction
+   transfers (real recommender systems also have popularity bias), but the
+   magnitude (targets at the 99.5th percentile) is a constructive artefact of
+   5-core sampling, and the README does not promise the private set is
+   identically distributed. Basis for the downgrade: `no_pop` still scores 0.867
+   and `half_pop` 0.925, so failure is gradual.
+7. **[adopted] The upper-bound derivation was wrong.** Browsing and boundary
+   sessions do hit on turn 1 in the measured data, so min MTTC is 1.390, not
+   1.890. notes/04 has been corrected.
+8. All number checks passed (baseline, 0.7536, 0.9280, each ablation delta,
+   super-additivity, `w_card` +0.0033). One record correction: the tuning run was
+   58 runs, not the 30 written in the notes.
 
-## C. 合规审查 → 缺口清单
+## C. Compliance review — the gap list
 
-**干净项**：evaluator/ 逐字节未改（git diff 空）、无 secrets、无网络代码、
-官方测试套件 3/3 通过、`python3 -m evaluator.local_evaluator` 一条命令复现 0.927958。
+**Clean:** `evaluator/` byte-for-byte unchanged (`git diff` empty), no secrets, no
+networking code, the official test suite passing 3/3, and
+`python3 -m evaluator.local_evaluator` reproducing 0.927958 in one command.
 
-**缺口（按风险排序）**：
-1. **Devpost 层 0%**：项目描述、自有公开仓库+README、YouTube 演示视频——agent 再好，
-   这些缺了提交直接无效
-2. **赛期规则**："significantly updated during the submission period"——核心系统建于
-   窗口前 4 天。对策：窗口前诚实 commit 打时间戳，窗口内做实质更新（MRR 冲刺、
-   verbose 残差、信息增益实验、报告、视频）并在 Devpost 描述中明说
-3. **报告与披露未写**：方法/模型选择/局限、延迟+token+成本披露、网络访问声明、
-   离线 fallback 说明（素材都在 notes/，需组装成英文）
-4. **复现打包**：requirements.txt（标注 stdlib-only + FTS5 依赖）、Python 版本声明、
-   TJ_CONFIG 文档化、`submission/` 目录结构、演示会话 transcript
-5. 文档一致性：0.9291/0.9280 已统一为 0.9280；`_card4` 逆向特征需在报告中主动披露
-   （默认关闭）而非留给评委自己发现
+**Gaps, ordered by risk:**
+1. **The Devpost layer is at 0%:** project description, our own public repository
+   with a README, and a YouTube demo video. However good the agent is, the
+   submission is invalid without these.
+2. **Competition-window rules:** "significantly updated during the submission
+   period" -- the core system was built 4 days before the window. Mitigation:
+   commit honestly before the window so it is timestamped, do substantive work
+   inside it (the MRR push, the verbose residual, the information-gain
+   experiment, the report, the video), and say so plainly in the Devpost
+   description.
+3. **The report and disclosures are unwritten:** method / model choice /
+   limitations, latency + token + cost disclosure, the network-access statement,
+   and the offline-fallback description. The material is all in `notes/` and needs
+   assembling in English.
+4. **Reproduction packaging:** `requirements.txt` (noting stdlib-only plus the
+   FTS5 dependency), a declared Python version, documented `TJ_CONFIG`, a
+   `submission/` layout, and a demonstration session transcript.
+5. Documentation consistency: 0.9291 and 0.9280 have been unified to 0.9280; the
+   `_card4` reverse-engineered feature must be disclosed proactively in the
+   report (it is off by default) rather than left for a judge to discover.

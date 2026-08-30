@@ -83,8 +83,11 @@ overlapping in the demo — and they are off because they cost Boundary MRR
 candidates that filters would have dropped, and excludes on hard evidence. It is
 deterministic: same state, same pool, every time.
 
-**Reranking** is nine weighted features over the pooled candidates. Recall@200
-is **1.000** — the bottleneck was never retrieval.
+**Reranking** is nine hand-configured weighted features over the pooled
+candidates — scalar configuration set by measurement, not learned parameters.
+On the **public development set** recall@200 is **1.000**, so the bottleneck
+there is ranking rather than retrieval. That is a finding about that corpus,
+not a general claim about retrieval.
 
 ## Pillar II — multi-turn scenario evolution
 

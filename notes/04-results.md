@@ -1,113 +1,134 @@
-# 04 — 实验结果与消融
+# 04 — Experimental results and ablations
 
-## 总览
+## Overview
 
-| 阶段 | TechnicalScore | HR@10 | MRR | MTTC |
+| stage | TechnicalScore | HR@10 | MRR | MTTC |
 |---|---|---|---|---|
-| 官方弱基线 | 0.1067 | 0.125 | 0.068 | 9.81 |
-| 阶段一：对话策略（H1+H2+停用词） | 0.7536 | 0.870 | 0.560 | 3.48 |
-| 阶段二：重排层 | 0.9273 | 0.995 | 0.834 | 2.02 |
-| 阶段三：交叉验证调参 | **0.9280** | 0.995 | 0.837 | 2.03 |
-| *（现实联合上界）* | *0.9822* | *1.000* | *1.000* | *1.89* |
+| official weak baseline | 0.1067 | 0.125 | 0.068 | 9.81 |
+| stage 1: dialogue policy (H1+H2+stopwords) | 0.7536 | 0.870 | 0.560 | 3.48 |
+| stage 2: reranking layer | 0.9273 | 0.995 | 0.834 | 2.02 |
+| stage 3: cross-validated tuning | **0.9280** | 0.995 | 0.837 | 2.03 |
+| *(realistic joint upper bound)* | *0.9822* | *1.000* | *1.000* | *1.89* |
 
-**相对官方基线 8.70×。** 纯 Python 标准库，零网络、零 GPU、零模型权重。
+**8.70x over the official baseline.** Pure Python standard library, zero network,
+zero GPU, no learned or neural model weights.
 
-## 重排特征的单独贡献
+## Individual contribution of each reranking feature
 
-以「仅 BM25 重排」为基准（0.7536，与不重排完全一致，作为重构正确性的回归检查）：
+Measured against "BM25-only reranking" as the baseline (0.7536, identical to no
+reranking at all, which serves as a regression check on the refactor):
 
-| 特征 | 含义 | 单独加入后 | Δ |
+| feature | meaning | added alone | delta |
 |---|---|---|---|
-| `w_pop` | `(rating/5) × log1p(rating_number)` 归一化 | 0.8673 | **+0.114** |
-| `w_phrase` | 已披露约束字符串在商品全文中的子串命中率 | 0.8124 | +0.059 |
-| `w_idf` | 查询词的 IDF 加权覆盖率 | 0.7848 | +0.031 |
-| `w_cat` | 陈述品类与商品 categories 的词重合 | 0.7617 | +0.008 |
-| `w_exact` | 约束**恰好等于**商品某条 feature/detail 值 | +0.0045 | 组合后增量 |
-| `w_field` | 约束命中在 features/details（而非 description） | +0.0031 | 组合后增量 |
+| `w_pop` | normalized `(rating/5) * log1p(rating_number)` | 0.8673 | **+0.114** |
+| `w_phrase` | substring hit rate of disclosed constraint strings in the product's full text | 0.8124 | +0.059 |
+| `w_idf` | IDF-weighted coverage of query terms | 0.7848 | +0.031 |
+| `w_cat` | word overlap between the stated category and the product's categories | 0.7617 | +0.008 |
+| `w_exact` | a constraint **exactly equal to** one of the product's feature/detail values | +0.0045 | increment in combination |
+| `w_field` | the constraint hits in features/details rather than description | +0.0031 | increment in combination |
 
-### 负面结果（同样重要）
+### Negative results (equally important)
 
-| 尝试 | 结果 |
+| attempt | result |
 |---|---|
-| `pop_mode=pct / pct2 / pct4`（百分位变换） | **变差**（0.9273 → 0.9155 / 0.9130 / 0.9079）。候选集里大家都热门，百分位饱和后失去区分度；`log1p` 在高端仍能区分 6846 与 400 |
-| `w_pos`（约束在商品字段列表中出现的位置） | **变差**（0.9273 → 0.9247 / 0.9223 / 0.9214） |
-| `phrase_idf`（按词 IDF 给约束加权） | **变差**（0.9273 → 0.9191） |
-| `candidates=400` + 高 `w_pop` | **严重变差**（低至 0.7189）。候选池过大时热门度会把不相关的爆款拉进来 |
+| `pop_mode=pct / pct2 / pct4` (percentile transforms) | **worse** (0.9273 to 0.9155 / 0.9130 / 0.9079). Everything in the candidate set is popular, so a percentile saturates and loses discrimination; `log1p` still separates 6846 from 400 at the top end |
+| `w_pos` (position of the constraint within the product's field list) | **worse** (0.9273 to 0.9247 / 0.9223 / 0.9214) |
+| `phrase_idf` (weighting constraints by term IDF) | **worse** (0.9273 to 0.9191) |
+| `candidates=400` with a high `w_pop` | **much worse** (as low as 0.7189). With too large a pool, popularity pulls in irrelevant bestsellers |
 
-## 关键发现：热门度先验为什么这么强
+## Key finding: why the popularity prior is so strong
 
-| | 全目录中位数 | 200 个目标的中位数 |
+| | median over the whole catalog | median over the 200 targets |
 |---|---|---|
 | `rating_number` | **12** | **6846** |
 
-- 目标商品在全目录评价数分布中的**中位百分位 = 0.995**
-- **86%** 的目标落在最热门的 10% 内；**96%** 落在最热门的 25% 内；只有 **2%** 落在后一半
+- The **median percentile** of target products in the catalog's review-count
+  distribution is **0.995**.
+- **86%** of targets fall in the most popular 10%; **96%** in the most popular
+  25%; only **2%** in the bottom half.
 
-原因在参赛包 README：会话「sampled deterministically from the official Clothing **5-core**
-leave-last-out split」。5-core 过滤 + 真实购买记录 ⇒ 强热门度偏置。
+The cause is in the participant kit README: sessions are "sampled
+deterministically from the official Clothing **5-core** leave-last-out split".
+5-core filtering plus real purchase records implies a strong popularity bias.
 
-**这是可迁移的建模洞察**（真实推荐系统里热门度先验同样成立），不是模拟器机制利用。
+**This is a transferable modelling insight** (popularity priors hold in real
+recommender systems too), not an exploitation of a simulator mechanism.
 
-## 一个需要决策的取舍：`w_card`
+## A trade-off that needs a decision: `w_card`
 
-`w_card` 特征在本地复刻了模拟器的 `intent_card()` 生成逻辑（material 正则插入位置 0、
-color 插入位置 1、price 追加、清洗后取前 4 条），然后检查已披露约束是否**恰好命中**
-该商品会生成的那 4 条字符串。这是**彻底的模拟器逆向**。
+The `w_card` feature reimplements the simulator's `intent_card()` generation
+locally (material regex inserted at position 0, color at position 1, price
+appended, first 4 taken after cleaning), then checks whether the disclosed
+constraints **exactly hit** the four strings that product would generate. This is
+thorough reverse-engineering of the simulator.
 
-实测收益：**0.9273 → 0.9306，仅 +0.0033。**
+Measured gain: **0.9273 to 0.9306, only +0.0033.**
 
-原因是 `w_exact`（约束等于商品自身某条 feature 值）已经捕获了绝大部分同类信号。
+The reason is that `w_exact` (a constraint equal to one of the product's own
+feature values) already captures most of the same signal.
 
-**建议：不启用。** 理由：
-1. 只值 0.3%，性价比极低
-2. 它是全项目里唯一「看起来像作弊」的部件，会污染整个方案的叙事
-3. **脆弱**：官方规格提到 "If natural-language paraphrasing is added by the organizer,
-   it cannot decide correctness" —— 一旦私有集加了改写，精确字符串命中会失效，
-   而 `w_phrase` / `w_exact` 会优雅降级
+**Recommendation: do not enable it.** Because:
+1. It is worth only 0.3%, which is a poor return.
+2. It is the only component in the project that *looks* like cheating, and it
+   would contaminate the narrative of the whole approach.
+3. It is **fragile**: the official specification notes that "If natural-language
+   paraphrasing is added by the organizer, it cannot decide correctness" -- once
+   the private set adds paraphrasing, exact string hits stop working, whereas
+   `w_phrase` and `w_exact` degrade gracefully.
 
-代码保留该开关并默认关闭，在报告中作为「我们测过、但主动放弃」的消融项列出。
+The switch is retained in the code and defaults to off, and appears in the report
+as an ablation we measured and deliberately abandoned.
 
-## 泛化性
+## Generalization
 
-5 折分层交叉验证（按 scenario_type 分层，保持 40/40/15/5 配比）。
-对每一折：只用另外 4 折选出最优配置，再在留出折上打分。
+5-fold stratified cross-validation (stratified by `scenario_type`, preserving the
+40/40/15/5 mix). For each fold, the best configuration is selected using only the
+other 4 folds and then scored on the held-out fold.
 
 ```
 fold 0: 0.9360   fold 1: 0.9587   fold 2: 0.8981   fold 3: 0.9157   fold 4: 0.9313
-均值 0.9280      标准差 0.0203
+mean 0.9280      sd 0.0203
 ```
 
-⚠️ **「过拟合缺口 = 0」是数学恒等式，不是无过拟合的证明。** 因为同一个配置在全部 5 折的
-训练集上都胜出，5 个留出折又恰好划分了全部 200 条，所以均值必然等于全集分数。
-它能说明的是**配置选择在折间是稳定的**（弱的稳健性证据），不是无偏的泛化估计。
+**"Overfitting gap = 0" is a mathematical identity, not proof of no
+overfitting.** The same configuration wins on all 5 training splits, and the 5
+held-out folds exactly partition the 200, so the mean necessarily equals the
+full-set score. What it does show is that **configuration selection is stable
+across folds** (weak robustness evidence), not an unbiased estimate of
+generalization.
 
-按折间标准差外推到 800 条私有集：`0.0203 × sqrt(40/800) ≈ 0.0045`
-→ 私有集分数预期约 **0.928 ± 0.005**（未计入两个 split 之间可能的其它差异；
-场景配比两边相同，这一点是有利的）。
+Extrapolating the fold standard deviation to an 800-session private set:
+`0.0203 * sqrt(40/800) = 0.0045`, so the private score would be expected around
+**0.928 +/- 0.005** -- not counting any other differences between the two splits.
+The scenario mix being identical on both sides is favourable here.
 
-## 剩余空间
+## Remaining headroom
 
 ```
-HR@10 : 0.995 → 1.000                最多 +0.0025
-Eff   : 0.898 → 0.911（现实下界推导） 最多 +0.0025
-MRR   : 0.837 → 0.995                最多 +0.0529   ← 几乎全部剩余空间
+HR@10 : 0.995 -> 1.000                        at most +0.0025
+Eff   : 0.898 -> 0.911 (realistic lower bound) at most +0.0025
+MRR   : 0.837 -> 0.995                        at most +0.0529   <- nearly all of it
 ```
 
-**最小 MTTC**：⚠️ 此前按「browsing 最快第 2 轮 / boundary 最快第 3 轮」推出 1.890，
-被审查驳回——实测命中轮次分布里 browsing 有 25 个、boundary 有 3 个第 1 轮命中
-（品类 + 热门度在首轮就够）。正确下界是 notes/03 的 1.390（唯一硬约束是 override
-不能在触发前转化），对应 efficiency 上限 0.961。当前 0.898 的剩余空间为
-+0.0126 score 而非 +0.0025——仍远小于 MRR 的空间，结论不变。
+**Minimum MTTC:** an earlier derivation assuming "browsing hits at turn 2 at the
+earliest, boundary at turn 3" gave 1.890 and was rejected in review -- the
+measured hit-turn distribution has 25 browsing and 3 boundary sessions hitting on
+turn 1 (category plus popularity is enough on the first turn). The correct lower
+bound is notes/03's 1.390 (the only hard constraint is that an override cannot
+convert before it fires), giving an efficiency ceiling of 0.961. The remaining
+headroom from 0.898 is therefore +0.0126 of score rather than +0.0025 -- still far
+smaller than MRR's, so the conclusion is unchanged.
 
-当前各场景表现：
+Per-scenario performance at this point:
 
-| 场景 | n | HR | MRR | MTTC | 命中轮次分布 |
+| scenario | n | HR | MRR | MTTC | hit-turn distribution |
 |---|---|---|---|---|---|
 | buying | 80 | 0.988 | 0.819 | 1.56 | `{1:47, 2:29, 3:3}` |
 | browsing | 80 | 1.000 | 0.769 | 1.80 | `{1:25, 2:46, 3:9}` |
 | intent_override | 30 | 1.000 | 0.921 | 3.60 | `{3:12, 4:18}` |
 | boundary | 10 | 1.000 | 0.900 | 2.60 | `{1:3, 3:5, 4:2}` |
 
-**结论：效率与召回都已基本打满，剩余全部是「把 rank 2–5 提到 rank 1」。**
-199 次命中中已有 142 次位居第一，剩下 57 次分布在 rank 2–10。
-browsing（30 个非 rank-1）与 buying（22 个）是主要来源。
+**Conclusion: efficiency and recall are both essentially maxed out, and
+everything left is "lift ranks 2-5 to rank 1".** Of 199 hits, 142 are already
+first, and the remaining 57 are spread over ranks 2-10. Browsing (30 non-rank-1)
+and buying (22) are the main sources.

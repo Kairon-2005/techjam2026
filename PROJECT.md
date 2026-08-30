@@ -1,93 +1,116 @@
 # TechJam 2026 · Track 4 — Shopping Copilot
 
-多轮会话式商品检索 agent。10 轮预算内把隐藏目标商品排进 Top-10，越早越靠前越好。
+A multi-turn conversational product-retrieval agent. It has a 10-turn budget to
+place the hidden target product in the Top-10; earlier and higher is better.
 
-## 当前状态
+> **Historical working document.** The status table below records the project as
+> it stood mid-project. The final, verified submission numbers are in `README.md`
+> and `docs/FINAL_VERIFICATION.md`: TechnicalScore **0.932067**, HR@10 0.995,
+> MRR 0.852556, MTTC 2.06.
+
+## Status at the time of writing
 
 | | TechnicalScore | HR@10 | MRR | MTTC |
 |---|---|---|---|---|
-| 官方弱基线 | 0.1067 | 0.125 | 0.068 | 9.81 |
-| 阶段一：对话策略 | 0.7536 | 0.870 | 0.560 | 3.48 |
-| 阶段二：重排层 | 0.9287 | 0.995 | 0.8394 | 2.03 |
-| **阶段三：池感知提问（当前默认）** | **0.9285** | **0.995** | **0.8394** | **2.04** |
-| *现实联合上界* | *0.9822* | *1.000* | *1.000* | *1.89* |
+| official weak baseline | 0.1067 | 0.125 | 0.068 | 9.81 |
+| stage 1: dialogue policy | 0.7536 | 0.870 | 0.560 | 3.48 |
+| stage 2: reranking layer | 0.9287 | 0.995 | 0.8394 | 2.03 |
+| **stage 3: pool-aware questioning (default then)** | **0.9285** | **0.995** | **0.8394** | **2.04** |
+| *realistic joint upper bound* | *0.9822* | *1.000* | *1.000* | *1.89* |
 
-**相对基线 8.70×。** 纯 Python 标准库，零网络、零 GPU、零模型权重，token 用量 0，
-单次全量评测 11.3 秒 / 峰值 627 MB。`python3 -m evaluator.local_evaluator`
-不传任何参数即可复现 **0.928508**。
+**8.70x over the baseline.** Pure Python standard library: zero network, zero
+GPU, no learned or neural model weights on the scored path, 0 tokens, a single
+full evaluation in 11.3 seconds at a 627 MB peak. `python3 -m
+evaluator.local_evaluator` with no arguments reproduced **0.928508** at that
+time.
 
-当前默认采用池感知提问（`ask_policy="other_then_pool"`）：17% 的轮次问出基于候选池
-熵的真实信息增益问题，代价 0.0002。它**只影响提问、不影响排序**——HR@10 与 MRR
-与纯 `other` 策略逐位相同（0.995 / 0.839361），差异全部在 MTTC（2.03 → 2.04）。
-纯 `other` 的 0.928708 用 `ask_policy="other"` 一键复现，并由测试锁定。
+The default then used pool-aware questioning (`ask_policy="other_then_pool"`):
+17% of turns ask a real information-gain question derived from candidate-pool
+entropy, at a cost of 0.0002. It **affects questioning only, never ranking** --
+HR@10 and MRR are identical digit for digit to the pure `other` policy
+(0.995 / 0.839361), and the entire difference is in MTTC (2.03 to 2.04). Pure
+`other` reproduces 0.928708 with a single key, `ask_policy="other"`, and both are
+locked by tests.
 
-## 目录结构
+## Directory layout
 
 ```
-notes/          精读与调研笔记（决策依据）
-  00-problem-spec.md         题目 / 约束 / 资源 / 评分标准
-  01-evaluator-mechanics.md  评测器逆向分析 + 完整消融表
-  02-literature.md           开源最优解法调研与适用性判定
-NOTES.md        决策日志（做了什么决定、依据、可推翻它的证据）
-lab/            实验基建
-  sweep.py          跑多组配置，目录索引跨配置复用
-  analyze.py        从 experiments.jsonl 生成消融表
-  experiments.jsonl 追加式实验日志（配置 / 指标 / 分场景 / 耗时 / git hash / 时间戳）
-starter/agent.py    提交用 agent，所有行为都是配置项
-docs/           主办方原始文档（勿改）
-data/           冻结目录 + 200 条公开会话
-evaluator/      官方评测器（勿改）
+notes/          reading and research notes (the basis for decisions)
+  00-problem-spec.md         task / constraints / resources / scoring
+  01-evaluator-mechanics.md  reverse-engineering the evaluator + full ablation table
+  02-literature.md           survey of open-source best practice and its applicability
+NOTES.md        decision log (what was decided, on what evidence, what would overturn it)
+lab/            experiment infrastructure
+  sweep.py          run several configurations, reusing catalog indexes across them
+  analyze.py        generate the ablation table from experiments.jsonl
+  experiments.jsonl append-only experiment log (config / metrics / per-scenario / timing / git hash / timestamp)
+starter/agent.py    the submitted agent; every behaviour is a configuration key
+docs/           the organizer's original documents (do not modify)
+data/           frozen catalog + 200 public sessions
+evaluator/      the official evaluator (do not modify)
 ```
 
-## 用法
+## Usage
 
 ```bash
-python3 -m lab.sweep                      # 跑默认消融组
-python3 -m lab.sweep name='{"ask_policy":"other"}'   # 跑单个自定义配置
-python3 -m lab.analyze                    # 打印消融表
-python3 -m evaluator.local_evaluator      # 官方 harness，用默认配置
+python3 -m lab.sweep                                  # run the default ablation group
+python3 -m lab.sweep name='{"ask_policy":"other"}'    # run one custom configuration
+python3 -m lab.analyze                                # print the ablation table
+python3 -m evaluator.local_evaluator                  # the official harness, default config
 ```
 
-## 设计原则
+## Design principles
 
-1. **主路径必须零网络、纯 CPU**——`docs/submission_rules.md` 明文规定 final scoring
-   可能禁用网络访问。任何 LLM 组件都必须可关闭且有等价的离线 fallback。
-2. 不引入向量数据库。50k × 384 的 numpy 暴力检索约 20 ms，足够。
-3. 一切改动必须经过 `lab/sweep.py` 量化并写入 `experiments.jsonl`，不接受「感觉更好」。
-4. 报告中如实区分「模拟器机制利用」与「可迁移的建模洞察」。
+1. **The main path must make zero network calls and run on CPU only.**
+   `docs/submission_rules.md` states explicitly that final scoring may disable
+   network access. Any model-based component must be switchable off and have an
+   equivalent offline fallback.
+2. No vector database. Brute-force search over 50k x 384 with numpy is around
+   20 ms, which is enough.
+3. Every change must be quantified through `lab/sweep.py` and written to
+   `experiments.jsonl`. "It feels better" is not accepted.
+4. The report must honestly separate "exploiting a simulator mechanism" from
+   "a transferable modelling insight".
 
-## 架构
+## Architecture
 
 ```
-用户消息 → 意图路由(buying/browsing/override，零成本模板匹配)
-        → 结构化约束状态(parse_message：品类 + 约束短语列表，override 不清空)
-        → 提问策略(ask_attribute)
-        → FTS5/BM25 召回 top-100
-        → 特征线性重排(phrase / exact / field / idf / cat / popularity / bm25)
-        → top-10
+user message -> intent routing (buying/browsing/override, zero-cost template match)
+             -> structured constraint state (parse_message: category + constraint phrase list;
+                override does not clear it)
+             -> question policy (ask_attribute)
+             -> FTS5/BM25 recall of the top 100
+             -> linear feature reranking (phrase / exact / field / idf / cat / popularity / bm25)
+             -> top 10
 ```
 
-## 外部审查回应（notes/08）
+## Response to external review (notes/08)
 
-10 条批评中 4 条可实证，全部实现成默认关闭的配置项后量化：**2 条采纳、2 条否决**。
+Of 10 criticisms, 4 were empirically testable. All four were implemented as
+configuration keys defaulting to off and then quantified: **2 adopted, 2
+rejected.**
 
-| 批评 | 判定 | 证据 |
+| criticism | verdict | evidence |
 |---|---|---|
-| 双轨路由无效 | 描述属实，**药方否决** | `w_pop=6` 的 +0.0013 = 2 好 / 7 坏，5 折仅 2 折改善 |
-| 覆盖不是真擦除 | 描述属实，**药方否决** | 真实矛盾覆盖下 keep 0.9233 > slot 0.9140 > erase 0.8458 |
-| 提问是模拟器捷径 | 属实，**采纳** | `other_then_pool` 17% 轮次真实信息增益提问，代价 −0.0002 |
-| 资源占用未披露 | 属实，**采纳** | 惰性索引：7.70s/430MB → 5.07s/393MB，分数不变 |
+| dual-track routing is ineffective | description correct, **remedy rejected** | the +0.0013 from `w_pop=6` is 2 sessions better / 7 worse, and only 2 of 5 folds improved |
+| override is not real erasure | description correct, **remedy rejected** | under genuine contradictory overrides, keep 0.9233 > slot 0.9140 > erase 0.8458 |
+| questioning is a simulator shortcut | correct, **adopted** | `other_then_pool` asks a real information-gain question on 17% of turns at a cost of -0.0002 |
+| resource usage undisclosed | correct, **adopted** | lazy indexes: 7.70s/430MB to 5.07s/393MB, score unchanged |
 
-否决两条的共同原因：**本方案只打分不过滤**，过时证据无法排除正确商品，
-因此「遗忘」与「按路由分叉」的收益都低于其代价。
+Both rejections share one cause: **this approach scores and does not filter.**
+Obsolete evidence cannot exclude the correct product, so the benefit of both
+"forgetting" and "branching by route" is lower than its cost.
 
-## 待办
+## Backlog
 
-- [x] 重排层 —— 0.7536 → 0.9280
-- [x] 热门度先验 —— 单个最强特征，+0.114
-- [x] 交叉验证调参 —— 5 折，均值 0.9280 ± 0.0203
-- [x] 验证 `price` 只有 21% 商品可用 → 收益有限，已降优先级
-- [x] 验证 `user_profile` 个性化信号极弱 → 已放弃
-- [ ] MRR：把 rank 2–5 提到 rank 1（剩余空间 +0.053，占全部剩余的 91%）
-- [ ] 通用信息增益提问策略 + 证明其在本模拟器下退化为 `other`（简历/报告价值）
-- [ ] 提交前：README、requirements、一条命令复现、报告、演示视频
+- [x] reranking layer -- 0.7536 to 0.9280
+- [x] popularity prior -- the single strongest feature, +0.114
+- [x] cross-validated tuning -- 5 folds, mean 0.9280 +/- 0.0203
+- [x] confirmed `price` is available for only 21% of products, so the payoff is
+      limited; deprioritized
+- [x] confirmed the `user_profile` personalization signal is very weak; abandoned
+- [ ] MRR: lift ranks 2-5 to rank 1 (+0.053 remaining, 91% of all headroom)
+- [ ] a general information-gain question policy, plus a proof that it degenerates
+      to `other` under this simulator
+- [ ] before submission: README, requirements, one-command reproduction, report,
+      demo video

@@ -1,68 +1,83 @@
-# 07 — 四支柱差距核查 + 泛化加固结果 + 三天路线
+# 07 — Four-pillar gap review, generalization hardening results, three-day plan
 
-## A. 本轮成果：槽位级优雅降级（per-slot graceful degradation）
+## A. This round's result: per-slot graceful degradation
 
-**动机**：三路审查判定的最大真实风险——若私有模拟器改写约束字符串本身
-（payload rewording），精确匹配特征（w_phrase/w_exact/w_field，权重合计 8.5）
-全灭，诚实预期跌至 0.67–0.86。
+**Motivation:** the largest genuine risk identified by the three-way review. If
+the private simulator rewrites the constraint strings themselves (payload
+rewording), the exact-match features (`w_phrase`/`w_exact`/`w_field`, 8.5 of
+weight between them) all die, and the honest expectation falls to 0.67-0.86.
 
-**验证方法**（用户提议的 synthesize 新数据）：构造 payload 改写压力集 v2，
-三种机械变换直接改写约束串——`payload_soft`（"Material:alloy"→"made of alloy"）、
-`payload_shuffle`（token 逆序去标点）、`payload_drop`（只留最长 2 个 token）。
-变换针对 payload，我们的 cue 正则从未见过它们（chrome 模板保持原样，实验隔离）。
+**Validation method** (synthesizing new data): a payload-rewording stress set v2,
+where three mechanical transforms rewrite the constraint string directly --
+`payload_soft` ("Material:alloy" to "made of alloy"), `payload_shuffle` (tokens
+reversed, punctuation stripped) and `payload_drop` (only the two longest tokens
+kept). The transforms target the payload, and our cue regular expressions have
+never seen them (the chrome template is left as-is, isolating the experiment).
 
-**机制**：重排前对每条已披露约束做全候选池探测——凡在池中**有**字面命中的槽位
-继续走精确特征；**零命中的「死槽位」**回退到 IDF 加权 token 重叠软匹配
-（IDF < 1.5 的高频词不参与，避免 "made" 之类制造噪声）。
-在逐字模拟器上死集为空 ⇒ 排序不变 ⇒ **保险费为零**（实测还 +0.0007，
-因为它顺带修复了我们自拼接复合短语的匹配缺陷）。
+**Mechanism:** before reranking, each disclosed constraint is probed against the
+whole candidate pool. A slot that **has** a literal hit in the pool keeps using
+the exact features; a **dead slot with zero hits** falls back to IDF-weighted
+token-overlap soft matching (terms with IDF < 1.5 are excluded so that words like
+"made" cannot manufacture noise). On the verbatim simulator the dead set is
+empty, so ranking is unchanged and **the insurance premium is zero** -- measured
+at +0.0007, in fact, because it incidentally fixed a matching defect in our own
+concatenated compound phrases.
 
-**结果**：
+**Results:**
 
-| 套件 | 无保护 | slot_soft=4（新默认） |
+| suite | unprotected | slot_soft=4 (new default) |
 |---|---|---|
-| 干净模拟器（官方 harness） | 0.9280 | **0.9287** |
+| clean simulator (official harness) | 0.9280 | **0.9287** |
 | payload_soft | 0.8554 | **0.8783** |
 | payload_shuffle | 0.8736 | **0.8984** |
 | payload_drop | 0.8536 | **0.8760** |
-| chrome casual / terse / verbose | 0.9176 / 0.9233 / 0.8564 | 0.9173 / 0.9240 / 0.8568（不变） |
+| chrome casual / terse / verbose | 0.9176 / 0.9233 / 0.8564 | 0.9173 / 0.9240 / 0.8568 (unchanged) |
 
-途中弃置的两个方案（记录为消融）：静态 w_soft（干净集 -0.003 保险费）、
-会话级自适应门控（被偶然字面命中翻转，恢复力弱于槽位级）。
-权重不敏感（2 与 4 几乎同分）→ 不是过拟合出来的点。
+Two approaches discarded along the way (recorded as ablations): a static `w_soft`
+(a -0.003 insurance premium on the clean set) and session-level adaptive gating
+(flipped by an incidental literal hit; weaker recovery than per-slot). The weight
+is insensitive (2 and 4 score almost identically), so this is not an overfitted
+point.
 
-**最坏情形下限更新**：payload 全改写 ≈ 0.876–0.898（此前 0.854–0.874）；
-叠加 chrome 未见风格的诚实区间 ≈ **0.85–0.92**（此前 0.67–0.86）。
-ask="other" 灾难分支已由 dry_others fallback 兜底。
+**Updated worst-case floor:** full payload rewriting gives about 0.876-0.898
+(previously 0.854-0.874); combined with unseen chrome styles the honest interval
+is about **0.85-0.92** (previously 0.67-0.86). The `ask="other"` disaster branch
+is covered by the `dry_others` fallback.
 
-## B. 四支柱逐条核查（题面 4.2 vs 现状）
+## B. Four-pillar review, item by item (brief section 4.2 vs current state)
 
-| 支柱要求 | 现状 | 差距与对策 |
+| pillar requirement | current state | gap and response |
 |---|---|---|
-| I. Dual-Track Routing | ✅ 模板路由 buying/browsing/override，零成本 | 已达标；route_overrides 是配套证据 |
-| I. Multi-Route Retrieval → LLM Semantic Ranking（keyword+category+vector） | ⚠️ keyword ✅ category（w_cat）✅ vector ✖ LLM ✖ | 软匹配=稀疏向量余弦（诚实表述）；报告需正面论证：recall@200=1.0 ⇒ 加稠密路无召回可救，LLM 重排被断网条款排除，替代 = 特征重排 + 槽位级软匹配。**这是我们与题面字面预期最大的偏离，必须写成有据的设计决策而非回避** |
-| II. Information Accumulation | ✅ 增量槽位 | 达标 |
-| II. Intent Override "slot erasure and rewriting" | ⚠️ 我们实测 keep 优于 erase（0.87 vs 0.47）并如实解释 | 补一个 **selective erasure** 模式（只擦除与新约束同类冲突的旧槽），作为题面语义的诚实实现 + 消融对比 → 明日实验 |
-| II. Proactive Guidance / Over-Generality cutoff | ✖ 未实现 | 评测协议下截断推荐纯亏分 → 实现「检测 + 提问引导」而非「截断」：候选池过载时用池感知的 message/ask 选择；与信息增益提问同一实验 → 明日 |
-| III. Personalized Context Distillation | ⚠️ profile 信号弱（已测：常量+弱标签） | preference_tags 软加权补测一次，预期空结果也写进报告（诚实的负结果） |
-| III. Adaptive Orchestration | ✅ 两个真实实现：dry_others 提问策略降级、死槽位软匹配降级 | 报告用支柱 III 语言呈现 |
-| in-scope 点名的 slot decay | ✖ | 时间衰减词权重 → 明日实验（override 场景可能受益） |
-| IV. 指标 | ✅ 全对齐 | — |
+| I. Dual-Track Routing | done: template routing for buying/browsing/override, zero cost | met; `route_overrides` is supporting evidence |
+| I. Multi-Route Retrieval to LLM Semantic Ranking (keyword + category + vector) | partial: keyword yes, category yes (`w_cat`), vector no, LLM no | soft matching is a sparse-vector cosine (stated honestly); the report must argue this positively: recall@200 = 1.0 on the development set means a dense route has no missed recall to rescue, and LLM reranking is excluded by the no-network clause, so the substitute is feature reranking plus per-slot soft matching. **This is our largest deviation from the brief's literal expectation and must be written as an evidenced design decision rather than avoided** |
+| II. Information Accumulation | done: incremental slots | met |
+| II. Intent Override "slot erasure and rewriting" | partial: we measured keep beating erase (0.87 vs 0.47) and explain it honestly | add a **selective erasure** mode (erase only old slots of the same type that conflict with the new constraint) as an honest implementation of the brief's semantics, plus an ablation comparison -> tomorrow's experiment |
+| II. Proactive Guidance / over-generality cutoff | not implemented | truncating recommendations purely loses score under this protocol, so implement "detect and guide by asking" rather than "truncate": when the candidate pool is overloaded, use a pool-aware message/ask selection. Same experiment as information-gain questioning -> tomorrow |
+| III. Personalized Context Distillation | partial: the profile signal is weak (measured: a constant plus weak tags) | run one more measurement with soft weighting of `preference_tags`; the expected null result goes into the report as an honest negative |
+| III. Adaptive Orchestration | done: two real implementations -- the `dry_others` question-policy degradation and the dead-slot soft-match degradation | present in the report using Pillar III's language |
+| slot decay, named in scope | not implemented | time-decayed term weights -> tomorrow's experiment (the override scenario may benefit) |
+| IV. Metrics | done: fully aligned | — |
 
-## C. 剩余三天
+## C. The remaining three days
 
-**D1（明日，实验日）**：信息增益提问策略 + 证明其在本模拟器退化为 "other"
-（官方点名的 question-value estimation；含 Over-Generality 池感知引导）；
-selective erasure 消融；slot decay 消融；preference_tags 补测。
-每项都进 experiments.jsonl，正负结果都要。
+**D1 (tomorrow, experiment day):** an information-gain question policy plus a
+proof that it degenerates to `other` under this simulator (the organizer's named
+question-value estimation, including pool-aware over-generality guidance);
+selective-erasure ablation; slot-decay ablation; the `preference_tags`
+measurement. Every one goes into `experiments.jsonl`, positive or negative.
 
-**D2（提交包日）**：英文报告（含三次审查采纳的弱化措辞、全部消融表、
-四支柱映射、披露与声明）；submission/ 目录（agent.py + requirements.txt +
-README：Python≥3.10 + FTS5 依赖 + TJ_CONFIG 文档 + 一条命令复现 0.9287）；
-公开仓库整理 + 窗口前诚实 commit。
+**D2 (submission-package day):** the English report (including the weakened
+wording adopted from the three reviews, all ablation tables, the four-pillar
+mapping, and the disclosures and declarations); a `submission/` directory
+(`agent.py` plus `requirements.txt` plus a README: Python >= 3.10, the FTS5
+dependency, `TJ_CONFIG` documentation, and one command reproducing 0.9287);
+public repository cleanup and an honest pre-window commit.
 
-**D3（窗口内）**：实质性 in-window 更新（MRR 冲刺 rank2→1、verbose 残差）、
-演示会话 transcript、录视频、Devpost 描述、提交。
+**D3 (inside the window):** substantive in-window updates (the MRR push from rank
+2 to rank 1, the verbose residual), a demonstration session transcript, recording
+the video, the Devpost description, and submitting.
 
-8/28（四）下午 4 点 workshop 必问清单：final scoring 是否断网；私有集消息是否
-改写、约束是否保持原文；"other" 语义在私有模拟器中的实现。
+Questions to ask at the workshop on Thursday 8/28 at 16:00: whether final scoring
+disables the network; whether private-set messages are paraphrased and whether
+constraints keep their original text; and how "other" is implemented in the
+private simulator.

@@ -161,6 +161,57 @@ def check_evaluator_unmodified(paths) -> dict:
             f"byte-identical to its first commit {first[-1][:7]}"}
 
 
+def _where(hits) -> list[str]:
+    """Locations only, never the matched text.
+
+    This report is written to a file that the very same scan reads, so quoting
+    an offending line into it makes the finding permanent: the next run finds
+    its own report. Locations are also what a reader actually needs.
+    """
+    return [hit.split("  ", 1)[0] for hit in hits]
+
+
+def check_no_cjk(paths) -> dict:
+    from lab import textaudit as T
+    hits = T.cjk(paths)
+    scoped = [q for q in paths if T.in_scope(q)]
+    return {"ok": not hits,
+            "evidence": _where(hits)[:5] or
+            f"{len(scoped)} submission-facing files scanned"}
+
+
+def check_no_placeholders(paths) -> dict:
+    from lab import textaudit as T
+    hits = T.placeholders(paths)
+    # The message deliberately does NOT spell out the markers it looks for:
+    # this text is copied into the generated checklist, and a report quoting
+    # the patterns would trip the very scan it is reporting on.
+    return {"ok": not hits,
+            "evidence": _where(hits)[:5] or
+            f"{len(T.PLACEHOLDER_RES)} marker patterns scanned, none found; "
+            f"the demo-video link is the one permitted placeholder"}
+
+
+def check_no_emails(paths) -> dict:
+    import re as _re
+    pattern = _re.compile(r"[\w.+-]+@[\w-]+\.[\w.]{2,}")
+    hits = []
+    for path in auditable(paths):
+        if str(path).startswith("docs/competition_specification"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if "noreply" in line or "@example" in line:
+                continue
+            if pattern.search(line):
+                hits.append(f"{path}:{number}")
+    return {"ok": not hits,
+            "evidence": hits[:3] or "no participant email address published"}
+
+
 def check_tree_clean(paths) -> dict:
     dirty = _sh("git", "status", "--porcelain").strip()
     return {"ok": not dirty, "evidence": dirty.splitlines()[:5] or "clean"}
@@ -257,6 +308,47 @@ def check_no_sealed_influence(paths) -> dict:
             "starter/ unchanged since the holdout was consumed"}
 
 
+def check_public_repo(paths) -> dict:
+    """Has the submission been pushed anywhere public? Not yet, by construction."""
+    remote = _sh("git", "remote", "get-url", "submission").strip()
+    head = _sh("git", "rev-parse", "HEAD").strip()
+    contains = _sh("git", "branch", "-r", "--contains", head).strip()
+    return {"ok": bool(contains),
+            "evidence": (f"HEAD is on {contains}" if contains else
+                         f"HEAD {head[:7]} is on NO remote branch; target "
+                         f"remote is {remote or 'unset'}")}
+
+
+def check_demo_video(paths) -> dict:
+    text = Path("README.md").read_text(encoding="utf-8")
+    line = next((l for l in text.splitlines() if "Demo video" in l), "")
+    done = "youtu" in line.lower() or "http" in line
+    return {"ok": done,
+            "evidence": "a link is present" if done else
+                        "README still carries the demo-video placeholder"}
+
+
+def check_devpost(paths) -> dict:
+    return {"ok": False,
+            "evidence": "docs/DEVPOST_DRAFT.md is a DRAFT; nothing has been "
+                        "submitted, so no Devpost URL exists yet"}
+
+
+def check_linux_ci(paths) -> dict:
+    workflow = Path(".github/workflows/portability.yml")
+    if not workflow.exists():
+        return {"ok": False, "evidence": "no Linux portability workflow"}
+    return {"ok": False,
+            "evidence": "workflow written for Python 3.10/3.11 on Linux; it "
+                        "cannot run until the repository is published, and no "
+                        "result is claimed (docs/PORTABILITY.md)"}
+
+
+# Two groups, kept apart on purpose. The first is about this repository and can
+# be settled here. The second is about things that exist OUTSIDE it -- a public
+# push, a video, a Devpost entry, a CI run -- and cannot pass until they exist.
+# Reporting them together as one score would let "15/15" stand in for a
+# submission that has not been submitted.
 CHECKS = [
     ("No secrets or API keys in tracked files", check_no_secrets),
     ("No absolute developer paths in tracked source", check_no_absolute_paths),
@@ -272,43 +364,92 @@ CHECKS = [
     ("Public 200 used once, for one finalist", check_public_once),
     ("Synthetic holdout consumed exactly once", check_holdout_once),
     ("No agent change after the holdout ran", check_no_sealed_influence),
+    ("No CJK text in submission-facing files", check_no_cjk),
+    ("No leftover placeholders", check_no_placeholders),
+    ("No participant email address published", check_no_emails),
     ("git tree clean", check_tree_clean),
 ]
 
+EXTERNAL = [
+    ("Public GitHub repository published", check_public_repo),
+    ("Public demo video linked", check_demo_video),
+    ("Devpost submission live", check_devpost),
+    ("Linux portability CI has run", check_linux_ci),
+]
 
-def main(argv=None) -> int:
-    paths = tracked()
+
+def _run(group) -> list[tuple[str, dict]]:
     results = []
-    for label, fn in CHECKS:
+    for label, fn in group:
         print(f"  {label} ...", flush=True)
         try:
-            got = fn(paths)
+            got = fn(tracked())
         except Exception as exc:                      # a check that cannot run
             got = {"ok": False, "evidence": f"{type(exc).__name__}: {exc}"}
         results.append((label, got))
-    failed = [l for l, g in results if not g["ok"]]
+    return results
 
-    lines = ["# Submission checklist", "",
-             "Generated by `python3 -m lab.audit`. Every line below is a check "
-             "that was RUN, with the evidence that decided it — none of it is "
-             "ticked by hand.", "",
-             f"**{len(results) - len(failed)} of {len(results)} PASS.**", "",
-             "| check | | evidence |", "|---|---|---|"]
+
+def _table(results, pending: bool) -> list[str]:
+    lines = ["| check | | evidence |", "|---|---|---|"]
     for label, got in results:
         evidence = got["evidence"]
         if isinstance(evidence, list):
             evidence = "; ".join(str(e) for e in evidence) or "—"
         evidence = str(evidence).replace("|", "\\|")
-        lines.append(f"| {label} | {'PASS' if got['ok'] else '**FAIL**'} "
-                     f"| {evidence} |")
-    if failed:
-        lines += ["", "## Open FAIL items", ""]
-        lines += [f"* **{l}**" for l in failed]
+        mark = "PASS" if got["ok"] else ("**PENDING**" if pending else "**FAIL**")
+        lines.append(f"| {label} | {mark} | {evidence} |")
+    return lines
+
+
+def main(argv=None) -> int:
+    print("== repository / code audit ==")
+    repo = _run(CHECKS)
+    print("\n== external submission deliverables ==")
+    external = _run(EXTERNAL)
+
+    repo_failed = [l for l, g in repo if not g["ok"]]
+    pending = [l for l, g in external if not g["ok"]]
+
+    lines = [
+        "# Submission checklist", "",
+        "Generated by `python3 -m lab.audit`. Every line below is a check that "
+        "was RUN, with the evidence that decided it — none of it is ticked by "
+        "hand.", "",
+        "**Two groups, deliberately not combined into one score.** The first is "
+        "about this repository and can be settled here. The second is about "
+        "things that exist OUTSIDE it — a public push, a video, a Devpost entry, "
+        "a CI run — and cannot pass until they exist. Reporting a single "
+        "all-PASS number would let a repository audit stand in for a submission "
+        "that has not been submitted.", "",
+        "## 1. Repository and code audit", "",
+        f"**{len(repo) - len(repo_failed)} of {len(repo)} PASS.**", "",
+        *_table(repo, pending=False), "",
+        "## 2. External submission deliverables", "",
+        f"**{len(external) - len(pending)} of {len(external)} complete; "
+        f"{len(pending)} PENDING.** None of these can be satisfied from inside "
+        "the repository, and none is claimed as done.", "",
+        *_table(external, pending=True), "",
+    ]
+    if repo_failed:
+        lines += ["## Open FAIL items (repository)", ""]
+        lines += [f"* **{l}**" for l in repo_failed] + [""]
+    if pending:
+        lines += ["## Remaining PENDING items (external)", ""]
+        lines += [f"* **{l}**" for l in pending] + [""]
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"\n  {len(results) - len(failed)}/{len(results)} PASS  -> {OUT}")
-    for label in failed:
-        print(f"    FAIL  {label}")
-    return 0 if not failed else 1
+
+    print(f"\n  repository:  {len(repo) - len(repo_failed)}/{len(repo)} PASS")
+    print(f"  external:    {len(external) - len(pending)}/{len(external)} "
+          f"complete, {len(pending)} PENDING")
+    print(f"  -> {OUT}")
+    for label in repo_failed:
+        print(f"    FAIL     {label}")
+    for label in pending:
+        print(f"    PENDING  {label}")
+    # Exit non-zero only on a repository failure. A pending external deliverable
+    # is a fact about the world, not a defect in the tree.
+    return 0 if not repo_failed else 1
 
 
 if __name__ == "__main__":

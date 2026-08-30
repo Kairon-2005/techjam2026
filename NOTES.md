@@ -1,91 +1,153 @@
-# 决策日志
+# Decision log
 
-按时间倒序。每条记录：做了什么决定、依据、以及可推翻它的证据。
+Reverse chronological. Each entry records what was decided, on what evidence,
+and what evidence would overturn it.
 
-## 2026-08-26（外部审查回应，详见 notes/08）
+## 2026-08-26 (response to external review, see notes/08)
 
-- **代码已冻结进 Git（`2f85538`）**，这是此前最高的单点风险：490 行未提交改动，
-  66 条实验记录全部指向不含该代码的 starter commit。`sweep.py` 现在会标记脏工作区。
-- **实验否决「路由条件化权重」**：`browsing w_pop=6` 的 +0.0013 拆开看是
-  2 个 session 变好 / 7 个变差，5 折只有 2 折改善，邻域不支持。属噪声尖峰，不采纳。
-  采纳的是 `route_overrides` 整轮生效（此前 patch `ask_policy`/`on_override`
-  会静默失效）+ 未知配置键告警。
-- **实验否决「槽位擦除设为默认」**：新建 `lab/override_stress.py`，把过时偏好换成
-  别的商品的约束（silk → leather 这种直接矛盾），5 种子平均下 `keep` 仍最优
-  （0.9233 vs slot 0.9140 vs erase 0.8458）。**原因是本方案只打分不过滤**：
-  过时约束只能贡献一点错误加分，无法排除正确商品；而遗忘会真的丢证据。
-  这是可迁移结论。slot 保留为已测量能力，报告写成设计决策而非宣称做了擦除。
-- **采纳「池感知提问」**：`other_then_pool` + dry-streak 保护，代价 **−0.0002**
-  （0.9285），17% 的轮次问出基于候选池熵的真实信息增益问题。配对分析：
-  0 个 session 排序变好/变差，代价全在 MTTC。**已定为默认**：0.928708 → 0.928508，
-  HR@10 与 MRR 逐位不变，只有 MTTC 2.03 → 2.04。纯 `other` 用一个配置键复现，
-  两个配置的分数都由 `tests/test_score_regression.py` 锁定。
-- **采纳「按需构建索引」**：`order`/`card` 的权重默认为 0，却无条件构建约 80 MB。
-  改为惰性后 7.70s/430MB → **5.07s/393MB**，分数逐位相同。
-- **修掉两个真 bug**：`decay` 保留的是最旧证据（`[:8]`）而非最新，改后该策略 +0.030；
-  `lab/stress.py` 有两个活的 `__main__` 守卫，`stress v2` 会先跑一遍 v1 套件。
-- **措辞修正**：`tune.py` 不再声称折分数估计私有集性能；对外统一表述为
-  public development score 0.928708。
-- **测试从 3 例（只测评测器）扩到 30 例**，含分数锁与 agent 级回归。
+- **The code is frozen into git (`2f85538`).** This was the single largest
+  outstanding risk: 490 lines of uncommitted changes, with all 66 experiment
+  records pointing at a starter commit that did not contain that code.
+  `sweep.py` now flags a dirty working tree.
+- **Experiment rejected "route-conditioned weights".** The +0.0013 from
+  `browsing w_pop=6` decomposes into 2 sessions better / 7 worse, only 2 of 5
+  folds improved, and the neighbourhood does not support it. It is a noise
+  spike and is not adopted. What was adopted instead: `route_overrides` now
+  apply for the whole turn (previously patching `ask_policy` / `on_override`
+  failed silently), plus a warning on unknown configuration keys.
+- **Experiment rejected "slot erasure as the default".** A new
+  `lab/override_stress.py` replaces an obsolete preference with a constraint
+  from a different product (a direct contradiction such as silk to leather).
+  Averaged over 5 seeds, `keep` still wins: **0.9233 vs slot 0.9140 vs erase
+  0.8458**. **The reason is that this system scores and does not filter:** an
+  obsolete constraint can only contribute a little wrong credit and cannot
+  exclude the correct product, whereas forgetting genuinely destroys evidence.
+  This is a transferable conclusion. `slot` is retained as a measured
+  capability, and the report presents it as a design decision rather than a
+  claim that erasure was performed.
+- **Adopted "pool-aware questioning"** (`other_then_pool` plus dry-streak
+  protection) at a cost of **-0.0002** (0.9285), with 17% of turns asking a
+  real information-gain question derived from candidate-pool entropy. Paired
+  analysis: 0 sessions ranked better, 0 worse; the whole cost is in MTTC. **Now
+  the default:** 0.928708 to 0.928508, HR@10 and MRR identical digit for digit,
+  only MTTC moving 2.03 to 2.04. Pure `other` is reproducible with one
+  configuration key, and both configurations' scores are locked by
+  `tests/test_score_regression.py`.
+- **Adopted "build indexes on demand".** The `order` and `card` weights default
+  to 0 yet roughly 80 MB of index was built unconditionally. After making them
+  lazy: 7.70s/430MB becomes **5.07s/393MB**, with the score identical digit for
+  digit.
+- **Fixed two real bugs.** `decay` retained the *oldest* evidence (`[:8]`)
+  rather than the newest; after the fix that strategy gains +0.030.
+  `lab/stress.py` had two live `__main__` guards, so `stress v2` ran the v1
+  suite first.
+- **Wording corrected.** `tune.py` no longer claims that fold scores estimate
+  private-set performance; externally the number is stated as a public
+  development score of 0.928708.
+- **Tests grew from 3 cases (evaluator only) to 30**, including a score lock and
+  agent-level regressions.
 
 ## 2026-08-25
 
-- **选定 Track 4（Shopping Copilot）**。依据：单人 + 无 GPU；题面规则封顶算力
-  （禁微调基座、禁重型向量库、必须全内存），抹平了资源差距；有确定性本地评测器，
-  迭代 ~25 秒一轮。排除 Track 2（数据量与 GPU-hours 计分）、Track 3（不走 infra 路线，
-  且题面自承 kernel 可由 AI 生成）、Track 1（与已有的 my-coding-agent 项目高度重复）、
-  Track 5（可行但数据下载是瓶颈，且 CV 非主攻方向）。
-- **实验室放在云端容器，交付物落在本地仓库**。依据：本机沙箱在两次调用之间挂起进程，
-  后台任务无法存活，单次调用上限 45 秒；云端容器无此限制。
-- **确立设计原则：主路径必须零网络**。依据：`docs/submission_rules.md` 明文
-  "For official final scoring, organizer policy may disable network access."
-- **消融确认 H1（问 other）+ H2（override 不清空）**，0.1067 → 0.7536（7.06×）。
-  两者超可加，原因是 override 前命中不计分。
-- **重排层完成：0.7536 → 0.9280（相对基线 8.70×）**。召回 recall@200 = 1.000，
-  证明检索不是瓶颈，剩余空间 100% 在排序。
-- **热门度先验是单个最强特征（+0.114）**。目标商品 `rating_number` 中位数 6846 vs
-  全目录 12（99.5 百分位），源于会话采样自 Amazon 5-core 划分。这是可迁移的建模洞察。
-- **主动放弃 `w_card`（模拟器逆向）**：只值 +0.0033，且对官方可能加入的改写脆弱，
-  会污染整个方案的叙事。开关保留、默认关闭，作为消融项写进报告。
-- **负面结论**：热门度百分位变换、约束位置特征、约束 IDF 加权、候选池放大到 400 —— 全部变差。
-- **下一步**：MRR（剩余 0.053，占全部剩余空间的 91%）。199 次命中中 142 次已是 rank-1。
+- **Track 4 (Shopping Copilot) selected.** Rationale: solo entry with no GPU.
+  The rules cap compute (no base-model fine-tuning, no heavy vector database,
+  everything in memory), which flattens the resource gap, and there is a
+  deterministic local evaluator giving a roughly 25-second iteration loop.
+  Ruled out: Track 2 (scored on data volume and GPU-hours), Track 3 (not taking
+  an infrastructure route, and the brief itself concedes the kernel can be
+  AI-generated), Track 1 (heavy overlap with an existing my-coding-agent
+  project), Track 5 (feasible, but the data download is the bottleneck and CV
+  is not the main strength here).
+- **The lab runs in a cloud container; deliverables land in the local
+  repository.** Rationale: the local sandbox suspends processes between calls,
+  background tasks cannot survive, and a single call is capped at 45 seconds.
+  The cloud container has neither limit.
+- **Design principle established: the main path must make zero network calls.**
+  Rationale: `docs/submission_rules.md` states explicitly that "For official
+  final scoring, organizer policy may disable network access."
+- **Ablation confirmed H1 (ask `other`) plus H2 (do not clear on override):**
+  0.1067 to 0.7536 (**7.06x**). The two are super-additive because a hit before
+  an override does not score.
+- **Reranking layer complete: 0.7536 to 0.9280 (8.70x over the baseline).**
+  Recall@200 = 1.000 on the public development set, which shows retrieval is
+  not the bottleneck there; the remaining headroom is entirely in ranking.
+- **The popularity prior is the single strongest feature (+0.114).** Target
+  products have a median `rating_number` of 6846 against 12 for the whole
+  catalog (the 99.5th percentile), because sessions are sampled from the Amazon
+  5-core split. This is a transferable modelling insight about *this*
+  evaluation.
+- **`w_card` (reverse-engineering the simulator) deliberately abandoned.** It is
+  worth only +0.0033, is fragile against any rewording the organizer may
+  introduce, and would contaminate the narrative of the whole approach. The
+  switch is retained, defaults to off, and appears in the report as an
+  ablation.
+- **Negative results:** popularity percentile transforms, constraint-position
+  features, constraint IDF weighting, and widening the candidate pool to 400 --
+  all worse.
+- **Next:** MRR (0.053 remaining, 91% of all remaining headroom). Of 199 hits,
+  142 are already rank-1.
 
-## 2026-08-25（下午）
+## 2026-08-25 (afternoon)
 
-- **改写鲁棒性是唯一实测坐实的泛化风险**：三种 paraphrase 风格把旧 agent 打到
-  0.776/0.807/0.671；加模板无关 cue 解析 + 噪声/override 正则后恢复到
-  0.918/0.923/0.856，干净模拟器零回归。stress harness 自身先修了一个
-  disclosed 提前污染的 bug（identity 风格现在精确复现 0.9280，作为 harness 的回归检查）。
-- **热门度依赖量化**：w_pop=0 → 0.867（-0.061）；w_pop=2 → 0.925。平坦最优，
-  且先验成因（5-core 采样）在私有集同样成立。
-- **route-conditioned 重排已实现但未并入默认**：browsing 加大 w_pop → 0.9291（单次运行，
-  +0.0011 在折间噪声内，未经 CV）。提交版本冻结为默认配置 0.9280；route_overrides
-  作为已消融的扩展写进报告。
-- **性能画像**：索引构建 15.9s（一次性），单轮 35–64ms，4 轮会话 ~207ms，0 token。
-- **决定：主线冻结在 0.9280（默认配置）。** 边际收益已跌破 0.003/特征，rubric 65% 不看分数。
-  剩余时间 → verbose 残差、信息增益反事实实验、报告与演示。
+- **Paraphrase robustness is the only generalization risk confirmed by
+  measurement.** Three paraphrase styles pushed the older agent to
+  0.776/0.807/0.671; after adding template-independent cue parsing plus
+  noise/override regular expressions it recovered to 0.918/0.923/0.856, with
+  zero regression on the clean simulator. The stress harness itself first had to
+  be fixed for a bug where `disclosed` was contaminated early (the identity
+  style now reproduces 0.9280 exactly, which serves as the harness's own
+  regression check).
+- **Popularity dependence quantified:** `w_pop=0` gives 0.867 (-0.061);
+  `w_pop=2` gives 0.925. The optimum is flat, and the cause of the prior
+  (5-core sampling) holds for the private set as well.
+- **Route-conditioned reranking is implemented but not merged into the
+  default:** raising `w_pop` for browsing gives 0.9291 (a single run; +0.0011 is
+  within fold noise and was not cross-validated). The submitted version is
+  frozen at the default configuration, 0.9280; `route_overrides` is written up
+  as an ablated extension.
+- **Performance profile:** index build 15.9s (one-off), 35-64ms per turn,
+  roughly 207ms for a 4-turn session, 0 tokens.
+- **Decision: freeze the main line at 0.9280 (the default configuration).**
+  Marginal returns have fallen below 0.003 per feature, and 65% of the rubric
+  does not look at the score. Remaining time goes to verbose residuals, the
+  information-gain counterfactual experiment, and the report and demo.
 
-## 2026-08-25（晚，三路对抗审查后）
+## 2026-08-25 (evening, after a three-way adversarial review)
 
-- 三个独立审查 agent（代码 / 方法论 / 合规）交叉检查，全部发现归档于 notes/06。
-- 修复：w_pos 分支变量遮蔽（污染 tiebreak）；__init__ 加固（cwd 无关目录路径、
-  容错 TJ_CONFIG）；rec 数量按契约钳制 100；非字符串消息强转；term_cap 守卫；
-  **ask="other" 灾难分支的运行时 fallback**（连续 2 次干回复后退化为轮询具体属性，
-  干净模拟器上零成本）。修复后 0.9280 精确回归。
-- 方法论审查的核心裁定被采纳：CV 数字是「训练分重述」，改写压力测试是「回归套件
-  而非鲁棒性估计」（cue 正则就是对着这三种风格写的）。报告措辞已按此弱化：
-  同分布私有集预期 0.90–0.93；未见过的改写风格下诚实估计 0.67–0.86（修复前数字）。
-- 合规审查确认：evaluator/ 逐字节未动、无 secrets、测试套件通过、0.9280 一条命令复现。
-  Devpost 层交付物（报告/公开仓库/视频）为 0%，是当前最大缺口。
+- Three independent review agents (code / methodology / compliance) cross-checked
+  the work; all findings are archived in notes/06.
+- Fixes: `w_pos` branch variable shadowing (which contaminated the tie-break);
+  `__init__` hardening (working-directory-independent paths, tolerant
+  `TJ_CONFIG`); recommendation count clamped to 100 per the contract;
+  non-string messages coerced; a `term_cap` guard; and **a runtime fallback for
+  the `ask="other"` disaster branch** (after 2 consecutive dry replies it
+  degrades to cycling concrete attributes, at zero cost on the clean simulator).
+  After the fixes, 0.9280 reproduces exactly.
+- The methodology review's central rulings were adopted: the cross-validation
+  numbers are "a restatement of the training split", and the paraphrase stress
+  test is "a regression suite, not a robustness estimate" (the cue regular
+  expressions were written against those three styles). The report's wording was
+  weakened accordingly: 0.90-0.93 expected on an in-distribution private set;
+  an honest estimate of 0.67-0.86 under unseen paraphrase styles (pre-fix
+  numbers).
+- The compliance review confirmed: `evaluator/` byte-for-byte unchanged, no
+  secrets, test suite passing, 0.9280 reproducible with one command. The
+  Devpost-layer deliverables (report, public repository, video) were at 0%,
+  which was the largest gap at the time.
 
 ## 2026-08-26
 
-- **槽位级优雅降级上线并入默认**（slot_soft=4）：每条约束独立探测死活，死槽位回退
-  IDF 加权软匹配（IDF<1.5 的高频词除外）。干净集 0.9287（零保险费，反 +0.0007）；
-  payload 改写集从 0.854–0.874 → 0.876–0.898。压力集 v2（payload rewording）
-  为验证而合成，变换从未反哺正则。弃置：静态 w_soft（-0.003 保险费）、
-  会话级门控（恢复力弱）。
-- **新的诚实最坏情形区间：0.85–0.92**（此前 0.67–0.86）。
-- 四支柱差距核查完成（notes/07）：最大字面偏离是 Pillar I 的 "LLM Semantic
-  Ranking"——需在报告中写成有据的设计决策；Pillar II 的 selective erasure 与
-  Over-Generality 引导、slot decay 列入明日实验。
+- **Slot-level graceful degradation shipped and merged into the default**
+  (`slot_soft=4`): each constraint is probed independently for liveness, and a
+  dead slot falls back to IDF-weighted soft matching (excluding high-frequency
+  terms with IDF < 1.5). Clean set 0.9287 (no insurance premium; +0.0007 the
+  other way); the payload-rewording set improves from 0.854-0.874 to
+  0.876-0.898. Stress set v2 (payload rewording) was synthesized for validation
+  and its transformations were never fed back into the regular expressions.
+  Discarded: static `w_soft` (a -0.003 insurance premium) and session-level
+  gating (weak recovery).
+- **New honest worst-case interval: 0.85-0.92** (previously 0.67-0.86).
+- The four-pillar gap review is complete (notes/07). The largest literal
+  deviation is Pillar I's "LLM Semantic Ranking", which needs to be written up
+  as an evidenced design decision; Pillar II's selective erasure, over-generality
+  guidance and slot decay are scheduled as the next day's experiments.

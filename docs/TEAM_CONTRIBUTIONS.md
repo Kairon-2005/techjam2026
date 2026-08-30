@@ -6,7 +6,8 @@
 
 | | |
 |---|---|
-| participant | Kairon (`onu20050118@gmail.com`, `e1720501@u.nus.edu`) |
+| participant | Kairon |
+| contact | supplied through the Devpost submission form; not published in this repository |
 | role | everything below |
 | assistance | Claude Opus 5 (Anthropic) used as a paired engineering and review assistant throughout, under the participant's direction. Every design decision, pre-registration, gate and stop condition in `notes/` was authored and approved by the participant; commits are co-authored where that assistance was material. |
 
@@ -24,7 +25,7 @@ flattens the resource gap and makes ~25-second iteration possible.
 | **Optional capabilities** | dense random-indexing retriever + RRF fusion; TinyBERT ONNX cross-encoder cascade — both implemented, measured, shipped off |
 | **Experiment harness** | exclusive leases in isolated worktrees, append-only ledgers, one citability predicate, invalidation records, scenario library, benchmark harness — `lab/` |
 | **Evidence discipline** | 8 phases of pre-registration and results notes — `notes/`, 46 documents |
-| **Tests** | 766, including exact public-score locks, the configuration lock, and negative tests for every guard |
+| **Tests** | 812 executed with 1 environment-dependent skip, including exact public-score locks, the configuration lock, and negative tests for every guard |
 | **Packaging** | clean-checkout verification, model card, demo, this documentation |
 
 ## What was not done, and is not claimed

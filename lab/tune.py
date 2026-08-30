@@ -102,7 +102,7 @@ def main(n_trials: int = 30, seed: int = 0) -> None:
 def report(runs: list[dict], samples: list[dict]) -> None:
     fold_ids = folds(samples)
     best = max(runs, key=lambda r: r["score"])
-    print(f"\n=== 全集最优（在 200 条上调出来的，乐观）===")
+    print("\n=== best on the full set (tuned on the same 200; optimistic) ===")
     print(f"  score={best['score']:.4f}  hr10={best['hr10']:.3f} mrr={best['mrr']:.3f} "
           f"mttc={best['mttc']:.2f}")
     print(f"  {best['config']}")
@@ -112,12 +112,12 @@ def report(runs: list[dict], samples: list[dict]) -> None:
         train_pick = max(runs, key=lambda r: score_of([s for s in r["sessions"]
                                                        if s["sample_id"] not in test]))
         held.append(score_of([s for s in train_pick["sessions"] if s["sample_id"] in test]))
-    print(f"\n=== 5 折：仅权重选择步骤的稳定性检查（非私有集无偏估计）===")
+    print("\n=== 5 folds: a stability check on the weight-SELECTION step only\n    (NOT an unbiased estimate of private-set performance) ===")
     for i, h in enumerate(held):
         print(f"  fold {i}: held-out score = {h:.4f}")
-    print(f"  均值 = {statistics.fmean(held):.4f}   标准差 = {statistics.pstdev(held):.4f}")
+    print(f"  mean = {statistics.fmean(held):.4f}   sd = {statistics.pstdev(held):.4f}")
     gap = best["score"] - statistics.fmean(held)
-    print(f"  过拟合缺口 = {gap:+.4f}  （全集最优 − 交叉验证均值）")
+    print(f"  overfitting gap = {gap:+.4f}  (full-set best minus cross-validated mean)")
 
 
 if __name__ == "__main__":

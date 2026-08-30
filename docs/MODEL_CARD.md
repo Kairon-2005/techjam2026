@@ -2,7 +2,9 @@
 
 **`score_default`, the submitted and scored configuration, uses NO model.** It
 is Python standard library only: SQLite FTS5 for retrieval, deterministic
-feature reranking, no weights, no network, no tokens. If you only want to
+feature reranking, **no learned or neural model weights**, no network, no
+tokens. (It does have nine hand-configured scalar ranking weights, set by
+measurement and frozen; those are configuration, not learned parameters.) If you only want to
 reproduce the submitted score, nothing on this page is required and nothing on
 it is installed.
 
@@ -20,7 +22,8 @@ which is **off by default** and has **no public result**.
 | task | **text ranking** — one relevance score per (query, passage) pair |
 | license | **Apache-2.0** |
 | source | `https://huggingface.co/cross-encoder/ms-marco-TinyBERT-L2-v2` |
-| form used here | quantized ONNX, `onnx/model_qint8_arm64.onnx` |
+| form used here | quantized ONNX, `onnx/model_qint8_arm64.onnx` — a **4.5 MB ONNX file** in a **5.46 MB complete bundle** |
+| built for | **arm64**, as the filename states. Measured on **Darwin arm64 only**; no cross-platform performance is claimed |
 | runtime | ONNX Runtime CPU + `tokenizers` + `numpy`. **No torch, no transformers.** |
 | bundled at | `lab/r0/artifacts/ms-marco-TinyBERT-L2-v2/` |
 
@@ -81,7 +84,9 @@ the project, and it is a preparation step: **runtime is offline.**
 
 ## 4. Measured cost and effect
 
-On the real `sup-train` corpus, seven fresh processes (`notes/45` §4):
+On the real `sup-train` corpus, seven fresh processes, **on Darwin arm64**
+(`notes/45` §4). Every figure below is for that host and architecture; no
+cross-platform semantic performance is claimed.
 
 | | |
 |---|---|
@@ -96,8 +101,10 @@ On the real `sup-train` corpus, seven fresh processes (`notes/45` §4):
 | **`sup-val` MRR** | **+0.008248** |
 | **public result** | **none — never run** |
 
-**Every thread setting clears the 25 ms cap**, which retires the recorded risk
-that a judging host with fewer cores might not.
+**Every thread setting clears the 25 ms cap on this host**, which retires the
+recorded risk that a machine with fewer cores might not -- for Darwin arm64. A
+different architecture would need its own measurement, and this quantization
+targets arm64.
 
 ## 5. Limits, stated plainly
 

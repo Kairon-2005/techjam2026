@@ -1,262 +1,333 @@
-# 外部审查回应：把每条批评当成假设去实验
+# Response to external review: treat every criticism as a hypothesis and test it
 
-外部审查提出 10 条批评。本文只处理**可实证的 4 条行为类批评**，每条都实现成
-默认关闭的配置项，用 `lab/sweep.py` 量化后再决定是否采纳。
+An external review raised 10 criticisms. This document handles only the **4
+empirically testable, behavioural ones**. Each was implemented as a configuration
+key defaulting to off, quantified with `lab/sweep.py`, and only then accepted or
+rejected.
 
-结论先行：**2 条采纳，2 条被实验否决**。被否决的两条，批评对「代码现状」的描述
-完全正确，但它开出的药方经测量是负收益。
+Conclusion first: **2 adopted, 2 rejected by experiment.** For the two rejected,
+the criticism's description of the code was entirely correct, but the remedy it
+proposed measured as a net loss.
 
-基线（默认配置，commit 2f85538）：`0.928708 / HR 0.995 / MRR 0.839361 / MTTC 2.03`
+Baseline (default configuration, commit 2f85538):
+`0.928708 / HR 0.995 / MRR 0.839361 / MTTC 2.03`
 
 ---
 
-## 批评 3：双轨路由「没有实际效果」
+## Criticism 3: dual-track routing "has no actual effect"
 
-**描述属实。** `route_overrides` 默认 `{}`，三条路由走完全相同的管线。
-另外 `lab/sweep.py` 的 7 组消融配置里写了 `"route": false` —— agent 根本没有
-这个开关，那 7 行实验记录是**无效的**。
+**The description is correct.** `route_overrides` defaults to `{}`, and all three
+routes run an identical pipeline. Separately, 7 of the ablation configurations in
+`lab/sweep.py` set `"route": false` -- the agent has no such switch, so those 7
+experiment records are **void**.
 
-先补两件事：路由分类正确率实测 **200/200**（boundary 的首轮消息与 browsing
-逐字相同，信息上不可分，归入 browsing 是正确行为）；`route_overrides` 改为
-**整轮生效**（此前只作用于 rerank 权重，patch `ask_policy` / `on_override`
-会静默失效——`RT4` 就是这样得到一个与基线完全相同的分数）。
+Two things had to be fixed first. Route classification accuracy measures
+**200/200** (a boundary session's first message is word-for-word identical to a
+browsing one, so they are informationally indistinguishable and classifying it as
+browsing is correct behaviour). And `route_overrides` now applies **for the whole
+turn** (previously it affected only rerank weights, so patching `ask_policy` or
+`on_override` failed silently -- which is how `RT4` produced a score identical to
+the baseline).
 
-然后测「路由条件化」到底值不值：
+Then, whether route-conditioning is worth anything:
 
-| 配置 | score | Δ |
+| configuration | score | delta |
 |---|---|---|
-| 基线 | 0.9287 | — |
-| browsing `w_pop`=5.0 | 0.9283 | −0.0004 |
+| baseline | 0.9287 | — |
+| browsing `w_pop`=5.0 | 0.9283 | -0.0004 |
 | browsing `w_pop`=6.0 | 0.9301 | **+0.0013** |
-| browsing `w_pop`=8.0 | 0.9261 | −0.0026 |
-| buying `w_phrase`=7.0 | 0.9272 | −0.0015 |
-| browsing→pool 提问 | 0.9282 | −0.0005 |
-| browsing 候选池 200 | 0.9178 | −0.0109 |
-| buying 候选池 50 | 0.9174 | −0.0113 |
+| browsing `w_pop`=8.0 | 0.9261 | -0.0026 |
+| buying `w_phrase`=7.0 | 0.9272 | -0.0015 |
+| browsing to pool questioning | 0.9282 | -0.0005 |
+| browsing candidate pool 200 | 0.9178 | -0.0109 |
+| buying candidate pool 50 | 0.9174 | -0.0113 |
 
-`w_pop=6.0` 的 +0.0013 是**噪声尖峰**，配对分析拆开看：
+The +0.0013 from `w_pop=6.0` is a **noise spike**. Paired analysis:
 
 ```
-w_pop=6.0   2 个 session 变好，7 个变差；5 折里只有 2 折改善
-            折间 Δ 均值 +0.0030，标准差 0.0064（标准差是均值的两倍）
+w_pop=6.0   2 sessions better, 7 worse; only 2 of 5 folds improved
+            fold-mean delta +0.0030, sd 0.0064 (the sd is twice the mean)
 ```
 
-净收益为正只是因为 2 次涨幅是「跳到 rank 1」，而 7 次跌幅都很小。邻域
-（5.0 / 5.5 / 6.5 / 7.0）不支持它。**判定：不采纳权重条件化。**
-采纳的是路由整轮生效的管线改造 + 未知配置键告警（默认行为零变化）。
+The net gain is positive only because the 2 improvements are jumps to rank 1
+while the 7 regressions are all small. The neighbourhood (5.0 / 5.5 / 6.5 / 7.0)
+does not support it. **Verdict: weight conditioning not adopted.** What was
+adopted is the pipeline change making routes apply for the whole turn, plus a
+warning on unknown configuration keys (zero change in default behaviour).
 
-## 批评 4：`on_override="keep"` 不是真正的意图覆盖
+## Criticism 4: `on_override="keep"` is not a real intent override
 
-**描述属实。** 默认保留旧短语与旧词项，`category` 只在为空时赋值。
-公开集上这样做不吃亏，原因在 `evaluator.behavior_for`：
-`new_value = hard_constraints[0]`、`old_value = soft_preferences[-1]`，
-**两者都来自目标商品**——被要求「忘掉」的偏好其实仍是正确答案的证据。
+**The description is correct.** By default old phrases and old terms are kept,
+and `category` is only assigned when empty. Doing this costs nothing on the
+public set because of `evaluator.behavior_for`:
+`new_value = hard_constraints[0]` and `old_value = soft_preferences[-1]`, so
+**both come from the target product** -- the preference the customer asks us to
+forget is still evidence for the correct answer.
 
-所以实现了 `on_override="slot"`（按契约属性槽位选择性重写：解析新消息 →
-判定被取代的槽位 → 只删除该槽位的短语及其**独占**贡献的词项，其余槽位保留），
-并新建 `lab/override_stress.py`：把 `old_value` 换成**别的商品**的约束，
-让「过时偏好」真正具有误导性（例：目标是皮带·leather，过时偏好写成 silk）。
+So `on_override="slot"` was implemented (selective rewriting by contract
+attribute slot: parse the new message, decide which slot is superseded, delete
+only that slot's phrases and the terms it contributed **exclusively**, keep
+everything else), together with a new `lab/override_stress.py` that replaces
+`old_value` with a constraint from **a different product**, making the "obsolete
+preference" genuinely misleading (for example, the target is a leather belt and
+the obsolete preference says silk).
 
-5 个随机种子平均（每种子 30 条 intent_override）：
+Averaged over 5 random seeds (30 intent_override sessions per seed):
 
-| 策略 | score | sd | override HR | override MRR |
+| policy | score | sd | override HR | override MRR |
 |---|---|---|---|---|
-| **keep（现默认）** | **0.9233** | 0.0014 | **0.973** | **0.864** |
+| **keep (current default)** | **0.9233** | 0.0014 | **0.973** | **0.864** |
 | erase | 0.8458 | 0.0000 | 0.400 | 0.383 |
-| decay（保留最新） | 0.9164 | 0.0015 | 0.913 | 0.837 |
-| decay_head（保留最旧，原实现） | 0.8867 | 0.0039 | 0.773 | 0.479 |
-| slot（选择性重写） | 0.9140 | 0.0030 | 0.927 | 0.763 |
+| decay (keep newest) | 0.9164 | 0.0015 | 0.913 | 0.837 |
+| decay_head (keep oldest, the original implementation) | 0.8867 | 0.0039 | 0.773 | 0.479 |
+| slot (selective rewriting) | 0.9140 | 0.0030 | 0.927 | 0.763 |
 
-**即使覆盖是真实的、旧偏好与正确答案直接矛盾，`keep` 依然最优。**
+**Even when the override is genuine and the old preference directly contradicts
+the correct answer, `keep` still wins.**
 
-机制：本方案**只打分不过滤**。一个过时约束最多贡献一点错误加分，它无法把
-正确商品排除掉；而遗忘会真的丢掉证据——客户先前披露的多数信息仍然有效。
-这是可迁移的结论，不是模拟器特性。
+Mechanism: this approach **scores and does not filter**. An obsolete constraint
+can contribute at most a little wrong credit; it cannot exclude the correct
+product. Forgetting, by contrast, genuinely discards evidence -- most of what the
+customer disclosed earlier remains valid. This is a transferable conclusion, not
+a property of the simulator.
 
-**判定：不把 slot 设为默认**（公开集 −0.0066，真实覆盖下 −0.0093）。
-保留为已实现、已测量的能力，报告里写成「有据的设计决策」而不是宣称做了槽位擦除。
-顺带修掉一个真 bug：`decay` 原本 `[:8]` / `[:1]` 保留的是**最旧**的证据，
-改为保留最新后该策略 +0.030。
+**Verdict: `slot` is not made the default** (-0.0066 on the public set, -0.0093
+under genuine overrides). It is retained as an implemented, measured capability,
+and the report describes it as an evidenced design decision rather than claiming
+slot erasure was performed. A real bug was fixed along the way: `decay`
+originally kept the **oldest** evidence with `[:8]` / `[:1]`; keeping the newest
+instead gains that strategy +0.030.
 
-## 批评 5：提问策略是模拟器捷径
+## Criticism 5: the question policy is a simulator shortcut
 
-**描述属实，且量化后更难看：默认策略 399/405 轮（99%）问的都是 `other`。**
-模拟器把 `other` 当作「返回任意未披露约束」，两轮就能榨干意图卡。
+**The description is correct, and quantification makes it look worse: the default
+policy asks `other` on 399 of 405 turns (99%).** The simulator treats `other` as
+"return any undisclosed constraint", so two turns drain the intent card.
 
-实现 `ask_policy="pool"`：对存活候选池计算每个属性取值的香农熵，问**最能切分
-当前候选池**的那个属性——候选都是黑色时就不问颜色。
+`ask_policy="pool"` was implemented: compute the Shannon entropy of each
+attribute's value distribution over the surviving candidate pool and ask the
+attribute that **best splits the current pool** -- do not ask about colour when
+every candidate is black.
 
-| 策略 | score | MTTC | 定向提问占比 |
+| policy | score | MTTC | share of targeted questions |
 |---|---|---|---|
-| other（默认） | 0.9287 | 2.03 | 1% |
-| pool（纯） | 0.9006 | 3.19 | 89% |
+| other (default) | 0.9287 | 2.03 | 1% |
+| pool (pure) | 0.9006 | 3.19 | 89% |
 | other_then_pool | 0.9282 | 2.06 | 18% |
 | **other_then_pool + give_up=1** | **0.9285** | 2.04 | **17%** |
 
-配对分析（other_then_pool vs 默认）：**0 个 session 变好、0 个变差、0 次丢失命中**——
-排序质量逐条相同，−0.0005 全部来自 MTTC。
+Paired analysis (other_then_pool vs default): **0 sessions better, 0 worse, 0
+lost hits** -- ranking quality is identical session by session, and the whole
+-0.0005 comes from MTTC.
 
-为什么定向提问在这个模拟器里反而吃亏：模拟器用 `classify_constraint` 给隐藏约束
-打桶，只有**问中那个桶**才会披露。剩余约束是 "Rubber sole"（桶=feature）时，
-问 material/color/use_case 一律得到「没有偏好」。于是加了 dry-streak 保护：
-一次定向提问落空就退回开放式提问，代价降到 **−0.0002**（远低于 ±0.001 噪声底）。
+Why targeted questioning loses under this simulator: the simulator buckets hidden
+constraints with `classify_constraint`, and only **hitting that bucket** discloses
+anything. When the remaining constraint is "Rubber sole" (bucket = feature),
+asking about material/colour/use_case always returns "no preference". Hence the
+dry-streak protection: one missed targeted question falls back to open-ended
+asking, reducing the cost to **-0.0002** (well below the +/-0.001 noise floor).
 
-**判定：采纳。** 17% 的轮次问出真正基于候选池信息增益的问题，代价 0.0002。
+**Verdict: adopted.** 17% of turns ask a genuine candidate-pool information-gain
+question, at a cost of 0.0002.
 
-## 批评 9：资源占用需要更诚实的说明
+## Criticism 9: resource usage needs a more honest account
 
-**描述属实。** `order`（位置特征）与 `card`（模拟器复刻）两个索引结构无条件构建，
-但它们的权重 `w_pos` / `w_card` **默认都是 0.0**——即约 80 MB 纯废重。
-改为按权重惰性构建：
+**The description is correct.** The `order` (position feature) and `card`
+(simulator replica) index structures were built unconditionally, yet their
+weights `w_pos` and `w_card` **both default to 0.0** -- roughly 80 MB of pure dead
+weight. They are now built lazily, gated on their weights:
 
-| | 索引构建 | 峰值 RSS |
+| | index build | peak RSS |
 |---|---|---|
-| 原（无条件构建） | 7.70 s | 430.1 MB |
-| **现（按需构建）** | **5.07 s** | **392.8 MB** |
+| before (unconditional) | 7.70 s | 430.1 MB |
+| **after (on demand)** | **5.07 s** | **392.8 MB** |
 
-分数逐位相同。整个评测进程：13.6 s / 653 MB → **11.3 s / 627 MB**。
-新增 `title` 短标题索引（约 6 MB）用于推荐理由文案，已计入上表。
-
----
-
-## 其余批评的处置
-
-- **批评 1（无法从 Git 复现）—— 最高风险，已修复。** 490 行未提交改动 +
-  笔记 + lab 工具已冻结为 commit `2f85538`，并附一条命令复现说明。
-  `lab/sweep.py` 的 `git_hash()` 现在会给脏工作区打 `+dirty` 标记，
-  防止再次出现「实验记录指向不含该代码的 commit」。
-- **批评 2（CV 不是无偏估计）—— 属实，已改措辞。** `lab/tune.py` 的 docstring
-  此前写着该数字「estimates private-set performance」，现已改为：折仅检验
-  **权重选择步骤**的稳定性，其上游（特征、停用词、解析模板、提问/覆盖策略）
-  全部见过 200 条公开会话。对外一律表述为 **public development score 0.928708**。
-- **批评 10（测试太浅）—— 属实，已补。** 新增 `tests/test_agent.py`（25 例：
-  模板解析、槽位分类、覆盖状态、噪声回复、路由、契约 schema、top_k 钳制、
-  恶意输入、非法配置）与 `tests/test_score_regression.py`（分数锁 + 零 token）。
-  全套 30 例通过。另修 `lab/stress.py` 的两个 `__main__` 守卫——
-  `stress v2` 此前会先把 v1 套件跑一遍。
-- **批评 6/7/8（支柱缺口、模拟器耦合、提交物缺失）** 属实，属于叙事与交付物层面，
-  不是实验问题。批评 8 是当前最大缺口。
+The score is identical digit for digit. The whole evaluation process goes from
+13.6 s / 653 MB to **11.3 s / 627 MB**. A new short-title index (about 6 MB) used
+for recommendation rationale text is included in the table above.
 
 ---
 
-# 四支柱逐条核查（题面 4.2 vs 当前代码）
+## Disposition of the remaining criticisms
 
-审查后重新核查，全部以实测为准。**8 个子项：5 项达标、1 项部分、2 项经测量后
-主动放弃（负结果有数字）。**
+- **Criticism 1 (not reproducible from git) -- highest risk, fixed.** The 490
+  lines of uncommitted changes plus the notes and lab tooling are frozen as
+  commit `2f85538`, with one-command reproduction instructions.
+  `lab/sweep.py`'s `git_hash()` now marks a dirty working tree with `+dirty` so
+  that "experiment records pointing at a commit that does not contain the code"
+  cannot recur.
+- **Criticism 2 (CV is not an unbiased estimate) -- correct, wording changed.**
+  `lab/tune.py`'s docstring previously said the number "estimates private-set
+  performance"; it now says the folds check the stability of the **weight
+  selection step** only, since everything upstream (features, stopwords, parsing
+  templates, question/override policies) has seen all 200 public sessions.
+  Externally the number is always stated as a **public development score of
+  0.928708**.
+- **Criticism 10 (tests are too shallow) -- correct, addressed.** Added
+  `tests/test_agent.py` (25 cases: template parsing, slot classification,
+  override state, noise replies, routing, contract schema, `top_k` clamping,
+  malicious input, illegal configuration) and `tests/test_score_regression.py`
+  (a score lock plus zero tokens). All 30 pass. Also fixed the two `__main__`
+  guards in `lab/stress.py` -- `stress v2` previously ran the v1 suite first.
+- **Criticisms 6/7/8 (pillar gaps, simulator coupling, missing deliverables)**
+  are correct. They concern narrative and deliverables rather than experiments.
+  Criticism 8 is the largest current gap.
+
+---
+
+# Four-pillar review, item by item (brief section 4.2 vs the current code)
+
+Re-checked after the review, entirely against measurement. **8 sub-items: 5 met,
+1 partial, 2 deliberately abandoned after measurement (with numbers for the
+negative results).**
 
 ## I. Core Architecture
 
-**Dual-Track Routing —— 部分达标。**
-路由分类实测 **200/200 正确**（boundary 首轮消息与 browsing 逐字相同，
-信息上不可分，归入 browsing 是正确行为，非缺陷）。`route_overrides` 已改为
-**整轮生效**（可 patch 检索深度、提问策略、覆盖策略，不只是重排权重）。
-但**默认三条路由仍走同一管线**——因为差异化经测量是负收益（见批评 3 表）。
-题面说的 "high-precision filter track"：本方案**从不过滤，只打分**。
-这是刻意的——过滤会把召回率变成上限，而打分不会。
+**Dual-Track Routing -- partially met.**
+Route classification measures **200/200 correct** (a boundary session's first
+message is word-for-word identical to a browsing one, so they are
+informationally indistinguishable; classifying it as browsing is correct
+behaviour, not a defect). `route_overrides` now applies **for the whole turn**
+(it can patch retrieval depth, question policy and override policy, not just
+rerank weights). But **the three routes still run the same pipeline by default**,
+because differentiation measured as a net loss (see the criticism-3 table).
+On the brief's "high-precision filter track": this approach **never filters, it
+only scores.** That is deliberate -- filtering makes recall a ceiling, scoring
+does not.
 
-**Multi-Route Retrieval → LLM Semantic Ranking —— 部分达标。**
-keyword ✅（FTS5/BM25）、category ✅（`w_cat`）、vector ✖、LLM ✖。
+**Multi-Route Retrieval to LLM Semantic Ranking -- partially met.**
+keyword yes (FTS5/BM25), category yes (`w_cat`), vector no, LLM no.
 
-放弃稠密路的依据是实测召回曲线：
+The basis for abandoning the dense route is the measured recall curve:
 
-| k | recall@k | 未召回会话 |
+| k | recall@k | sessions not recalled |
 |---|---|---|
 | 10 | 0.545 | 91 |
 | 50 | 0.830 | 34 |
 | 100 | 0.995 | 1 |
 | **200** | **1.000** | **0** |
 
-**200 条会话没有一条是「检索不到」的**，目标商品 BM25 中位排名 8。
-稠密检索能改善的是召回，而召回**没有剩余空间**。加深候选池反而更差
-（100→200 时 MRR 0.839→0.766，热门度先验把更多热门错项抬到目标之上）。
-LLM 重排则被 `docs/submission_rules.md` 的断网条款排除。
-**这是与题面字面预期最大的偏离，报告必须写成有据的设计决策。**
+**Not one of the 200 sessions is a "cannot retrieve it" case** on the public
+development set; the target's median BM25 rank is 8. Dense retrieval would
+improve recall, and recall **has no headroom left here**. Deepening the candidate
+pool is actively worse (100 to 200 moves MRR from 0.839 to 0.766, as the
+popularity prior lifts more popular wrong items above the target). LLM reranking
+is excluded by the no-network clause in `docs/submission_rules.md`.
+**This is our largest deviation from the brief's literal expectation, and the
+report must present it as an evidenced design decision.**
 
 ## II. Dialog Strategy
 
-**Information Accumulation —— 达标。** 增量槽位累积 + `provenance` 记录每条短语
-贡献了哪些词项（使选择性删除成为可能）。
+**Information Accumulation -- met.** Incremental slot accumulation plus
+`provenance`, which records which terms each phrase contributed (making selective
+deletion possible).
 
-**Intent Override "slot erasure and rewriting" —— 已实现，但实测后不设为默认。**
-`on_override="slot"` 是题面语义的诚实实现。新建 `lab/override_stress.py` 构造
-**真实矛盾**的覆盖（silk → leather），5 种子平均下 `keep` 仍最优
-（0.9233 vs slot 0.9140 vs erase 0.8458）。原因同上：**只打分不过滤**，
-过时约束无法排除正确商品，而遗忘会真的丢证据。
+**Intent Override "slot erasure and rewriting" -- implemented, but not made the
+default after measurement.** `on_override="slot"` is an honest implementation of
+the brief's semantics. A new `lab/override_stress.py` constructs **genuinely
+contradictory** overrides (silk to leather), and averaged over 5 seeds `keep`
+still wins (0.9233 vs slot 0.9140 vs erase 0.8458). Same reason as above:
+**scoring, not filtering** -- an obsolete constraint cannot exclude the correct
+product, whereas forgetting genuinely loses evidence.
 
-**Proactive Guidance / Over-Generality cutoff —— 达标（本轮新增）。**
-`_overgeneral()`：存活候选池的 leaf 类目数 ≥ 6 时判定为「不是排序问题，
-而是需求欠定」。**截断推荐在本指标下纯亏分，所以 cutoff 作用于「提问」而非「结果」**：
-命中时强制走池感知提问（暂停 dry-streak 保护），并把开放式提问换成**结构化选项**，
-选项标签自动去掉共同前缀只保留区分部分（"women slippers / men slippers / men sandals"）。
-实测在 **36/407 轮（9%）** 触发，集中在 intent_override（27 次，覆盖后候选池确实重新变宽）。
-**分数零代价**（0.9285，与关闭时逐位相同）。
+**Proactive Guidance / over-generality cutoff -- met (added this round).**
+`_overgeneral()`: when the surviving candidate pool spans 6 or more leaf
+categories, the situation is judged "not a ranking problem but an
+under-specified request". **Truncating recommendations purely loses score under
+this metric, so the cutoff acts on the QUESTION rather than on the results:** on a
+hit it forces pool-aware questioning (suspending the dry-streak protection) and
+replaces the open-ended question with **structured options**, whose labels
+automatically drop the shared prefix and keep only the distinguishing part
+("women slippers / men slippers / men sandals"). Measured to fire on **36 of 407
+turns (9%)**, concentrated in intent_override (27 times, where the pool genuinely
+widens again after the pivot). **Zero score cost** (0.9285, identical digit for
+digit to having it off).
 
 ## III. Self-Evolution
 
-**Personalized Context Distillation —— 测量后放弃，负结果有数字。**
-`user_profile` 此前只存不用。本轮实现 `w_profile` 特征（preference_tags 命中率）
-并做权重扫描：
+**Personalized Context Distillation -- abandoned after measurement, with numbers
+for the negative result.** `user_profile` was previously stored and never used.
+This round implemented the `w_profile` feature (preference-tag hit rate) and swept
+the weight:
 
-| w_profile | 0.0 | 0.5 | 1.0 | 2.0 | −0.5 |
+| w_profile | 0.0 | 0.5 | 1.0 | 2.0 | -0.5 |
 |---|---|---|---|---|---|
 | score | **0.9285** | 0.9239 | 0.9176 | 0.9073 | 0.9272 |
 
-**单调变差。** 原因在数据本身：`purchase_frequency` 200 条会话**全部相同**，
-`preference_tags` 只有 9 个泛化词（fit / material / comfort / style…），
-命中率 50–80%——把它们加权等于给几乎所有商品同等加分，纯稀释真实约束信号。
-**诚实结论：这份 profile 不携带可用的个性化信号，不是我们没做。**
+**Monotonically worse.** The cause is in the data itself: `purchase_frequency` is
+**identical across all 200 sessions**, and `preference_tags` has only 9 generic
+words (fit / material / comfort / style and so on) with hit rates of 50-80% --
+weighting them credits nearly every product equally and purely dilutes the real
+constraint signal. **The honest conclusion is that this profile carries no usable
+personalization signal, not that we failed to implement one.**
 
-**Adaptive Orchestration —— 达标。** 三处真实的运行时改道，均由观测触发而非配置写死：
-1. **死槽位软匹配**：逐条约束探测全池字面命中，零命中的槽位切换到 IDF 加权软匹配
-   （逐字模拟器上死集为空 ⇒ 保险费为零）。
-2. **`dry_others` 降级**：连续 2 次干回复后放弃 `other`，改轮询具体属性。
-3. **`dry_streak` 放弃 + 过载暂停**：定向提问落空即退回开放式，但需求欠定时暂停该保护。
+**Adaptive Orchestration -- met.** Three genuine runtime reroutes, all triggered
+by observation rather than hard-coded in configuration:
+1. **Dead-slot soft matching:** each constraint is probed for literal hits across
+   the whole pool, and a slot with zero hits switches to IDF-weighted soft
+   matching (on the verbatim simulator the dead set is empty, so the insurance
+   premium is zero).
+2. **`dry_others` degradation:** after 2 consecutive dry replies, abandon `other`
+   and cycle concrete attributes.
+3. **`dry_streak` give-up plus overload suspension:** a missed targeted question
+   falls back to open-ended, but that protection is suspended when the request is
+   under-specified.
 
-## IV. Evaluation Matrix —— 完全达标
+## IV. Evaluation Matrix -- fully met
 
-Coverage / Precision / Efficiency 三维全部对齐官方 harness，
-默认配置 `0.928508 / HR@10 0.995 / MRR 0.839361 / MTTC 2.04`，
-两个配置的分数都由 `tests/test_score_regression.py` 锁定。
+Coverage / Precision / Efficiency are all aligned with the official harness. The
+default configuration gives `0.928508 / HR@10 0.995 / MRR 0.839361 / MTTC 2.04`,
+and both configurations' scores are locked by
+`tests/test_score_regression.py`.
 
-## 一句话总结
+## One-sentence summary
 
-**8 个子项：5 达标、1 部分（路由分类满分但不差异化）、2 主动放弃且附负结果数字。**
-唯一的真实能力缺口是 **vector + LLM 重排**，而召回曲线证明前者无空间可救、
-断网条款排除后者。其余「未做」项全部是**测量后否决**，不是遗漏。
+**8 sub-items: 5 met, 1 partial (route classification is perfect but routes are
+not differentiated), 2 deliberately abandoned with numbers for the negative
+results.** The only genuine capability gap is **vector plus LLM reranking**, and
+the recall curve proves the former has no headroom to recover while the
+no-network clause excludes the latter. Every other "not done" item is a
+**measured rejection**, not an omission.
 
 ---
 
-# 能力评测底座（lab/scenarios.py + lab/capability.py）
+# The capability-evaluation substrate (lab/scenarios.py + lab/capability.py)
 
-## 为什么必须先做这件事
+## Why this had to come first
 
-公开集是一个**弱代理**。它在结构上无法评测以下能力——不是我们没测，是它测不了：
+The public set is a **weak proxy**. It is structurally incapable of evaluating
+the following capabilities -- not that we did not measure them, but that it cannot
+measure them:
 
-| 能力 | 公开集为何测不了 |
+| capability | why the public set cannot measure it |
 |---|---|
-| 意图覆盖 | `behavior_for` 的 `old_value` 与 `new_value` **都取自目标商品**，被要求忘掉的偏好仍是正确答案的证据 |
-| 个性化 | `purchase_frequency` 200 条会话**完全相同**；`preference_tags` 只有 9 个泛化词 |
-| 模糊浏览 | 每条开场白**都点名了品类** |
-| 不配合的用户 | 回复永远格式良好，boundary 只有 10 条且只干一轮 |
-| 矛盾约束 | 用户陈述的约束**永远为真** |
+| intent override | `behavior_for`'s `old_value` and `new_value` are **both taken from the target product**, so the preference to forget is still evidence for the correct answer |
+| personalization | `purchase_frequency` is **identical across all 200 sessions**; `preference_tags` has only 9 generic words |
+| vague browsing | every opening message **names the category** |
+| an uncooperative user | replies are always well-formed; boundary has only 10 sessions and only stonewalls for one turn |
+| contradictory constraints | the user's stated constraints are **always true** |
 
-只对着这个代理调参，等于为一个**真实任务不具备的条件**做优化。
+Tuning only against this proxy means optimizing for **conditions the real task
+does not have**.
 
-## 设计
+## Design
 
-`Scenario` = 官方评测循环之上的一组钩子，**只改一件事**，harness/指标/计分全部不动，
-因此结果可横向比较。钩子返回 `None` 表示「用官方行为」——每个场景都是对真实评测器的
-**diff**，而不是可能漂移的重实现。
+A `Scenario` is a set of hooks over the official evaluation loop that **changes
+exactly one thing**, leaving the harness, metrics and scoring untouched, so
+results are comparable across rows. A hook returning `None` means "use the
+official behaviour", so every scenario is a **diff against the real evaluator**
+rather than a reimplementation that could drift.
 
-`lab/capability.py` 输出**矩阵而非单一数字**：行=场景，列=配置。
-读一列判断某个配置好坏；读一行看某项能力依赖哪个模块。
-**某行所有配置打平 ⇒ 该能力没有任何模块在负责。**
+`lab/capability.py` outputs **a matrix, not a single number**: rows are
+scenarios, columns are configurations. Read a column to judge a configuration;
+read a row to see which module a capability depends on. **If every configuration
+in a row is level, no module is responsible for that capability.**
 
-## 首份能力记分卡
+## The first capability scorecard
 
-| 场景 | default | ask=other | ov=slot | ov=erase | no_guidance | profile=1.0 | no_softslot | no_pop |
+| scenario | default | ask=other | ov=slot | ov=erase | no_guidance | profile=1.0 | no_softslot | no_pop |
 |---|---|---|---|---|---|---|---|---|
-| clean（对照） | 0.9285 | **0.9287** | 0.9218 | 0.8425 | 0.9285 | 0.9176 | 0.9278 | 0.8658 |
+| clean (control) | 0.9285 | **0.9287** | 0.9218 | 0.8425 | 0.9285 | 0.9176 | 0.9278 | 0.8658 |
 | override_genuine | 0.9196 | **0.9199** | 0.9183 | 0.8425 | 0.9196 | 0.9075 | 0.9188 | 0.8589 |
 | override_category | 0.9190 | 0.9197 | 0.9190 | 0.9190 | 0.9194 | 0.9050 | **0.9234** | 0.8473 |
 | vague_start | 0.8724 | **0.8742** | 0.8657 | 0.7864 | 0.8738 | 0.8648 | 0.8724 | 0.8141 |
@@ -264,484 +335,589 @@ Coverage / Precision / Efficiency 三维全部对齐官方 harness，
 | **contradiction** | 0.7990 | 0.8000 | 0.7880 | 0.7066 | 0.7997 | 0.7846 | **0.8018** | 0.6987 |
 | profile_informative | 0.9285 | 0.9287 | 0.9218 | 0.8425 | 0.9285 | **0.9465** | 0.9278 | 0.8658 |
 
-## 三条结论（都改变了优先级）
+## Four conclusions (all of which changed priorities)
 
-**1. 个性化是可利用的——缺的是数据不是架构。**
-`profile_informative` 行里 `w_profile=1.0` 得 0.9465（+0.018），自适应版本更高
-（0.9703）。这把「我们没做个性化」与「这份数据没有个性化信号」**彻底分开**了。
-但自适应版本在 clean 上倒亏 0.029：无论用池覆盖率还是全局 IDF，
-**泛化标签与有效标签的取值区间是重叠的**（泛化 1.42–4.05，有效 2.31–10.82），
-没有干净的判别器。**默认关闭**，作为「私有集若有信号即可开启」的开关保留。
-这是研究问题，不是调参问题——现在硬调阈值正是这套底座要防止的错误。
+**1. Personalization is exploitable -- what is missing is data, not
+architecture.** In the `profile_informative` row, `w_profile=1.0` scores 0.9465
+(+0.018), and the adaptive version is higher still (0.9703). That **cleanly
+separates** "we did not implement personalization" from "this data has no
+personalization signal". But the adaptive version loses 0.029 on clean: whether
+by pool coverage or global IDF, **the value ranges of generic and informative tags
+overlap** (generic 1.42-4.05, informative 2.31-10.82), so there is no clean
+discriminator. **Off by default**, retained as a switch for "enable it if the
+private set has signal". This is a research question, not a tuning question --
+hard-coding a threshold now is exactly the mistake this substrate exists to
+prevent.
 
-**2. 最大的真实缺口是「不配合的用户」：0.7051，比 clean 低 0.22。**
-而且**整行除 `no_pop` 外全部打平**——按上面的读法，这意味着
-**当前没有任何模块在负责这项能力**。公开集完全看不到这个缺口。
+**2. The largest real gap is the uncooperative user: 0.7051, 0.22 below clean.**
+And **the entire row is level apart from `no_pop`** -- by the reading rule above,
+that means **no module is currently responsible for this capability.** The public
+set cannot see this gap at all.
 
-**3. 矛盾约束 0.7990，第二大缺口。** 且 `no_softslot` 反而最好——
-`slot_soft` 在矛盾场景下轻微有害（它会给一条本就错误的约束找软匹配）。
-`override_category` 同样是 `no_softslot` 最优。**slot_soft 需要一个「该约束是否可信」
-的前置判断**，而不是无条件为死槽位找软匹配。
+**3. Contradictory constraints at 0.7990 is the second-largest gap.** And
+`no_softslot` is actually best there -- `slot_soft` is mildly harmful under
+contradiction (it finds a soft match for a constraint that was wrong to begin
+with). `override_category` also peaks at `no_softslot`. **`slot_soft` needs a
+prior judgement of whether the constraint is credible**, rather than
+unconditionally soft-rescuing dead slots.
 
-**4. 热门度先验是全场景的承重墙**：`no_pop` 在每一行都掉 0.06–0.15，
-是唯一一个在所有能力维度上都关键的特征。
+**4. The popularity prior is a load-bearing wall in every scenario:** `no_pop`
+drops 0.06-0.15 in every row, the only feature that is critical along every
+capability dimension.
 
-## 按优先级的模块路线（数据驱动，不是拍脑袋）
+## A module roadmap by priority (data-driven, not guessed)
 
-1. **不配合用户的兜底**（0.705，无模块负责）——最高优先级
-2. **矛盾约束下的约束可信度**（0.799；同时修 slot_soft 的反向作用）
-3. **个性化判别器**（有信号时 +0.042，需要真正的判别器）
-4. vector / LLM 路（召回曲线证明无空间，留作有据的设计决策）
+1. **A fallback for uncooperative users** (0.705, no module responsible) --
+   highest priority.
+2. **Constraint credibility under contradiction** (0.799; also fixes
+   `slot_soft`'s reverse effect).
+3. **A personalization discriminator** (+0.042 where signal exists; needs a real
+   discriminator).
+4. Vector / LLM routes (the recall curve proves there is no headroom; retained as
+   an evidenced design decision).
 
 ---
 
-# Phase 1：Typed Evidence State + Uncooperative Recovery
+# Phase 1: typed evidence state plus uncooperative recovery
 
-按外部反馈扩大后的范围执行（不只是 SlotValue 数据结构）。
+Executed at the scope expanded by external feedback (not merely the `SlotValue`
+data structure).
 
-## 结果（5 seeds，与各自 clean 基线配对）
+## Results (5 seeds, paired against each configuration's own clean baseline)
 
-| 场景 | Phase 1 前 | Phase 1 后 | Δ |
+| scenario | before Phase 1 | after Phase 1 | delta |
 |---|---|---|---|
-| clean（默认） | 0.928508 | **0.928508** | 0（不变） |
-| compat `ask_policy="other"` | 0.928708 | **0.928708** | 0（逐位精确） |
+| clean (default) | 0.928508 | **0.928508** | 0 (unchanged) |
+| compat `ask_policy="other"` | 0.928708 | **0.928708** | 0 (digit for digit) |
 | **uncooperative** | 0.7219 | **0.8372** | **+0.1153** |
 | **vague_start** | 0.8724 | **0.9267** | **+0.0543** |
 | **contradiction** | 0.7990 | **0.8427** | **+0.0437** |
 | override_genuine | 0.9196 | 0.9255 | +0.0059 |
-| override_category | 0.9190 | 0.9172 | −0.0018（sd 0.0038，噪声内） |
+| override_category | 0.9190 | 0.9172 | -0.0018 (sd 0.0038, within noise) |
 
-## 关键发现：噪声污染是在做「意外的查询扩展」
+## Key finding: noise contamination was doing accidental query expansion
 
-反馈预测的污染确认存在：`hmm / hard / say / really / sure / think / can / just / show / more`
-全部进入 BM25 查询。**但把它修掉之后，uncooperative 反而更差**
-（0.7219 → 0.6973）。分解后原因是两条：
+The contamination the feedback predicted does exist: `hmm / hard / say / really /
+sure / think / can / just / show / more` all entered the BM25 query. **But fixing
+it made `uncooperative` worse** (0.7219 to 0.6973). Decomposed, there are two
+reasons:
 
-1. **检测本身没有收益**：Phase 1B 让 agent 正确识别出用户在敷衍，
-   但它原有的应对（退回 `other`、轮询具体属性）本身就是坏策略。
-2. **污染词在意外地扩大召回**：单独验证 `filter_noise=0, evidence_query=0`
-   得 HR **0.785**，而干净版只有 **0.758**。用户不给信息时查询极窄，
-   窄查询 = 窄召回，目标商品根本进不了候选池。垃圾词把 OR 查询撑开了。
+1. **The detection alone has no benefit:** Phase 1B lets the agent correctly
+   recognize that the user is stonewalling, but its existing response (fall back
+   to `other`, cycle concrete attributes) is itself a bad strategy.
+2. **The contaminating words were accidentally widening recall:** verified
+   separately, `filter_noise=0, evidence_query=0` gives HR **0.785** while the
+   clean version gives only **0.758**. When the user supplies no information the
+   query is extremely narrow, and a narrow query means narrow recall -- the target
+   never reaches the candidate pool at all. The junk words were widening the OR
+   query.
 
-所以正确的修法不是恢复污染，而是**在证据稀薄时刻意扩召回**：
+So the correct fix is not to restore the contamination but to **widen recall
+deliberately when evidence is thin**:
 
 | starved_candidates | uncooperative | HR | MRR | MTTC |
 |---|---|---|---|---|
-| 关闭 | 0.7036 | 0.758 | 0.622 | 4.10 |
+| off | 0.7036 | 0.758 | 0.622 | 4.10 |
 | 200 | 0.7684 | 0.836 | 0.668 | 3.50 |
 | 500 | 0.8292 | 0.914 | 0.701 | 2.90 |
-| **1000（默认）** | **0.8372** | **0.925** | **0.706** | **2.85** |
+| **1000 (default)** | **0.8372** | **0.925** | **0.706** | **2.85** |
 | 2000 | 0.8363 | 0.924 | 0.704 | 2.85 |
 
-`starved_after=2`：`after=1` 会让 clean 掉到 0.9251，`after=3` 略差。
-**证据充足时深池有害（MRR 被热门近似项挤垮），证据稀薄时召回才是约束条件**——
-这正是 Pillar III 的 runtime adaptation，且 clean 分文不动。
+`starved_after=2`: `after=1` drops clean to 0.9251, and `after=3` is slightly
+worse. **A deep pool is harmful when evidence is sufficient (MRR is crushed by
+popular near-matches), and recall is the binding constraint only when evidence is
+thin** -- which is exactly the Pillar III runtime adaptation, with clean untouched.
 
-同一机制顺带修好了 `vague_start`（+0.0543 → 0.9267，HR 0.995）。
-注意：**我们一行路由标签都没改**。反馈判断正确——那个分数的主因是
-「首轮没有 category ⇒ BM25 缺少有效查询词」，是召回问题，不是路由标签问题。
+The same mechanism incidentally fixed `vague_start` (+0.0543 to 0.9267, HR
+0.995). Note that **not a single routing label was changed.** The feedback's
+diagnosis was right: the main cause of that score was "no category on turn 1
+means BM25 has no usable query terms", a recall problem rather than a routing
+label problem.
 
-## 已实现
+## What was implemented
 
-- **1A 类型化证据**：`SlotValue`（attribute / value / polarity / hardness /
+- **1A typed evidence:** `SlotValue` (attribute / value / polarity / hardness /
   confidence / source_turn / provenance / active / catalog_support /
-  contradiction）。检索查询**只由 active evidence 重建**，不再吞掉每条消息的
-  每个 token。clean 上两条路径逐位相同（那里的消息要么可解析、要么已被过滤），
-  所以是零代价。
-- **1B 回复结果分类**：`Outcome` = INFORMATIVE / OVERRIDE / NO_PREFERENCE /
-  UNCERTAIN / REFUSAL / REQUEST_MORE / CORRECTION。只有 INFORMATIVE 与
-  OVERRIDE 会合入证据。**踩过的坑**：最初把「只有 category 没有 constraint」
-  的浏览开场判成 UNCERTAIN，90 条会话在第一轮丢掉品类，分数掉到 0.8865。
-  已加回归测试锁死。
-- **1C 无信息恢复**：稀薄证据扩召回（上表）；`REQUEST_MORE` 触发候选轮换
-  （保护前 3 名以免伤 MRR，仅刷新尾部为未展示候选）；区分
-  「没有偏好」（该维度问错了 ⇒ 转开放式）与「答不上来」（该维度太难 ⇒ 问更易回答的）。
-- **1D 可信度门控 —— 负结果**：`slot_soft` 在 `override_category` 上确实值
-  −0.0100（关掉得 0.9272 vs 开着 0.9172）。但按「早于 pivot / 被更新的单值属性
-  取代」实现的门控**没修好它**：只找回 0.0008，且在每个场景上都要付 ~0.0007。
-  **默认关闭，机制仍未查明。** 我原先的伤害假设是错的。
+  contradiction). The retrieval query is **rebuilt from active evidence only**,
+  rather than swallowing every token of every message. Both paths are identical
+  digit for digit on clean (where messages are either parseable or already
+  filtered), so it costs nothing.
+- **1B reply-outcome classification:** `Outcome` = INFORMATIVE / OVERRIDE /
+  NO_PREFERENCE / UNCERTAIN / REFUSAL / REQUEST_MORE / CORRECTION. Only
+  INFORMATIVE and OVERRIDE merge into evidence. **A trap we hit:** initially a
+  browsing opening with "only a category, no constraint" was classified
+  UNCERTAIN, so 90 sessions lost their category on turn 1 and the score fell to
+  0.8865. A regression test now locks this.
+- **1C recovery without information:** widen recall when evidence is thin (table
+  above); `REQUEST_MORE` triggers candidate rotation (protecting the top 3 so MRR
+  is not harmed, refreshing only the tail with unshown candidates); and
+  distinguish "no preference" (the wrong dimension was asked, so switch to
+  open-ended) from "cannot answer" (that dimension is too hard, so ask an easier
+  one).
+- **1D credibility gating -- a negative result:** `slot_soft` really is worth
+  -0.0100 on `override_category` (0.9272 with it off vs 0.9172 with it on). But a
+  gate implemented as "earlier than the pivot, or a single-valued attribute
+  superseded by an update" **did not fix it**: it recovers only 0.0008 and costs
+  about 0.0007 in every scenario. **Off by default; the mechanism is still
+  unexplained.** My original damage hypothesis was wrong.
 
-## 未获收益的想法（照实记录）
+## Ideas that produced no gain (recorded as such)
 
-- **answerability 加权提问**：完全无收益（0.7036 开/关同分）。原因是模拟器的
-  「可回答性」由 `classify_constraint` 的桶匹配决定，不是人类难易度——
-  问 use_case 只会披露被归类为 use_case 的约束。产品设计上合理，
-  但**这个模拟器无法奖励它**，与 pool-aware 提问是同一类结论。
+- **Answerability-weighted questioning:** no benefit at all (0.7036 with it on
+  and off). The cause is that the simulator's "answerability" is determined by
+  `classify_constraint`'s bucket matching rather than by human difficulty --
+  asking use_case only discloses constraints bucketed as use_case. It is sound
+  product design, but **this simulator cannot reward it**, the same class of
+  conclusion as pool-aware questioning.
 
-## 方法学升级（按反馈要求）
+## Methodology upgrade (as the feedback required)
 
-`lab/capability.py` 现在：每个随机场景跑 5 seeds、报告 mean ± sd、
-输出 **penalty = 场景分 − 该配置自己的 clean 分**（而非跨行比绝对分），
-并同时报告 HR / MRR / MTTC。
+`lab/capability.py` now runs 5 seeds for each stochastic scenario, reports mean
++/- sd, outputs **penalty = scenario score minus that configuration's own clean
+score** (rather than comparing absolute scores across rows), and reports HR / MRR
+/ MTTC together.
 
-## 事故记录
+## Incident record
 
-本轮把 `starter/agent.py` 写坏过一次：用 `s.index(A):s.index(B)` 切片时
-A 在文件中位于 B 之后，切出空串，`str.replace("", block)` 把代码块插进了
-**每两个字符之间**，文件膨胀到 73 MB。因插入是均匀的，可从重复间距反推出
-被插入的块并整体删除，**逐字节还原**（还原后 48,721 字节，AST 校验通过）。
-教训：字符串编辑一律用唯一锚点 + 计数断言，不要用 index 切片。
+This round `starter/agent.py` was corrupted once. Slicing with
+`s.index(A):s.index(B)` where A occurs after B in the file produced an empty
+string, and `str.replace("", block)` inserted the code block **between every pair
+of characters**, inflating the file to 73 MB. Because the insertion was uniform,
+the inserted block could be recovered from the repetition period and removed
+wholesale, restoring the file **byte for byte** (48,721 bytes after restoration,
+AST-validated). Lesson: always edit strings with a unique anchor plus a count
+assertion, never with index slicing.
 
 ---
 
-# 审查 items 1–8 处理结果
+# Disposition of review items 1-8
 
-## 1. 可复现性（根因已修）
+## 1. Reproducibility (root cause fixed)
 
-审查在 `bcfbca2`、seeds 7–11 上复跑得 `uncooperative=0.829795`，而报告写的是 `0.8372`。
-**代码没有任何差异——是 seed 集不一致。** `lab/capability.py` 文档写明默认
-`range(7,12)`，但我用来出数的是临时脚本里的 `(7,11,23,42,101)`，且临时脚本从不写日志，
-所以差异在别人复跑之前不可见。
+The review re-ran on `bcfbca2` with seeds 7-11 and got
+`uncooperative=0.829795`, where the report said `0.8372`. **There was no code
+difference at all -- the seed sets differed.** `lab/capability.py`'s documentation
+says the default is `range(7,12)`, but the numbers were produced by a throwaway
+script using `(7,11,23,42,101)`, and that script never wrote a log, so the
+discrepancy was invisible until someone else re-ran it.
 
-根因修复：**`lab/record.py` 是唯一被允许产出数字的入口**。每行记录携带
-commit / dirty / dirty 文件列表 / 完整 config / 完整 seed 列表 / 每个 seed 的
-四项指标 / mean / sd，追加写入 `lab/results.jsonl`。**不带 seed 列表的聚合值一律不得上报。**
+Root-cause fix: **`lab/record.py` is the only entry point permitted to produce
+numbers.** Each row carries commit / dirty flag / dirty file list / full config /
+full seed list / four metrics per seed / mean / sd, appended to
+`lab/results.jsonl`. **An aggregate without its seed list may not be reported.**
 
-修正后的 Phase 1 结果（两侧都在 seeds 7–11 重测）：
+Corrected Phase 1 results (both sides re-measured on seeds 7-11):
 
-| 场景 | pre(1d5718c) | Phase 1 | Δ |
+| scenario | pre (1d5718c) | Phase 1 | delta |
 |---|---|---|---|
 | clean | 0.928508 | 0.928508 | 0 |
 | uncooperative | 0.711598 | 0.833266 | **+0.1217** |
 | vague_start | 0.870627 | 0.917534 | **+0.0469** |
 | contradiction | 0.784395 | 0.809592 | **+0.0252** |
-| override_genuine | 0.921971 | 0.921971 | **0**（此前报的 +0.0059 是 seed 假象） |
-| override_category | 0.913515 | 0.915013 | +0.0015（sd 0.0066，噪声内） |
+| override_genuine | 0.921971 | 0.921971 | **0** (the previously reported +0.0059 was a seed artefact) |
+| override_category | 0.913515 | 0.915013 | +0.0015 (sd 0.0066, within noise) |
 
-## 2. depth=1000 的 CPU 成本
+## 2. The CPU cost of depth=1000
 
-| depth | suite 墙钟 | peak RSS | 常规轮 p50/p95 | 饥饿轮 p50/p95 | score |
+| depth | suite wall clock | peak RSS | normal turn p50/p95 | starved turn p50/p95 | score |
 |---|---|---|---|---|---|
-| 关闭 | 12.9 s | 591 MB | 6.2 / 27.7 ms | — | 0.6787 |
+| off | 12.9 s | 591 MB | 6.2 / 27.7 ms | — | 0.6787 |
 | 500 | 7.0 s | 593 MB | 9.9 / 20.3 ms | 9.9 / 20.3 ms | 0.8239 |
 | 1000 | 7.3 s | 594 MB | 10.4 / 34.3 ms | 12.8 / 23.7 ms | 0.8353 |
 
-**扩召回让整套评测更快**（12.9 s → 7.3 s），因为会话收敛更早、总轮数更少。
-1000 相对 500：饥饿轮 **+2.9 ms p50 / +3.4 ms p95**，RSS **+1 MB**。
-绝对值 12.8 ms p50 相对 60 s 预算可忽略。
+**Widening recall makes the whole evaluation faster** (12.9 s to 7.3 s), because
+sessions converge earlier and there are fewer turns overall. 1000 against 500
+costs **+2.9 ms p50 / +3.4 ms p95** on starved turns and **+1 MB** of RSS. In
+absolute terms, 12.8 ms p50 is negligible against a 60 s budget.
 
-**depth 选择已在 holdout 验证**（uncooperative_holdout，seeds 12–21，未见 seed +
-未见措辞）：depth_500 = 0.815102 ± 0.0138，depth_1000 = **0.825127 ± 0.0145**，
-**+0.0100**，与选择集上的 +0.0114 一致。**+2.9 ms p50 换 +0.010，成立。**
+**The depth choice was validated on a holdout** (uncooperative_holdout, seeds
+12-21, unseen seeds and unseen wording): depth_500 = 0.815102 +/- 0.0138,
+depth_1000 = **0.825127 +/- 0.0145**, a **+0.0100** difference consistent with the
++0.0114 on the selection set. **+2.9 ms p50 for +0.010 holds up.**
 
-## 3. 饥饿信号不再等同于「连续无信息」
+## 3. The starvation signal is no longer equated with "consecutively uninformative"
 
-实测：**clean 上的 stalled 轮中位数是 17 个查询词、7 条活跃约束**——正是绝不能
-被扩到 1000 的强查询。`_starved()` 现在要求「停滞（或显式 REQUEST_MORE）
-**且** 查询确实稀薄」：≤ 8 词 或 ≤ 1 条活跃约束。
-代价：vague_start 0.9267 → 0.9175。**保留这个保守门**。
+Measured: **the median stalled turn on clean has 17 query terms and 7 active
+constraints** -- precisely the strong queries that must never be widened to 1000.
+`_starved()` now requires "stalled (or an explicit REQUEST_MORE) **and** the query
+really is thin": at most 8 terms or at most 1 active constraint. The cost is
+`vague_start` 0.9267 to 0.9175. **Keep the conservative gate.**
 
-## 4. 轮换改为一次性事件
+## 4. Rotation is now a one-shot event
 
-`wants_more` 只增不减，导致此后每一轮都在旋转。现在 `REQUEST_MORE` 只装填
-一次 `rotate_pending`，`_rotate` 消费它；**新证据到达时清空 `shown` 与
-`rotate_pending`**，因为旧分页属于另一个结果集。
+`wants_more` only ever increased, so every subsequent turn kept rotating. Now
+`REQUEST_MORE` arms `rotate_pending` exactly once and `_rotate` consumes it; and
+**`shown` and `rotate_pending` are cleared when new evidence arrives**, because
+the old pagination belongs to a different result set.
 
-## 5. contradiction +0.0252 的归因（因子化消融）
+## 5. Attribution of contradiction's +0.0252 (factorized ablation)
 
-| 关闭的因子 | contradiction | 贡献 |
+| factor disabled | contradiction | contribution |
 |---|---|---|
-| （全开） | 0.809592 | — |
-| −evidence_query | 0.809592 | **0.000** |
-| −outcome_filter | 0.809592 | **0.000** |
-| **−starved** | 0.784395 | **+0.0252（全部）** |
-| −rotation | 0.809592 | **0.000** |
-| −slot_soft | 0.812014 | −0.0024（slot_soft 在此有害） |
+| (all on) | 0.809592 | — |
+| -evidence_query | 0.809592 | **0.000** |
+| -outcome_filter | 0.809592 | **0.000** |
+| **-starved** | 0.784395 | **+0.0252 (all of it)** |
+| -rotation | 0.809592 | **0.000** |
+| -slot_soft | 0.812014 | -0.0024 (`slot_soft` is harmful here) |
 
-关掉饥饿扩召回后**逐位复现 pre-Phase-1 的 0.784395**。结论：全部收益来自扩召回。
+Turning off starvation widening **reproduces the pre-Phase-1 0.784395 digit for
+digit**. Conclusion: the entire gain comes from widened recall.
 
-## 6. slot_soft 机制已查明（`lab/diag_slotsoft.py`）
+## 6. The `slot_soft` mechanism is now understood (`lab/diag_slotsoft.py`)
 
-override_category 上唯一的死短语是**被抛弃的品类**本身（`'i want shoes slippers'`）。
-slot_soft 把它救活：仍是拖鞋的候选拿到 f_slot=1.0 → **+4.000**，
-而 pivot 之后真正的目标拿 **+0.000**——单这一项就决定了排序
-（竞争者 8.55 vs 目标 7.21）。
+On `override_category` the only dead phrase is **the abandoned category itself**
+(`'i want shoes slippers'`). `slot_soft` revives it: candidates that are still
+slippers get f_slot=1.0, i.e. **+4.000**, while the genuine post-pivot target gets
+**+0.000** -- that single term decides the ranking (competitor 8.55 vs target
+7.21).
 
-**根因**：`last_override_turn=0`，**这次覆盖根本没被检测到**。
-旧 `OVERRIDE_RE` 要求字面的 "forget what i said"，而消息是
-"forget shoes slippers entirely"。已扩展为
-forget / changed my mind / no longer / instead of / not … anymore。
-「forget boots, I want running shoes」是最典型的意图覆盖，此前完全不可见——
-这是真实鲁棒性缺陷，不是场景造出来的。
+**Root cause:** `last_override_turn=0`, meaning **the override was never detected
+at all**. The old `OVERRIDE_RE` required a literal "forget what i said", while the
+message was "forget shoes slippers entirely". It has been extended to cover
+forget / changed my mind / no longer / instead of / not ... anymore. "Forget
+boots, I want running shoes" is the most typical intent override there is and was
+previously invisible -- a real robustness defect, not one manufactured by the
+scenario.
 
-检测修好后 `soft_needs_credible` 能把 override_category 从 0.9150 拉到 **0.9237**，
-与 `slot_soft=0` 完全相同。**但仍不设为默认**：它要付 payload 改写鲁棒性
-（payload_soft 0.8777→0.8617，shuffle 0.8982→0.8929，drop 0.8842→0.8737）
-与 clean 0.0008。payload 改写是私有集的合理风险，而品类 pivot 是我们自造的场景，
-这笔交易不划算。`on_override="slot"` 即使在检测修好后仍然更差
-（0.9010 vs keep 0.9150）——**打分仍然胜过过滤**。
+With detection fixed, `soft_needs_credible` lifts `override_category` from 0.9150
+to **0.9237**, exactly matching `slot_soft=0`. **It is still not made the
+default**, because it costs payload-rewording robustness (payload_soft
+0.8777 to 0.8617, shuffle 0.8982 to 0.8929, drop 0.8842 to 0.8737) plus 0.0008 on
+clean. Payload rewording is a plausible private-set risk while the category pivot
+is a scenario we authored ourselves, so the trade is not worth it.
+`on_override="slot"` remains worse even with detection fixed (0.9010 vs keep
+0.9150) -- **scoring still beats filtering.**
 
-## 7. Phase 2A（见 commit 07c191a）
+## 7. Phase 2A (see commit 07c191a)
 
-未知开场 100% 从 `override` 改为 `mixed`；路由按每轮证据从 mixed/browsing
-firm up 到 buying（clean 上产生 75 次 `browsing → buying`）；
-`_retrieve()` 改为使用本轮 route config（此前 `term_cap` / `bm25` 直接读
-`self.cfg`，任何 route patch 都是静默无效——与 `"route": false` 同类）。
-route 权重保持中性，因此行为不变：clean 0.928508、compat 0.928708 逐位一致。
+Unknown openings now classify as `mixed` rather than `override` 100% of the time;
+routes firm up from mixed/browsing to buying based on per-turn evidence (75
+`browsing -> buying` transitions on clean); and `_retrieve()` now uses this turn's
+route config (previously `term_cap` and `bm25` read `self.cfg` directly, so any
+route patch was silently void -- the same class of defect as `"route": false`).
+Route weights are left neutral, so behaviour is unchanged: clean 0.928508 and
+compat 0.928708, digit for digit.
 
-## 8. Holdout 验证（seeds 12–31，配置冻结）
+## 8. Holdout validation (seeds 12-31, configuration frozen)
 
-| 场景 | pre-Phase-1 | Phase 1+2A | Δ |
+| scenario | pre-Phase-1 | Phase 1+2A | delta |
 |---|---|---|---|
-| uncooperative（开发用措辞） | 0.714024 ± 0.0197 | **0.833022 ± 0.0102** | **+0.1190** |
-| uncooperative_holdout（**未见过的措辞**） | 0.705402 ± 0.0249 | **0.817144 ± 0.0147** | **+0.1117** |
+| uncooperative (development wording) | 0.714024 +/- 0.0197 | **0.833022 +/- 0.0102** | **+0.1190** |
+| uncooperative_holdout (**unseen wording**) | 0.705402 +/- 0.0249 | **0.817144 +/- 0.0147** | **+0.1117** |
 
-- **选择用 seeds 7–11 得 0.833266，holdout seeds 12–31 得 0.833022** ——
-  `starved_after` / `depth` 的选择跨 seed 泛化，不是调出来的。
-- 未见措辞下仍保住 +0.112，仅比开发措辞低 0.016。
-  （旧 agent 的同一差距是 0.009，即新 agent 对措辞略敏感一些，但收益压倒性保留。）
+- **Selection seeds 7-11 give 0.833266 and holdout seeds 12-31 give 0.833022** --
+  the `starved_after` and `depth` choices generalize across seeds; they were not
+  tuned in.
+- +0.112 is retained under unseen wording, only 0.016 below the development
+  wording. (The same gap for the old agent was 0.009, so the new agent is
+  slightly more wording-sensitive, but the gain is overwhelmingly preserved.)
 
-**holdout 暴露的一个真实缺陷（已记录、未修）**：
-`'Could I see a few different ones?'` 应判为 REQUEST_MORE，实际落到 UNCERTAIN——
-`MORE_RE` 要求字面的 "more"。**不在 holdout 上修**，否则 holdout 就作废了。
-留待下一轮用新的开发集处理。
+**One real defect the holdout exposed (recorded, not fixed):** `'Could I see a few
+different ones?'` should classify as REQUEST_MORE but lands on UNCERTAIN --
+`MORE_RE` requires a literal "more". **Not fixed on the holdout**, since that
+would void the holdout. Left for the next round with a new development set.
 
-UNCERTAIN 是兜底分支，任何无法解析且不匹配已知模式的消息都会落到它——
-所以未见措辞的检测是**设计上**泛化的，不是靠模式匹配开发集措辞。
+UNCERTAIN is the catch-all branch that any unparseable message not matching a
+known pattern falls into -- so detection of unseen wording generalizes **by
+design**, not by pattern-matching development-set wording.
 
 ---
 
-# 预注册实验：仅抑制「被明确放弃的 span」
+# Pre-registered experiment: suppress only the explicitly abandoned span
 
-**登记时间：结果观测之前。** 见 commit 历史中本节先于结果被提交。
+**Registered before the results were observed.** The commit history shows this
+section committed ahead of the results.
 
-## 假设
+## Hypothesis
 
-当前两个选项过于粗粒度：
-1. 保持 `slot_soft`：保住 payload paraphrase 鲁棒性，但品类 pivot 受损（0.9150）。
-2. `soft_needs_credible=True`：修好 pivot（0.9237），但**封锁所有 pivot 之前的软证据**，
-   payload 鲁棒性下降（0.8777→0.8617 / 0.8982→0.8929 / 0.8842→0.8737）。
+The current two options are too coarse-grained:
+1. Keep `slot_soft`: preserves payload-paraphrase robustness, but the category
+   pivot suffers (0.9150).
+2. `soft_needs_credible=True`: fixes the pivot (0.9237), but **blocks all soft
+   evidence from before the pivot**, so payload robustness falls (0.8777 to
+   0.8617 / 0.8982 to 0.8929 / 0.8842 to 0.8737).
 
-**假设**：用户已经告诉了我们哪一部分作废。只对**被明确点名放弃的 span**
-（"forget shoes slippers" → `shoes slippers`）关闭 soft-rescue，
-其余旧证据（color / material）仍可 soft-match，即可同时拿到两边。
+**Hypothesis:** the user has already told us which part is void. Disabling
+soft-rescue only for the **explicitly named abandoned span** ("forget shoes
+slippers" gives `shoes slippers`), while other old evidence (colour, material)
+can still soft-match, should obtain both benefits at once.
 
-## 预测（观测前写定）
+## Predictions (written before observation)
 
-| 指标 | 预测 |
+| metric | prediction |
 |---|---|
-| override_category | ≈ 0.923，与 `soft_needs_credible` / `slot_soft=0` 相当（基线 0.9150） |
-| payload_soft | ≈ 0.8777（保持默认水平，**不**掉到 0.8617） |
-| payload_shuffle | ≈ 0.8982 |
-| payload_drop | ≈ 0.8842 |
-| clean | 0.928508 不变 |
-| compat `ask_policy="other"` | 0.928708 逐位不变 |
-| override_genuine | ≈ 0.9220 不变 |
+| override_category | about 0.923, comparable to `soft_needs_credible` / `slot_soft=0` (baseline 0.9150) |
+| payload_soft | about 0.8777 (holds at the default level, **not** dropping to 0.8617) |
+| payload_shuffle | about 0.8982 |
+| payload_drop | about 0.8842 |
+| clean | 0.928508 unchanged |
+| compat `ask_policy="other"` | 0.928708 unchanged digit for digit |
+| override_genuine | about 0.9220 unchanged |
 
-**证伪条件**：若 override_category 未显著高于 0.9150，或任一 payload 风格跌到
-blanket gate 的水平，则该假设被否决，回到二选一。
+**Falsification condition:** if `override_category` is not significantly above
+0.9150, or if any payload style falls to the blanket gate's level, the hypothesis
+is rejected and we return to choosing one of the two.
 
-## 预注册实验结果：假设成立，且严格优于两个旧选项
+## Pre-registered experiment result: the hypothesis holds, and is strictly better than both old options
 
-| 指标 | 预测 | 实测 | |
+| metric | prediction | measured | |
 |---|---|---|---|
-| override_category | ≈0.923 | **0.924458 ± 0.0019** | ✅ 且高于 blanket gate（0.923708）与 slot_soft=0（0.923708） |
-| payload_soft | ≈0.8777 | **0.8777** | ✅ 与默认逐位相同 |
-| payload_shuffle | ≈0.8982 | **0.8982** | ✅ 逐位相同 |
-| payload_drop | ≈0.8842 | **0.8842** | ✅ 逐位相同 |
-| clean | 0.928508 | **0.928508** | ✅ |
-| override_genuine | ≈0.9220 | **0.921971** | ✅ 且高于 blanket gate（0.921461） |
+| override_category | about 0.923 | **0.924458 +/- 0.0019** | confirmed, and above both the blanket gate (0.923708) and `slot_soft=0` (0.923708) |
+| payload_soft | about 0.8777 | **0.8777** | confirmed, identical to the default digit for digit |
+| payload_shuffle | about 0.8982 | **0.8982** | confirmed, digit for digit |
+| payload_drop | about 0.8842 | **0.8842** | confirmed, digit for digit |
+| clean | 0.928508 | **0.928508** | confirmed |
+| override_genuine | about 0.9220 | **0.921971** | confirmed, and above the blanket gate (0.921461) |
 
-blanket gate 在三种 payload 风格上要付 0.0160 / 0.0053 / 0.0105；
-**span 抑制一分不付**。因为「哪一部分作废」是用户自己说的，不需要我们去猜。
-`suppress_abandoned=True` 已设为默认。
+The blanket gate costs 0.0160 / 0.0053 / 0.0105 across the three payload styles;
+**span suppression costs nothing**, because *which part is void* was stated by the
+user and does not have to be guessed. `suppress_abandoned=True` is now the
+default.
 
 ---
 
-# Open-world 证据抽取（审查 item 5）
+# Open-world evidence extraction (review item 5)
 
-原逻辑是**高 precision、低 recall** 的解析器：模板解析不出来 ⇒ 没有 category /
-phrase ⇒ UNCERTAIN ⇒ 完全丢弃。对未知的敷衍很安全，但**对未知的真实约束同样丢弃**。
+The original logic was a **high-precision, low-recall** parser: if the template
+did not parse, there was no category and no phrase, so the turn became UNCERTAIN
+and was discarded entirely. That is safe against unknown stonewalling, but it
+**discards unknown real constraints just as readily.**
 
-现在模板失败后再对原句跑 slot 正则 + 特征词表 + 否定检测；
-**抽到明确 attribute/value 才标 INFORMATIVE**，否则才落 UNCERTAIN。
-抽取到的证据是 `hardness="soft"`、`confidence=0.6`，**低于模板证据**，不等权。
+Now, when the template fails, the raw sentence is run through the slot regular
+expressions plus a feature lexicon plus negation detection; **INFORMATIVE is
+assigned only when a definite attribute/value is extracted**, otherwise it still
+falls to UNCERTAIN. Extracted evidence carries `hardness="soft"` and
+`confidence=0.6`, **below template evidence**, so it is not weighted equally.
 
-| 输入 | 抽取结果 |
+| input | extraction |
 |---|---|
 | "Leather would be ideal." | material=leather (+) |
 | "I'd love something blue." | color=blue (+) |
 | "Mostly for hiking." | use_case=hiking (+) |
 | "Something waterproof would help." | feature=waterproof (+) |
 | "I need it machine washable." | feature=machine washable (+) |
-| **"Nothing too formal."** | **use_case=formal (−1)** 否定被识别 |
+| **"Nothing too formal."** | **use_case=formal (-1)** -- the negation is recognized |
 
-9 条敷衍措辞（含 holdout 六句）**全部零抽取**，仍判 UNCERTAIN。
-clean 0.928508 与 compat 0.928708 均不变（clean 上模板永远解析成功，此路径不触发）。
-
----
-
-# Holdout 状态：已消费（审查 item 4）
-
-seeds 12–31 + 那六句未见措辞**已经向开发提供了反馈**
-（暴露了 `MORE_RE` 只认字面 "more" 的缺口），因此：
-
-- 该组合**不再是 untouched holdout**，不得用于后续调参；
-- 六句措辞已并入 `tests/test_agent.py` 的开发回归（`OpenWorldEvidenceTest.UNINFORMATIVE`）；
-- **下一轮调参前必须新建 sealed phrasing set**，并在使用前只运行一次。
-
-已记录的 holdout 结论仍然有效——它验证的是**当时冻结的 Phase 1 配置**，
-那次验证本身没有被污染。
-
-## 对外表述口径（审查要求）
-
-> **Dual-route control plane 已完成；Buying/Browsing 的 route-specific
-> retrieval data planes 尚未实现。** Phase 2A 完成的是路由标签语义、
-> 证据驱动的路由转移、配置贯通与可观测性；两条路由的默认权重仍然相同，
-> 没有 facet/filter 路、没有 dense 路、没有 route fusion。
-> **不得把 Phase 2A 写成 Pillar I 已完成。**
+Nine stonewalling phrasings (including the six holdout sentences) extract
+**nothing at all** and still classify as UNCERTAIN. Clean 0.928508 and compat
+0.928708 are both unchanged (on clean the template always parses, so this path
+never fires).
 
 ---
 
-# Phase 1.5 加固（审查第二轮：四个语义缺口）
+# Holdout status: consumed (review item 4)
 
-前一轮我**说过头了**。以下四条批评全部属实，已逐条核实并修复。
+Seeds 12-31 plus those six unseen phrasings **have already fed back into
+development** (they exposed the gap where `MORE_RE` only accepts a literal
+"more"), and therefore:
 
-## 1. `confidence` 此前是只写字段（属实）
+- that combination is **no longer an untouched holdout** and must not be used for
+  further tuning;
+- the six phrasings have been merged into the development regression in
+  `tests/test_agent.py` (`OpenWorldEvidenceTest.UNINFORMATIVE`);
+- **a new sealed phrasing set must be created before the next round of tuning**,
+  and run exactly once before use.
 
-全代码中 `confidence` 只在写入处出现，**从未参与打分**。所以
-「自然语言抽取的证据永远不会与模板证据同权」这句话当时**不成立**。
+The holdout conclusions already recorded remain valid -- they validated the
+**Phase 1 configuration as frozen at that time**, and that validation itself was
+not contaminated.
 
-现已让它真正缩放证据权重：`f_phrase` / `f_exact` / `f_field` 按每条短语的
-confidence 加权（分母为 confidence 之和），模板证据 1.0、open-world 抽取 0.6。
-新增回归测试 `test_confidence_is_actually_read_not_just_stored`：
-**只改 confidence 必须改变排序**，否则测试失败。
-clean 不变（clean 上所有 confidence 都是 1.0，等价于原式）。
+## Required external wording (review requirement)
 
-## 2. 负向约束此前只识别、不执行（属实）
+> **The dual-route control plane is complete; the Buying/Browsing route-specific
+> retrieval data planes are not implemented.** What Phase 2A completed is routing
+> label semantics, evidence-driven route transitions, configuration plumbing and
+> observability; the two routes still share identical default weights, and there
+> is no facet/filter route, no dense route and no route fusion.
+> **Phase 2A must not be written up as Pillar I being complete.**
 
-`SlotValue.usable` 要求 `polarity > 0`，因此 `Nothing too formal` 生成的
-`polarity=-1` 槽位既不进查询、也不扣分——**是「识别 negation」而非「处理 negation」**。
+---
 
-现已增加独立负向通道：`f_neg` = 候选命中被拒约束的比例，按 `w_neg=2.0` **扣分**。
-负向证据**永不进入查询**（拒绝不是检索词）。
-**按打分而非过滤实现**：错误抽取的负约束绝不能清空候选池；
-高置信硬过滤 + rescue lane 留待 Phase 2B 的 Buying safe-filter 一并设计。
+# Phase 1.5 hardening (second review round: four semantic gaps)
 
-## 3. override 判定器此前不统一（属实）
+The previous round **overstated things**. All four criticisms below are correct,
+and each has been verified and fixed.
 
-`respond()` 用 `is_override()`，而 `classify_reply()` 与 `_route()` 仍直接用旧的
-`OVERRIDE_RE`——同一条消息可能被状态机判为 override、被 outcome 记成
-informative/uncertain、route 又不是 override，污染 dry-streak 与遥测。
-三处已统一到 `is_override()`，并加 `OverrideDetectorUnityTest`
-断言三个调用点在 12 条真/假阳性上**结论一致**。
+## 1. `confidence` was a write-only field (correct)
 
-## 4. abandoned-span 此前只关 soft rescue（属实）—— 现已实现真正的定向擦除
+Across the whole codebase, `confidence` appeared only where it was written and
+**never participated in scoring**. So the claim that "evidence extracted from
+natural language never carries the same weight as template evidence" **was not
+true at the time**.
 
-此前被放弃的槽位仍 `active=True`、仍在 `phrases`/`terms`、仍参与
-BM25/exact/phrase/field/IDF 打分。**「抑制 soft-rescue」确实不等于 slot erasure。**
+It now genuinely scales evidence weight: `f_phrase` / `f_exact` / `f_field` are
+weighted by each phrase's confidence (with the sum of confidences as the
+denominator), template evidence at 1.0 and open-world extraction at 0.6. A new
+regression test, `test_confidence_is_actually_read_not_just_stored`, requires
+that **changing only the confidence changes the ranking**, and fails otherwise.
+Clean is unchanged (every confidence there is 1.0, which is equivalent to the
+original formula).
 
-不是改措辞，而是把它做出来并量化：
+## 2. Negative constraints were recognized but never enforced (correct)
 
-| 策略 | override_category | clean | payload soft/shuffle/drop |
+`SlotValue.usable` requires `polarity > 0`, so the `polarity=-1` slot generated by
+"Nothing too formal" neither entered the query nor deducted anything -- that is
+**"recognizing negation", not "handling negation"**.
+
+An independent negative channel has been added: `f_neg` is the share of a
+candidate's hits on rejected constraints, **deducted** with `w_neg=2.0`. Negative
+evidence **never enters the query** (a rejection is not a search term).
+**Implemented by scoring rather than filtering:** an incorrectly extracted
+negative constraint must never empty the candidate pool. A high-confidence hard
+filter plus a rescue lane is left to be designed together with Phase 2B's Buying
+safe-filter.
+
+## 3. The override detector was not unified (correct)
+
+`respond()` used `is_override()`, while `classify_reply()` and `_route()` still
+used the old `OVERRIDE_RE` directly -- so the same message could be treated as an
+override by the state machine, recorded as informative/uncertain by the outcome,
+and not be an override for routing, contaminating the dry-streak counter and the
+telemetry. All three now go through `is_override()`, with an
+`OverrideDetectorUnityTest` asserting that the three call sites **agree** on 12
+true and false positives.
+
+## 4. The abandoned span previously only disabled soft rescue (correct) -- real targeted erasure is now implemented
+
+Previously an abandoned slot was still `active=True`, still in `phrases`/`terms`,
+and still contributed to BM25/exact/phrase/field/IDF scoring. **"Suppressing
+soft-rescue" really is not the same as slot erasure.**
+
+Rather than changing the wording, it was built and quantified:
+
+| policy | override_category | clean | payload soft/shuffle/drop |
 |---|---|---|---|
-| 无抑制 | 0.915013 ± 0.0066 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
-| span 抑制 soft-rescue | 0.924458 ± 0.0019 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
-| **span 定向擦除（新默认）** | **0.928308 ± 0.0000** | **0.928508** | **0.8777 / 0.8982 / 0.8842** |
-| 全量擦除 `on_override="slot"` | 0.9010 | 0.925173 | — |
+| no suppression | 0.915013 +/- 0.0066 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
+| span suppression of soft-rescue | 0.924458 +/- 0.0019 | 0.928508 | 0.8777 / 0.8982 / 0.8842 |
+| **span-targeted erasure (new default)** | **0.928308 +/- 0.0000** | **0.928508** | **0.8777 / 0.8982 / 0.8842** |
+| full erasure `on_override="slot"` | 0.9010 | 0.925173 | — |
 
-**定向擦除严格占优**：override_category 达到 0.9283（HR 0.995 / MRR 0.839，
-已是 clean 水平），clean 与三种 payload 改写**逐位不变**。
-关键区别是**范围**：擦除用户点名放弃的 span 有效；
-在 override 时擦除一切（0.9010）无效。措辞因此可以诚实地写成
-**span-targeted dynamic slot erasure**，并附上与全量擦除的对照。
+**Targeted erasure strictly dominates:** `override_category` reaches 0.9283
+(HR 0.995 / MRR 0.839, already at clean levels), while clean and all three
+payload rewordings are **unchanged digit for digit**. The decisive difference is
+**scope**: erasing the span the user named is effective, erasing everything on an
+override (0.9010) is not. The wording can therefore honestly be
+**span-targeted dynamic slot erasure**, presented alongside the comparison with
+full erasure.
 
-## 5. 账本历史有效性（属实）
+## 5. Ledger historical validity (correct)
 
-`lab/results.jsonl` 62 行中 50 行仍是旧 schema，且**没有任何一行真正记录过
-`agent_commit=1d5718c`**——我之前只是现场调用函数验证，从未落盘。
+Of the 62 rows in `lab/results.jsonl`, 50 were still the old schema, and **no row
+had ever actually recorded `agent_commit=1d5718c`** -- I had only called the
+function live to verify it and never persisted anything.
 
-`lab/migrate_results.py`：**不改写、不删除任何测量值**，只按内容分类补标
-`schema_version` / `self_describing` / `provenance_note`。
-结果：schema 2（自描述）12 行，schema 1（已标注「无法仅凭此行复现」）50 行；
-`pre-phase1-baseline` 行显式写明 agent_commit 是
-「asserted by tag, NOT recorded at run time」。
-并补录了一条**真正的** isolated baseline：
-`agent_commit=1d5718c`、`agent_sha256=0e6fe9a0809a8444`、score=0.711598。
+`lab/migrate_results.py` **rewrites nothing and deletes no measurement**; it only
+classifies rows by content and annotates `schema_version` / `self_describing` /
+`provenance_note`. Result: 12 rows at schema 2 (self-describing) and 50 at schema
+1 (annotated "cannot be reproduced from this row alone"); the
+`pre-phase1-baseline` rows say explicitly that the `agent_commit` is "asserted by
+tag, NOT recorded at run time". A **genuine** isolated baseline was also recorded:
+`agent_commit=1d5718c`, `agent_sha256=0e6fe9a0809a8444`, score 0.711598.
 
-## 6. 次要项
+## 6. Minor items
 
-- `_HASH_CACHE` 改为按 `(path, mtime_ns, size)` 缓存，避免同进程内文件被改后哈希过期。
-- `Agent.close()` **不再清空全局 catalog cache**——那会让仍在使用同一 catalog 的
-  另一个 Agent 的 SQLite 连接失效。它现在只清自己的 session；
-  进程级拆除仍用 `clear_catalog_cache()`。
-- **预注册措辞更正**：`11b5563` 同时包含实现与预测，属于
-  **"predictions committed before measurement"**，
-  **不是** protocol-only 的强隔离预注册。不再按后者宣传。
+- `_HASH_CACHE` is now keyed by `(path, mtime_ns, size)` so a hash cannot go stale
+  when a file is modified within the same process.
+- `Agent.close()` **no longer clears the global catalog cache** -- doing so would
+  invalidate the SQLite connection of another Agent still using the same catalog.
+  It now clears only its own sessions; process-level teardown still uses
+  `clear_catalog_cache()`.
+- **Pre-registration wording corrected:** `11b5563` contains both the
+  implementation and the predictions, which makes it
+  **"predictions committed before measurement"** and **not** a strongly isolated
+  protocol-only pre-registration. It is no longer advertised as the latter.
 
 ---
 
-# Phase 1.5B（第三轮审查：confidence 数学、negation 评测、干净重录）
+# Phase 1.5B (third review round: confidence mathematics, negation evaluation, a clean re-record)
 
-## 1. confidence 此前只做「相对分配」，不是绝对置信度（属实）
+## 1. `confidence` was doing "relative allocation", not absolute confidence (correct)
 
-原式 `sum(匹配的 confidence) / sum(所有 confidence)`。**只有一条约束时分子分母
-相消**：0.1/0.1 = 0.6/0.6 = 1.0/1.0 = 1.0，单条低置信抽取仍拿满额分。
-我原来的测试也只比较了 dataclass 里的两个数字，**即使排序完全忽略 confidence 也会通过**。
+The original formula was `sum(confidence of matches) / sum(all confidences)`.
+**With only one constraint the numerator and denominator cancel:** 0.1/0.1 =
+0.6/0.6 = 1.0/1.0 = 1.0, so a single low-confidence extraction still scored full
+credit. My original test also only compared two numbers inside the dataclass, so
+**it would have passed even if ranking ignored confidence entirely.**
 
-已改为**以短语数量为分母**，confidence 成为绝对折扣。实测（P2 = 丝巾，正向证据 "silk"）：
+It now uses the **phrase count as the denominator**, making confidence an absolute
+discount. Measured (P2 = a silk scarf, positive evidence "silk"):
 
 | confidence | 1.0 | 0.6 | 0.1 |
 |---|---|---|---|
-| P2 得分 | **7.0000** | **4.2000** | **0.7000** |
+| P2 score | **7.0000** | **4.2000** | **0.7000** |
 
-负向同理（w_neg=5）：confidence 0.0 / 0.3 / 1.0 → 0.0 / −1.5 / −5.0。
-confidence 也已接入 soft overlap 与 slot_soft 路径。
-新增 `score_candidates()` 暴露分数，测试改为**断言分数变化**而非仅比较排名或字段。
+The negative side behaves the same way (with `w_neg=5`): confidence 0.0 / 0.3 /
+1.0 gives 0.0 / -1.5 / -5.0. Confidence is now also wired into the soft-overlap
+and `slot_soft` paths. A new `score_candidates()` exposes the scores, and the
+tests now **assert score changes** rather than merely comparing ranks or fields.
 
-## 2. 负向约束：已接入排序，并已建立场景评测
+## 2. Negative constraints: wired into ranking, and now evaluated by scenario
 
-`f_neg` 现在**按槽位 confidence 加权**（低置信抽取不得与明确拒绝同权）。
+`f_neg` is now **weighted by each slot's confidence** (a low-confidence extraction
+must not carry the same weight as an explicit rejection).
 
-新增两个场景：`negative_preference`（拒绝一个**目标不具备**的属性，是纯信号）
-与 `negation_scope_holdout`（**全新 sealed 集**，混入「限定性肯定」）。
+Two new scenarios: `negative_preference` (rejecting an attribute **the target does
+not have**, which is pure signal) and `negation_scope_holdout` (**a brand-new
+sealed set**, mixing in restrictive affirmatives).
 
-**发现并修复了一个真实的 scope bug**（审查预判正确）：
+**A real scope bug was found and fixed** (the review predicted it correctly):
 
-| 输入 | 修复前 | 修复后 |
+| input | before the fix | after the fix |
 |---|---|---|
-| "Nothing but leather." | leather = **−1**（错，实为「只要皮革」） | leather = +1 |
-| "Not only leather." | leather = **−1**（错） | leather = +1 |
-| "Leather, not synthetic." | 只抽到 +leather | +leather **且** −synthetic |
+| "Nothing but leather." | leather = **-1** (wrong; it means "only leather") | leather = +1 |
+| "Not only leather." | leather = **-1** (wrong) | leather = +1 |
+| "Leather, not synthetic." | only +leather extracted | +leather **and** -synthetic |
 
-在 `w_neg=2.0` 下，这个 bug 会把一条正向约束**反转成惩罚**，主动打压正确商品。
-已加 `RESTRICTIVE_RE` 守卫 + 8 条单元测试。
+At `w_neg=2.0` this bug would **invert a positive constraint into a penalty**,
+actively suppressing the correct product. A `RESTRICTIVE_RE` guard plus 8 unit
+tests have been added.
 
-**w_neg 的实证结论（诚实版）**：
+**The empirical conclusion about `w_neg` (honest version):**
 
-| w_neg | 0 | 1 | 2（默认） | 4 |
+| w_neg | 0 | 1 | 2 (default) | 4 |
 |---|---|---|---|---|
 | negative_preference | 0.698583 | 0.699256 | 0.700683 | 0.700683 |
 
-**+0.0021，而 sd = 0.019 —— 与零无法区分。** sealed scope holdout 上
-w_neg=0 与 2 得分完全相同（0.700124），即**未造成伤害**。
-原因已量化：带 active 拒绝的轮次中，**只有 0.8% / 0.0% 的已展示候选真的命中被拒值**——
-能进 top-10 的候选本来就很少带有被拒属性。
-**结论：负向通道正确、安全，但在本目录/模拟器上近乎惰性。**
-保留 `w_neg=2.0`（已饱和、无害），但**不得声称它带来了可测收益**。
-这一点也影响 Phase 2B 排序：hard-negative filter 可过滤的东西本来就很少。
+**+0.0021 against sd = 0.019 -- indistinguishable from zero.** On the sealed scope
+holdout, `w_neg=0` and `w_neg=2` score identically (0.700124), i.e. **it does no
+harm**. The reason has been quantified: on turns with an active rejection, **only
+0.8% / 0.0% of shown candidates actually match the rejected value** -- candidates
+that reach the top 10 rarely carry a rejected attribute in the first place.
+**Conclusion: the negative channel is correct and safe, but nearly inert on this
+catalog and simulator.** `w_neg=2.0` is kept (saturated and harmless), but **no
+measurable gain may be claimed for it.** This also affects Phase 2B's priorities:
+a hard-negative filter has very little to filter.
 
-**sealed holdout 又暴露一个缺陷（记录、不修）**：
-"I'd rather steer clear of wool." 未被识别为否定（`NEGATION_RE` 没有 "steer clear of"）。
-**不在 holdout 上修**；已从开发单元测试中剔除该措辞，留给下一轮开发集。
-（教训重申：把 holdout 措辞写进单元测试就等于烧掉 holdout。）
+**The sealed holdout exposed another defect (recorded, not fixed):**
+"I'd rather steer clear of wool." is not recognized as a negation (`NEGATION_RE`
+has no "steer clear of"). **Not fixed on the holdout**; the phrasing has been
+removed from the development unit tests and left for the next round's development
+set. (Lesson restated: writing holdout phrasings into unit tests burns the
+holdout.)
 
-## 3. 干净重录
+## 3. Clean re-record
 
-前一轮 targeted-erasure 的关键数字是 dirty run（`agent_commit=worktree`,
-`code_dirty=true`）。按我们自己的纪律，那些数字**当时不可引用**。
-已在干净 commit 上重录。**重录本身又抓到一个静默失效的开关**：
-`suppress_abandoned=False` 与默认同分（0.928308），因为 `_suppress_abandoned()`
-无视该开关照常运行，只有 `_rerank` 的 blocklist 受它控制——**消融的「关闭」臂
-其实从未关闭**。这与 `"route": false`、`term_cap` 读 `self.cfg` 属同一类缺陷。
-修好后的干净重录（seeds 7–11，`tag=phase15b-ablation-fixed`，schema 2，`code_dirty=false`）：
+The previous round's key targeted-erasure numbers came from a dirty run
+(`agent_commit=worktree`, `code_dirty=true`). By our own discipline those numbers
+**were not citable at the time**. They have been re-recorded on a clean commit.
+**The re-record itself caught another silently void switch:**
+`suppress_abandoned=False` scored the same as the default (0.928308), because
+`_suppress_abandoned()` ran regardless of the switch and only `_rerank`'s
+blocklist was controlled by it -- **the ablation's "off" arm was never actually
+off.** That is the same class of defect as `"route": false` and `term_cap`
+reading `self.cfg`.
 
-| 策略 | override_category | clean |
+The fixed clean re-record (seeds 7-11, `tag=phase15b-ablation-fixed`, schema 2,
+`code_dirty=false`):
+
+| policy | override_category | clean |
 |---|---|---|
-| 不抑制 | 0.914603 ± 0.0067 | 0.928508 |
-| 仅抑制 soft-rescue | 0.924458 ± 0.0019 | 0.928508 |
-| **定向擦除（默认）** | **0.928308 ± 0.0000** | **0.928508** |
-| 全量擦除 `on_override="slot"` | 0.923723 | 0.925173 |
+| no suppression | 0.914603 +/- 0.0067 | 0.928508 |
+| soft-rescue suppression only | 0.924458 +/- 0.0019 | 0.928508 |
+| **targeted erasure (default)** | **0.928308 +/- 0.0000** | **0.928508** |
+| full erasure `on_override="slot"` | 0.923723 | 0.925173 |
 
-结论不变且现在可引用：**定向擦除 > 仅抑制 soft-rescue > 不抑制**，
-且定向擦除对 clean 与三种 payload 改写零代价。
+The conclusion is unchanged and now citable: **targeted erasure > soft-rescue
+suppression only > no suppression**, and targeted erasure costs nothing on clean
+or on any of the three payload rewordings.

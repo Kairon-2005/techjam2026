@@ -1,0 +1,84 @@
+# Linux portability for score_default. NOT YET RUN -- this workflow cannot
+# execute until the repository is published, and no claim is made about its
+# result before it does. docs/PORTABILITY.md records its status as PENDING.
+#
+# It checks the SCORED path only. The optional semantic showcase is deliberately
+# excluded: its ONNX artifact is arm64-quantized, so a Linux x86-64 runner would
+# be measuring something we do not ship.
+name: portability (score_default, Linux)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  score-default:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor: starter/context.py uses dataclass(slots=True),
+        # which 3.9 does not have. Verified by a concrete failure on 3.9.6.
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Confirm no dependencies are needed
+        run: |
+          python -m pip install -r requirements.txt
+          python -c "import sqlite3, sys; \
+            c = sqlite3.connect(':memory:'); \
+            c.execute('CREATE VIRTUAL TABLE t USING fts5(x)'); \
+            print('FTS5 available on', sys.version.split()[0])"
+
+      - name: Download the organizer catalog and verify its checksum
+        run: |
+          curl -fsSL -o catalog.jsonl.gz \
+            https://github.com/TechJam2026/techjam-conversational-search/releases/download/participant-kit/catalog.jsonl.gz
+          echo "07fd142631fd6b03e2b4d09988c3eb7d53720e9d57010c79db48eeaada50a8f8  catalog.jsonl.gz" | sha256sum -c -
+          gzip -d catalog.jsonl.gz
+          mv catalog.jsonl data/catalog.jsonl
+          echo "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67  data/catalog.jsonl" | sha256sum -c -
+
+      - name: Full test suite
+        run: python -m unittest discover -s tests -t .
+
+      - name: Official evaluator reproduces 0.932067 exactly
+        run: |
+          python -m evaluator.local_evaluator \
+            --catalog data/catalog.jsonl --dataset data/public_set.jsonl \
+            --output results.json
+          python - <<'PY'
+          import json, sys
+          got = json.load(open("results.json"))
+          want = {"recommended_technical_score": 0.932067, "hit_rate_at_10": 0.995,
+                  "mrr": 0.852556, "mttc": 2.06}
+          bad = {k: (got.get(k), v) for k, v in want.items() if got.get(k) != v}
+          print(json.dumps({k: got.get(k) for k in want}, indent=2))
+          if bad:
+              print("MISMATCH:", bad); sys.exit(1)
+          print("exact match on", sys.version.split()[0])
+          PY
+
+      - name: score_default must import nothing third-party
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
+          import starter.agent as A
+          from pathlib import Path
+          evaluate(A.Agent("data/catalog.jsonl"),
+                   load_jsonl(Path("data/public_set.jsonl"))[:5],
+                   *catalog_index(Path("data/catalog.jsonl")))
+          loaded = [m for m in ("numpy", "onnxruntime", "tokenizers", "torch",
+                                "transformers") if m in sys.modules]
+          print("third-party loaded:", loaded or "none")
+          assert not loaded, loaded
+          PY

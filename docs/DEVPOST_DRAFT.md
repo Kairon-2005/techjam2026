@@ -10,9 +10,10 @@ checkout and traceable to a ledger row.
 A shopping assistant that asks a good question is worth more than one that
 returns a longer list. The weak starter scores **0.107** — not because it cannot
 find products, but because it never learns what the customer actually wants.
-Recall@200 turned out to be **1.000** from the very beginning: the target was
-almost always already in the pool. **The problem was never retrieval. It was
-knowing what to keep, what to ask, and how deep to look.**
+On the public development set, recall@200 turned out to be **1.000** from the
+very beginning: the target was already in the pool. **On that corpus the problem
+was never retrieval. It was knowing what to keep, what to ask, and how deep to
+look.**
 
 ## What it does
 
@@ -32,10 +33,12 @@ context decide how deep to retrieve**.
 
 ## 35% — Technical Execution
 
-**Six modules, ~4,800 lines, Python standard library only.** SQLite FTS5 for
-retrieval, deterministic feature reranking, no weights on the scored path.
-**783 tests**, including exact end-to-end score locks and a configuration lock
-that asserts every shipped default by name and value.
+**`score_default`: six modules, ~4,800 lines, Python standard library only.**
+SQLite FTS5 for retrieval and deterministic feature reranking, with **no learned
+or neural model weights** on the scored path -- the nine ranking weights are
+hand-configured scalars, set by measurement and frozen. **812 tests executed
+with 1 environment-dependent skip**, including exact end-to-end score locks and
+a configuration lock that asserts every shipped default by name and value.
 
 ### Runtime Context Programming (the core idea)
 
@@ -74,7 +77,10 @@ visible Top-10 on eligible early Browsing turns. Because it is a **permutation o
 the returned set**, and the evaluator's hit test is set membership, **HR@10 and
 MTTC are provably invariant and only MRR can move** — derived from the
 evaluator's source, then verified exactly at every λ and on the full-Agent run.
-**15.95 ms p95**, ~8.5% of turns, byte-exact A0 fallback on any failure.
+**15.95 ms p95 on Darwin arm64**, ~8.5% of turns, byte-exact A0 fallback on any
+failure. The artifact is a **4.5 MB ONNX file** in a **5.46 MB bundle**, and the
+quantization targets arm64 -- no cross-platform semantic performance is
+claimed.
 
 ### Reproducible negative-result discipline
 
@@ -138,10 +144,12 @@ credentials**.
 **MTTC 2.06** means customers reach their product in about two turns — the
 metric that actually maps to abandonment.
 
-**It degrades honestly.** Every optional capability falls back to the
-deterministic core: no model, no runtime, no artifact, an inference failure, a
-malformed model output — all return byte-identical A0 behaviour. There is no
-configuration in which this system fails closed.
+**The optional semantic reranker degrades honestly, and that claim is scoped.**
+With `showcase_semantic` enabled, a missing model directory, a load failure, an
+inference failure or a non-permutation from the scorer each return **byte-exact
+A0 ordering**, with a distinct reason code. That is a verified property of the
+semantic reranker specifically. It is not a claim that every component of the
+system degrades gracefully under every possible failure.
 
 **The evidence discipline is the transferable part.** Leases, append-only
 ledgers, one citability predicate, pre-registration, and negative results kept
@@ -161,7 +169,8 @@ copy, and it is what makes 0.932067 a number rather than a claim.
 | warm turn | 25.7 ms p50 · 39.3 ms p95 |
 | full 200-session evaluation | 30.3 s |
 | peak RSS | 703 MB |
-| verified on | Python 3.14.6, darwin/arm64 — and only there, stated as such |
+| verified on | `score_default`: Python 3.14.6, darwin/arm64 — and only there, stated as such |
+| optional semantic | measured on Darwin arm64 only; the ONNX file is arm64-quantized |
 
 **One command reproduces the score:**
 
@@ -200,6 +209,125 @@ what **not** to say.
 
 ---
 
+## Official submission fields
+
+### Development tools actually used
+
+| tool | use |
+|---|---|
+| Python 3.14.6 (CPython) | the only interpreter this was measured on; the code targets 3.10+ |
+| `sqlite3` with FTS5 (standard library) | the retrieval index |
+| `unittest` (standard library) | the 812-test suite |
+| `git` (worktrees, tags, append-only ledgers) | isolation for every measurement, and the provenance chain |
+| `venv` + `pip` | **only** for the optional semantic showcase |
+| macOS on Apple silicon (Darwin arm64) | the measurement host |
+| Claude Opus 5 (Anthropic) | a paired engineering and review assistant, used under the participant's direction; commits are co-authored where that assistance was material |
+
+Nothing else. No cloud training, no experiment-tracking service, no hosted
+vector database, no annotation platform.
+
+### APIs used
+
+**There is no external runtime API. The scored agent makes zero network calls,
+holds no credentials, and spends zero tokens.** This is verified from a clean
+checkout: third-party packages loaded during a full 200-session evaluation --
+**none**.
+
+Two network calls exist at **preparation time only**, and neither is on any
+runtime path:
+
+| API | when | why |
+|---|---|---|
+| Hugging Face file download | once, to fetch the optional cross-encoder at a **pinned revision SHA** | `lab/r1_artifact.py`; byte counts checked against a committed manifest, sha256 recorded. The artifact is now bundled, so even this is no longer required |
+| GitHub Releases | once, to obtain the organizer's `catalog.jsonl.gz` and its `SHA256SUMS` | the catalog is organizer data and is not redistributed by us |
+
+### Libraries and frameworks
+
+**`score_default`: none.** `requirements.txt` contains no packages and says so.
+
+**`showcase_semantic` (optional, off by default):** `onnxruntime==1.24.1`,
+`numpy==2.5.2`, `tokenizers==0.22.2`. Deliberately **no `torch` and no
+`transformers`** -- measured at 53.2 MB of RSS for
+numpy+onnxruntime+tokenizers against 346.1 MB once transformers pulls torch in,
+and a shipped ONNX Runtime component needs neither.
+
+### Datasets and model assets
+
+| asset | what it is | provenance |
+|---|---|---|
+| **Official catalog** `catalog.jsonl` | 50,000 products, `Clothing_Shoes_and_Jewelry` | Amazon Reviews 2023 (McAuley Lab, UCSD), redistributed by the organizer. **Not redistributed by us**; downloaded from the organizer's release and checksum-verified |
+| **Official sessions** `public_set.jsonl` | 200 labeled development sessions | organizer participant kit |
+| **Synthetic supplementary dataset** `supplementary_dev.jsonl` / `supplementary_holdout.jsonl` | 1,000 + 1,000 sessions **we generated** (`supplementary/generate.py`) from the same catalog | **synthetic and ours.** Catalog-metadata-grounded, so numbers on it describe our generator. Never presented as a real-user or official result |
+| **Model** `cross-encoder/ms-marco-TinyBERT-L2-v2` | quantized ONNX cross-encoder, optional and off by default | **Apache-2.0**, pinned revision `81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc`, **4.5 MB ONNX file / 5.46 MB complete bundle**, bundled with its LICENSE and per-file SHA-256. See `docs/MODEL_CARD.md` |
+
+No other model, no fine-tuning, no training of any kind.
+
+### Architecture and the four pillars
+
+Full walkthrough with a Mermaid flow: **`docs/ARCHITECTURE.md`**.
+
+| pillar | enabled in `score_default` | implemented and evaluated, disabled by default |
+|---|---|---|
+| **I** intent routing and hybrid pipeline | Buying/Browsing/Mixed/Override routing, dynamic retarget, BM25 over FTS5, category/facet signals, deterministic funnel, feature reranking | dense candidate source + RRF fusion; **TinyBERT ONNX semantic reranking -- architecture and demo evidence, not part of `score_default`** |
+| **II** multi-turn scenario evolution | typed `SlotValue` state, negation, contradiction safety, abandonment/suppression, request-more rotation, over-generality detection, pool-aware questioning, starvation-aware widening | targeted override erasure |
+| **III** dynamic context programming | **bounded context snapshots with the retrieval controller and the question controller both enabled** | profile normalization and credibility classification, **disabled by default** (`profile_context_mode="off"`, `w_profile=0.0`) because the official profiles showed **no target-discriminating signal** |
+| **IV** evaluation matrix | leases, append-only ledgers, one citability predicate, pre-registration, negative results kept | — |
+
+**Pillar I's semantic-ranking component is satisfied by the optional offline ONNX
+profile**, which reranks the visible Top-10 locally with no network access.
+
+### Cost, latency and memory
+
+Measured from a clean checkout, Python 3.14.6 on Darwin arm64
+(`docs/FINAL_VERIFICATION.md`):
+
+| | `score_default` |
+|---|---|
+| cold start (process start to first response) | 11.4 s |
+| warm turn | 25.7 ms p50 / 39.3 ms p95 |
+| full 200-session evaluation | 30.3 s |
+| peak RSS | 703 MB |
+| tokens | **0** |
+| network calls | **0** |
+| API cost | **$0** |
+
+Optional `showcase_semantic`, on Darwin arm64 only: +15.95 ms p95 for the
+semantic component, +0.42 s cold load, +131.6 MB RSS, invoked on about 8.5% of
+turns.
+
+### Limitations and future work
+
+Full version: **`docs/LIMITATIONS.md`**. In short:
+
+* `w_pop = 4.0` partly encodes a property of **this** evaluation -- public targets
+  sit at the 99.5th popularity percentile because of 5-core sampling. On a corpus
+  without that bias the shipped weights are probably wrong.
+* The supplementary corpus is **synthetic and ours**; `sup-train` and `sup-val`
+  come from the same generator, so a gain there is within-generator only.
+* **A2-10 has no public number** and cannot be given one -- the pre-registration
+  allows exactly one public confirmation, and A1 spent it.
+* **No cross-session memory:** the evaluation API provides no stable user
+  identity, so none was invented.
+* The pipeline **scores rather than filters**, so it cannot *enforce* a hard
+  constraint such as "nothing above $50".
+* Evaluated on **English-language sessions**, one catalog category, 50,000
+  products. Other languages and verticals were not tested.
+* `score_default` measured on **Python 3.14.6 / Darwin arm64**; the optional
+  semantic path on **Darwin arm64** only.
+
+**Future work:** a public-like corpus without 5-core popularity bias; hard
+constraint enforcement; a second confirmation budget so A2-10 can be measured
+rather than eliminated; and portability verification on Linux with Python
+3.10/3.11.
+
+### Team contributions
+
+**Solo entry**, no GPU, no external API budget. Full breakdown:
+**`docs/TEAM_CONTRIBUTIONS.md`**. Contact details are supplied through the
+Devpost submission form rather than published in the repository.
+
+---
+
 ## Challenges we ran into
 
 **We nearly shipped a number we could not defend.** A1 looked like a
@@ -220,8 +348,9 @@ path, not a test artefact. The cache key now carries the capability.
 
 ## What we learned
 
-* Recall was never the bottleneck. **Measure before optimizing** — recall@200 was
-  1.000 on day one.
+* Recall was never the bottleneck **on the public development set**. **Measure
+  before optimizing** — recall@200 was 1.000 there on day one, which is a fact
+  about that corpus and not a general one.
 * A gain on data you generated is a statement about **your generator**.
 * Three of our four largest efforts ship **off**. Knowing which is which required
   more engineering than building them.

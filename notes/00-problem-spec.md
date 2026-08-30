@@ -1,111 +1,137 @@
-# 00 — Track 4 题目规格精读
+# 00 — Close reading of the Track 4 specification
 
-来源：Early Bird 题面 §4 + 参赛包 `docs/competition_specification.md`、`docs/submission_rules.md`、
-`docs/evaluation_config.json`。以参赛包为准（更精确、且是官方冻结产物）。
+Sources: the Early Bird brief section 4, plus the participant kit's
+`docs/competition_specification.md`, `docs/submission_rules.md` and
+`docs/evaluation_config.json`. The participant kit takes precedence -- it is more
+precise and it is the official frozen artefact.
 
-## 任务
+## The task
 
-多轮购物 agent：在**最多 10 轮**内，把一个隐藏的目标商品**尽早、且排名尽可能靠前**地放进 Top-10。
+A multi-turn shopping agent that, within **at most 10 turns**, places a hidden
+target product into the Top-10 **as early and as highly ranked as possible**.
 
-目标来自 Amazon Reviews 2023 的真实购买记录。顾客消息由一张隐藏的 intent card
-（从商品元数据派生）模拟生成——**数据集里没有真实的购物对话**。
+Targets come from real purchase records in Amazon Reviews 2023. Customer messages
+are simulated from a hidden intent card derived from product metadata -- **the
+dataset contains no real shopping conversations.**
 
-## 评分
+## Scoring
 
 ```
-HitRate@10 = 命中会话数 / N
-MRR        = mean(1 / target_rank)，未命中记 0
-MTTC       = mean(首次命中轮次)，未命中记 11
+HitRate@10 = hit sessions / N
+MRR        = mean(1 / target_rank), 0 for a miss
+MTTC       = mean(first hit turn), 11 for a miss
 Efficiency = clip((11 - MTTC) / 10, 0, 1)
 
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
+TechnicalScore = 0.50 x HitRate@10 + 0.30 x MRR + 0.20 x Efficiency
 ```
 
-官方弱基线：HR@10 `0.125` / MRR `0.068034` / MTTC `9.81` / **TechnicalScore `0.10671`**
+Official weak baseline: HR@10 `0.125` / MRR `0.068034` / MTTC `9.81` /
+**TechnicalScore `0.10671`**
 
-评委 rubric（占比）：Technical Execution 35 / Innovation & Problem Insight 20 /
-Impact & Relevance 20 / Feasibility & Practicality 15 / Presentation 10（仅决赛）。
-→ **TechnicalScore 不等于那 35%。** 它是自证材料，工程质量与叙事同样计入。
+Judging rubric (weights): Technical Execution 35 / Innovation and Problem Insight
+20 / Impact and Relevance 20 / Feasibility and Practicality 15 / Presentation 10
+(finals only).
+**TechnicalScore is not the same thing as that 35%.** It is supporting evidence;
+engineering quality and the narrative count just as much.
 
-## 场景分布（两个 split 完全一致）
+## Scenario distribution (identical across both splits)
 
-| 场景 | 占比 | 公开集 n | 私有集 n | 特点 |
+| scenario | share | public n | private n | characteristic |
 |---|---|---|---|---|
-| Buying | 40% | 80 | 320 | 首轮即披露一条 hard constraint |
-| Browsing | 40% | 80 | 320 | 首轮很模糊，只有品类 |
-| Intent Override | 15% | 30 | 120 | 第 3 或第 4 轮替换先前偏好 |
-| Boundary | 5% | 10 | 40 | 顾客可能对某属性无偏好 |
+| Buying | 40% | 80 | 320 | discloses one hard constraint on turn 1 |
+| Browsing | 40% | 80 | 320 | turn 1 is vague, category only |
+| Intent Override | 15% | 30 | 120 | replaces an earlier preference on turn 3 or 4 |
+| Boundary | 5% | 10 | 40 | the customer may have no preference for an attribute |
 
-**公开集与私有集的场景配比相同 → 公开集上的结论可以外推。**
+**The public and private sets have the same scenario mix, so conclusions drawn
+on the public set can be extrapolated.**
 
-## 硬约束
+## Hard constraints
 
-- **10 轮硬上限**，超出直接零分
-- 商品目录**只读**，禁止结构性修改或注入假 ASIN
-- 禁止训练 / 全参微调基座 LLM
-- 禁止部署重型工业向量库，**必须全内存轻量运行**
-- 仅文本：文本目录、结构化元数据、文本对话
-- UI/UX 不计分（纯后端 API + headless pipeline 评测）
+- **A hard 10-turn cap.** Exceeding it scores zero.
+- The product catalog is **read-only**; structural modification or injecting fake
+  ASINs is forbidden.
+- Training or full fine-tuning of a base LLM is forbidden.
+- Deploying a heavyweight industrial vector database is forbidden; it **must run
+  lightweight and fully in memory**.
+- Text only: a text catalog, structured metadata, text dialogue.
+- UI/UX is not scored (a pure backend API evaluated by a headless pipeline).
 
-## ⚠️ 最关键的一条：final scoring 可能断网
+## The single most important clause: final scoring may have no network
 
 > "For official final scoring, organizer policy may disable network access."
 > "The organizer reserves the right to run your submission under CPU, memory,
 > timeout, and network restrictions."
 
-**推论：任何依赖外部 LLM API 的方案都可能在最终评分时直接失效。**
-本项目的设计原则因此确定为：
+**Implication: any approach depending on an external LLM API may simply stop
+working at final scoring.** The design principles for this project follow from
+that:
 
-1. **主路径必须完全本地、零网络、纯 CPU 可跑**
-2. 若引入 LLM，只能作为**可选增强**，且必须有等价的离线 fallback
-3. 提交时必须明确声明是否需要网络（规则要求）
+1. **The main path must be entirely local, make zero network calls, and run on
+   CPU alone.**
+2. If a model is introduced, it may only be an **optional enhancement**, and it
+   must have an equivalent offline fallback.
+3. The submission must state explicitly whether it needs network access (the
+   rules require this).
 
-这一条同时把「别人有钱买 API 额度」的优势也抹平了。
+This clause also flattens the advantage of anyone able to spend money on API
+credits.
 
-## 可见字段
+## Visible fields
 
-`parent_asin`、`title`、`features`、`description`、`price`、`categories`、
-`details`、`average_rating`、`rating_number`、`store`。仅 `parent_asin` 计分。
+`parent_asin`, `title`, `features`, `description`, `price`, `categories`,
+`details`, `average_rating`, `rating_number`, `store`. Only `parent_asin` is
+scored.
 
-> 注意：`average_rating` / `rating_number` 目前**完全没用上**。目标是真实购买记录，
-> 热门度先验很可能对 MRR 有效。
+> Note: `average_rating` and `rating_number` are **currently unused entirely**.
+> Since targets are real purchase records, a popularity prior is likely to help
+> MRR.
 
-`user_profile` 是脱敏聚合：购买频次、评分风格、`preference_tags`。**目前也完全没用上。**
+`user_profile` is an anonymized aggregate: purchase frequency, rating style,
+`preference_tags`. **Also currently unused entirely.**
 
-## 接口契约
+## The interface contract
 
 ```python
 class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None: ...
     def respond(self, session_id: str, user_message: str,
                 turn: int, top_k: int) -> dict:
-        return {"message": str,              # 面向顾客的自然语言
-                "ask_attribute": str | None,  # 模拟器只认这个字段，不解析 message
+        return {"message": str,               # natural language for the customer
+                "ask_attribute": str | None,  # the simulator reads ONLY this
+                                              # field; it never parses `message`
                 "recommendations": [{"parent_asin": "B000..."}],
                 "usage": {"prompt_tokens": int, "completion_tokens": int}}
 ```
 
-- `ask_attribute` ∈ {category, material, color, size, style, brand, budget,
-  feature, use_case, other} 或 `null`
-- 无效 / 重复 ID 会被剔除，只有**前 10 个有效唯一 ID**计分 → 返回垃圾会白白占掉名额
-- 可选的数值 `score` 字段被接受但**忽略**
-- **异常、非法输出、超时都可能直接判为 miss** → 健壮性是硬需求
+- `ask_attribute` is one of {category, material, color, size, style, brand,
+  budget, feature, use_case, other} or `null`.
+- Invalid or duplicate ids are dropped, and only the **first 10 valid unique
+  ids** are scored, so returning junk simply wastes slots.
+- An optional numeric `score` field is accepted but **ignored**.
+- **Exceptions, illegal output and timeouts may all be scored directly as a
+  miss**, so robustness is a hard requirement.
 
-## 官方点名的创新方向（= 评委想看到的）
+## Innovation directions the organizer named (i.e. what judges want to see)
 
-- Buying / Browsing 路由与多路检索
-- 混合检索与语义重排
-- 结构化约束状态、intent override 处理、动态上下文构造
-- **自适应澄清与「提问价值估计」** ← 官方明确点名
-- 使用聚合 profile 的安全个性化
-- 失败检测、策略切换、低延迟、低 token 成本
-- 可解释的推荐理由
+- Buying / Browsing routing and multi-route retrieval
+- Hybrid retrieval and semantic reranking
+- Structured constraint state, intent-override handling, dynamic context
+  construction
+- **Adaptive clarification and "question value estimation"** -- explicitly named
+  by the organizer
+- Safe personalization using the aggregate profile
+- Failure detection, strategy switching, low latency, low token cost
+- Explainable recommendation rationales
 
-## 交付物
+## Deliverables
 
-- 源码 + 安装与复现说明（一条命令跑通官方 harness）
-- 符合接口的 Agent（单一入口文件导出 `Agent`）
-- 简短报告：架构、模型选择、成本、局限、分工
-- 一次完整的多轮会话演示
-- 延迟 / token 用量 / 估算成本的披露
-- Devpost 项目描述 + 公开 GitHub 仓库 + YouTube 演示视频
+- Source plus install and reproduction instructions (one command runs the
+  official harness)
+- An Agent conforming to the interface (a single entry-point file exporting
+  `Agent`)
+- A short report: architecture, model choice, cost, limitations, division of work
+- One complete multi-turn session demonstration
+- Disclosure of latency, token usage and estimated cost
+- A Devpost project description, a public GitHub repository, and a YouTube demo
+  video
