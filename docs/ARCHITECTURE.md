@@ -61,7 +61,7 @@ the question controller, the context snapshot and the profile window all read
 it, so the optional cascade cannot leak into any decision but the visible
 ordering. Second, every dashed or `OFF` edge is a capability that exists, was
 measured, and is disabled; the solid path produced 0.932067 in the detached
-clean-checkout verification at commit `4d85dc5b3d229a6698bea53f61c9ae8c7de539f7`.
+clean-checkout verification at commit `443f6039657278a4afe45a2a50ed2dadba7637d0`.
 
 ## Pillar I — intent routing and the hybrid pipeline
 

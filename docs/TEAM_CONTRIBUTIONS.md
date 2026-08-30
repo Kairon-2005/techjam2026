@@ -15,7 +15,7 @@ Track 4 was chosen **because** of the solo, no-GPU constraint rather than
 despite it: the track's rules cap compute (no base-model fine-tuning, no heavy
 vector database, in-memory only) and ship a deterministic local evaluator, which
 flattens the resource gap. The authoritative clean-checkout run evaluates all
-200 simulated sessions in **31.11 s** on the development host.
+200 simulated sessions in **30.47 s** on the development host.
 
 ## What was built
 
@@ -26,7 +26,7 @@ flattens the resource gap. The authoritative clean-checkout run evaluates all
 | **Optional capabilities** | dense random-indexing retriever + RRF fusion; TinyBERT ONNX cross-encoder cascade — both implemented, measured, shipped off |
 | **Experiment harness** | exclusive leases in isolated worktrees, append-only ledgers, one citability predicate, invalidation records, scenario library, benchmark harness — `lab/` |
 | **Evidence discipline** | 8 phases of pre-registration and results notes — `notes/`, 46 documents |
-| **Tests** | 827, all executed on a committed tree, including exact public-score locks, the configuration lock, and negative tests for every guard |
+| **Tests** | 828, all executed on a committed tree, including exact public-score locks, the configuration lock, and negative tests for every guard |
 | **Packaging** | clean-checkout verification, model card, demo, this documentation |
 
 ## Why the work is award-relevant
@@ -48,7 +48,7 @@ The contribution is the measured combination, not an unverified feature count:
   sessions), MRR **0.852556** and MTTC **2.06**.
 
 That performance set comes from commit
-`4d85dc5b3d229a6698bea53f61c9ae8c7de539f7`, Python 3.14.6 / Darwin arm64.
+`443f6039657278a4afe45a2a50ed2dadba7637d0`, Python 3.14.6 / Darwin arm64.
 Published portability CI independently succeeded on Ubuntu for Python 3.10 and
 3.11 and reproduced 0.932067 exactly: [GitHub Actions run
 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).

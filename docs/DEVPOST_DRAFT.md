@@ -29,12 +29,12 @@ decide how deep to retrieve**.
 |---|---|
 | **TechnicalScore** | **0.932067** (weak baseline 0.10671 — **8.7×**) |
 | HR@10 · MRR · MTTC | 0.995 · 0.852556 · 2.06 turns |
-| cold start · warm turn | 11.755 s · 29.681 ms p50 / 31.139 ms p95 |
+| cold start · warm turn | 11.526 s · 24.366 ms p50 / 26.908 ms p95 |
 | **tokens · network · API cost** | **0 · 0 · $0** |
 
 All headline quality, latency and memory figures below are one consistent set:
 the detached clean-checkout verification of commit
-`4d85dc5b3d229a6698bea53f61c9ae8c7de539f7` on Python 3.14.6 / Darwin arm64.
+`443f6039657278a4afe45a2a50ed2dadba7637d0` on Python 3.14.6 / Darwin arm64.
 The separate [GitHub Actions portability run
 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542)
 succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
@@ -58,7 +58,7 @@ runs locally on CPU with zero API cost.
 **`score_default`: six modules, ~4,800 lines, Python standard library only.**
 SQLite FTS5 for retrieval and deterministic feature reranking, with **no learned
 or neural model weights** on the scored path -- the nine ranking weights are
-hand-configured scalars, set by measurement and frozen. **827 tests, all executed** on a
+hand-configured scalars, set by measurement and frozen. **828 tests, all executed** on a
 committed tree, including exact end-to-end score locks and a configuration lock
 that asserts every shipped default by name and value.
 
@@ -195,10 +195,10 @@ copy, and it is what makes 0.932067 a number rather than a claim.
 | dependencies (scored path) | **none** — `requirements.txt` is empty and says why |
 | network at runtime | **none** |
 | GPU | **none** |
-| cold start | 11.755 s (FTS5 index over 50,000 products) |
-| warm turn | 29.681 ms p50 · 31.139 ms p95 |
-| full 200-session evaluation | 31.11 s |
-| peak RSS | 716.0 MB |
+| cold start | 11.526 s (FTS5 index over 50,000 products) |
+| warm turn | 24.366 ms p50 · 26.908 ms p95 |
+| full 200-session evaluation | 30.47 s |
+| peak RSS | 701.4 MB |
 | verified on | performance set: Python 3.14.6 / Darwin arm64; score/test/dependency gates also pass on Linux Python 3.10/3.11 |
 | optional semantic | measured on Darwin arm64 only; the ONNX file is arm64-quantized |
 
@@ -253,7 +253,7 @@ what **not** to say.
 | Python 3.14.6 (CPython) | authoritative quality/latency/memory run on Darwin arm64 |
 | GitHub Actions, Ubuntu, Python 3.10/3.11 | successful portability matrix for the full suite, exact score and zero-third-party-import gates |
 | `sqlite3` with FTS5 (standard library) | the retrieval index |
-| `unittest` (standard library) | the 827-test suite |
+| `unittest` (standard library) | the 828-test suite |
 | `git` (worktrees, tags, append-only ledgers) | isolation for every measurement, and the provenance chain |
 | `venv` + `pip` | **only** for the optional semantic showcase |
 | macOS on Apple silicon (Darwin arm64) | the measurement host |
@@ -322,10 +322,10 @@ Measured from a clean checkout, Python 3.14.6 on Darwin arm64
 
 | | `score_default` |
 |---|---|
-| cold start (process start to first response) | 11.755 s |
-| warm turn | 29.681 ms p50 / 31.139 ms p95 |
-| full 200-session evaluation | 31.11 s |
-| peak RSS | 716.0 MB |
+| cold start (process start to first response) | 11.526 s |
+| warm turn | 24.366 ms p50 / 26.908 ms p95 |
+| full 200-session evaluation | 30.47 s |
+| peak RSS | 701.4 MB |
 | tokens | **0** |
 | network calls | **0** |
 | API cost | **$0** |
