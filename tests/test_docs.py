@@ -11,6 +11,7 @@ import re
 import unittest
 from pathlib import Path
 
+from lab.verify_clean import document
 import starter.agent as A
 from tests.test_config_lock import (COMPAT_ANCHOR, PUBLIC_HR10, PUBLIC_MRR,
                                     PUBLIC_MTTC, PUBLIC_SCORE)
@@ -67,6 +68,15 @@ class ReadmeNumbersTest(unittest.TestCase):
         self.assertTrue(report["schema"]["ok"])
         self.assertEqual(report["third_party_loaded"], [])
         self.assertIn(report["python"], VERIFICATION.read_text(encoding="utf-8"))
+        # The checked-in report and its generator must keep developer-local
+        # inputs distinct from the committed showcase artifact.
+        checked_in = flatten(VERIFICATION.read_text(encoding="utf-8"))
+        generated = flatten(document(report))
+        for text in (checked_in, generated):
+            self.assertIn("developer-local or otherwise untracked cross-encoder "
+                          "artifact", text)
+            self.assertIn("committed Apache-2.0 showcase artifact is already "
+                          "present", text)
 
     def test_zero_cost_is_claimed_because_it_was_measured(self) -> None:
         report = json.loads(VERIFICATION_JSON.read_text(encoding="utf-8"))
@@ -94,9 +104,14 @@ class ReadmeHonestyTest(unittest.TestCase):
         self.assertTrue(" ".join(phrase.split()) in self.flat,
                         f"the README does not say: {phrase!r}")
 
-    def test_the_showcases_are_never_credited_with_the_public_score(self) -> None:
+    def test_measurement_claims_are_qualified(self) -> None:
         for phrase in ("No public number", "architecture demonstration"):
             self.assertTrue(phrase.lower() in self.flat.lower(), phrase)
+        self.requires("Every quoted result must pass one citability predicate")
+        self.requires("invalid or otherwise non-citable rows are retained and "
+                      "identified, not erased")
+        self.assertNotIn("Every experiment is fingerprinted, append-only and "
+                         "citable", self.flat)
 
     def test_a1_is_stated_with_its_transfer_failure(self) -> None:
         for phrase in ("within-generator generalization",
@@ -142,6 +157,12 @@ class ReadmeHonestyTest(unittest.TestCase):
         # Subtests and skips make an exact match brittle; a 10% drift is stale.
         self.assertLess(abs(claimed - actual) / max(actual, 1), 0.10,
                         f"README claims {claimed} tests, source defines {actual}")
+        verified = int(re.search(
+            r"Ran ([\d,]+) tests",
+            VERIFICATION.read_text(encoding="utf-8")).group(1).replace(",", ""))
+        team = Path("docs/TEAM_CONTRIBUTIONS.md").read_text(encoding="utf-8")
+        self.assertIn(f"| **Tests** | {verified}, all executed on a committed tree",
+                      team)
 
 
 class DevpostAndArchitectureTest(unittest.TestCase):

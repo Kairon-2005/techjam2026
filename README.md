@@ -38,8 +38,10 @@ succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
 The measurable advantages are a dual-route intent pipeline that retargets as a
 session becomes specific, starvation-aware widening, pool-aware clarification,
 and explicit retrieval and question controllers. They run locally on CPU at
-zero API cost. Every experiment is fingerprinted, append-only and citable; that
-same evidence discipline keeps dense retrieval, TinyBERT reranking and profile
+zero API cost. Every experiment is fingerprinted and written to append-only
+ledgers. Every quoted result must pass one citability predicate; invalid or
+otherwise non-citable rows are retained and identified, not erased. That same
+evidence discipline keeps dense retrieval, TinyBERT reranking and profile
 ranking out of `score_default` after their gates failed or showed no target
 alignment.
 

@@ -26,7 +26,7 @@ flattens the resource gap. The authoritative clean-checkout run evaluates all
 | **Optional capabilities** | dense random-indexing retriever + RRF fusion; TinyBERT ONNX cross-encoder cascade — both implemented, measured, shipped off |
 | **Experiment harness** | exclusive leases in isolated worktrees, append-only ledgers, one citability predicate, invalidation records, scenario library, benchmark harness — `lab/` |
 | **Evidence discipline** | 8 phases of pre-registration and results notes — `notes/`, 46 documents |
-| **Tests** | 813, all executed on a committed tree, including exact public-score locks, the configuration lock, and negative tests for every guard |
+| **Tests** | 827, all executed on a committed tree, including exact public-score locks, the configuration lock, and negative tests for every guard |
 | **Packaging** | clean-checkout verification, model card, demo, this documentation |
 
 ## Why the work is award-relevant

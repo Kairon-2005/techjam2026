@@ -3,8 +3,11 @@
 Produced by `python3 -m lab.verify_clean`, which creates a **detached worktree
 at the verified commit**, links in only `data/catalog.jsonl`, and runs
 everything below in a child interpreter whose import path is that tree. The
-developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
-**not** linked in — their absence is part of what is verified.
+developer's `.venv` and A1 feature cache are **not** linked in, nor is any
+developer-local or otherwise untracked cross-encoder artifact; their absence is
+part of what is verified. Separately, the committed Apache-2.0 showcase
+artifact is already present in the detached worktree and is verified below for
+completeness and scored-path isolation.
 
 | | |
 |---|---|

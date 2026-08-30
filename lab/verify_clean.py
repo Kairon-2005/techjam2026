@@ -5,15 +5,18 @@ suite already locks that. It is that **a judge who clones the repository, adds
 the catalog and runs one command gets the same number**, on a tree that has:
 
   * no `.venv`;
-  * no cross-encoder artifact;
+  * no developer-local or untracked cross-encoder artifact linked into it;
   * no A1 feature cache;
+  * the committed showcase artifact intact but unreachable from the scored path;
   * no third-party package reachable from the scored path.
 
-So it builds a detached worktree at HEAD, links in ONLY `data/catalog.jsonl` --
-not the cache, not the model, deliberately -- and runs the whole verification in
-a child interpreter whose import path is that tree. The child asserts its own
-emptiness before it measures anything, because a verification that ran against
-the developer's environment would pass for the wrong reason.
+So it builds a detached worktree at HEAD, links in ONLY `data/catalog.jsonl` as
+a developer-local input -- not the cache or any untracked model -- and runs the
+whole verification in a child interpreter whose import path is that tree. The
+committed showcase model is already part of the detached tree. The child
+asserts the relevant local state is absent before it measures anything, because
+a verification that ran against the developer's environment would pass for the
+wrong reason.
 
     python3 -m lab.verify_clean
 """
@@ -188,8 +191,9 @@ def worktree(commit: str, origin: Path):
     if proc.returncode:
         shutil.rmtree(tmp, ignore_errors=True)
         raise RuntimeError(f"could not create the worktree: {proc.stderr.strip()}")
-    # ONLY the catalog. The A1 cache and the cross-encoder artifact are
-    # deliberately left out: their absence is part of what is being verified.
+    # The catalog is the ONLY developer-local input linked into the worktree.
+    # The A1 cache and any untracked cross-encoder artifact are deliberately
+    # left out. The committed showcase artifact is already part of the tree.
     catalog = origin / "data" / "catalog.jsonl"
     (tree / "data").mkdir(parents=True, exist_ok=True)
     (tree / "data" / "catalog.jsonl").symlink_to(catalog)
@@ -260,8 +264,11 @@ def document(report: dict) -> str:
 Produced by `python3 -m lab.verify_clean`, which creates a **detached worktree
 at the verified commit**, links in only `data/catalog.jsonl`, and runs
 everything below in a child interpreter whose import path is that tree. The
-developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
-**not** linked in — their absence is part of what is verified.
+developer's `.venv` and A1 feature cache are **not** linked in, nor is any
+developer-local or otherwise untracked cross-encoder artifact; their absence is
+part of what is verified. Separately, the committed Apache-2.0 showcase
+artifact is already present in the detached worktree and is verified below for
+completeness and scored-path isolation.
 
 | | |
 |---|---|
