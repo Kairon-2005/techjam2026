@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 import starter.agent as A
 import starter.context as C
@@ -120,6 +121,12 @@ class AgentContractTest(unittest.TestCase):
     def agent(self, **cfg) -> A.Agent:
         A.clear_catalog_cache()
         return A.Agent(self.catalog, config=cfg or None)
+
+    def test_bare_agent_ignores_ambient_tj_config(self) -> None:
+        hostile = json.dumps({"w_pop": -999.0, "ask_policy": "probe_cycle"})
+        with patch.dict("os.environ", {"TJ_CONFIG": hostile}):
+            ag = A.Agent(self.catalog)
+        self.assertEqual(ag.cfg, A.DEFAULTS)
 
     def test_response_matches_the_api_contract(self) -> None:
         ag = self.agent()

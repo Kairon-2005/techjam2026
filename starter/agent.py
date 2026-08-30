@@ -28,14 +28,12 @@ Everything runs locally: Python standard library only, no network, no GPU,
 no model weights. Every behavioural choice is a config knob so that
 lab/sweep.py can run controlled ablations.
 
-Config resolution: explicit arg > TJ_CONFIG env var (JSON) > DEFAULTS.
+Config resolution: explicit arg > DEFAULTS.
 """
 from __future__ import annotations
 
 import dataclasses
-import json
 import math
-import os
 import re
 import array
 import random
@@ -368,15 +366,6 @@ SHOWCASE_PROFILES = ("showcase_dense", "showcase_semantic")
 def _load_config(config: dict | None) -> dict:
     resolved = dict(DEFAULTS)
     unknown: set[str] = set()
-    raw = os.environ.get("TJ_CONFIG")
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                unknown |= set(parsed) - set(DEFAULTS)
-                resolved.update(parsed)
-        except ValueError:
-            pass  # a stray env var on the judging host must never kill the run
     if config:
         unknown |= set(config) - set(DEFAULTS)
         resolved.update(config)
