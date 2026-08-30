@@ -66,8 +66,9 @@ t_index = time.perf_counter()
 ids, cats, prods = catalog_index(Path("data/catalog.jsonl"))
 report["catalog_index_s"] = round(time.perf_counter() - t_index, 3)
 
+t_agent = time.perf_counter()
 agent = A.Agent("data/catalog.jsonl")
-report["agent_construct_s"] = round(time.perf_counter() - t_index, 3)
+report["agent_construct_s"] = round(time.perf_counter() - t_agent, 3)
 
 # Cold start: process start -> first response returned.
 agent.reset("cold", samples[0]["user_profile"])
@@ -272,7 +273,8 @@ and spends no tokens.
 
 | | |
 |---|---|
-| catalog index build | {report['catalog_index_s']} s |
+| evaluator catalog index | {report['catalog_index_s']} s |
+| agent construction (FTS5 index build) | {report['agent_construct_s']} s |
 | cold start (process start → first response) | **{report['cold_start_s']} s** |
 | warm turn p50 | **{report['warm_turn_p50_ms']} ms** |
 | warm turn p95 | **{report['warm_turn_p95_ms']} ms** |
