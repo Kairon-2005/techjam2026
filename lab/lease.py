@@ -114,7 +114,7 @@ LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl",
 # changed input.
 LEDGER_PREFIXES = ("lab/results", "lab/invalidations", "lab/benchmarks",
                    "lab/a1builds", "lab/a2builds", "lab/r1builds",
-                   "lab/supval", "lab/public")
+                   "lab/supval", "lab/public", "lab/holdout")
 JOURNAL_ENV = "LAB_JOURNAL"
 
 

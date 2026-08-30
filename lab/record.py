@@ -39,6 +39,7 @@ RESULT_LOGS = {"lab/results.jsonl", "lab/capability.jsonl", "lab/experiments.jso
                "lab/tuning_runs.jsonl", "lab/benchmarks.jsonl",
                "lab/a1builds.jsonl", "lab/a2builds.jsonl",
                "lab/r1builds.jsonl", "lab/supval.jsonl", "lab/public.jsonl",
+               "lab/holdout.jsonl",
                "lab/a1cache.meta.json"}
 
 
