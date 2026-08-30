@@ -25,8 +25,11 @@ class NoCJKTest(unittest.TestCase):
 
     def test_the_scanner_actually_detects_cjk(self) -> None:
         # A scanner that cannot fire is a comment.
-        for sample in ("决策日志", "テスト", "。", "（注）"):
-            self.assertTrue(T.CJK_RE.search(sample), sample)
+        # Written as ESCAPES so this file carries no literal CJK of its own --
+        # the same reason lab/textaudit.py does. The codepoints fed to the
+        # regex are identical either way.
+        for sample in ("\u51b3\u7b56\u65e5\u5fd7", "\u30c6\u30b9\u30c8", "\u3002", "\uff08\u6ce8\uff09"):
+            self.assertTrue(T.CJK_RE.search(sample), repr(sample))
 
     def test_ordinary_unicode_punctuation_is_allowed(self) -> None:
         # These appear throughout the documentation and must not be flagged.
@@ -78,11 +81,21 @@ class ScopeTest(unittest.TestCase):
             self.assertTrue(any(t.startswith(name) for t in tracked),
                             f"{name} is not covered by the scanner")
 
-    def test_only_the_pattern_defining_modules_are_placeholder_exempt(self) -> None:
-        self.assertEqual(T.PATTERN_DEFINING, ("lab/textaudit.py", "lab/audit.py"))
+    def test_only_the_pattern_defining_files_are_placeholder_exempt(self) -> None:
+        # Three files, and the exemption covers the PLACEHOLDER check alone.
+        self.assertEqual(T.PATTERN_DEFINING,
+                         ("lab/textaudit.py", "lab/audit.py",
+                          "tests/test_textaudit.py"))
         for path in T.PATTERN_DEFINING:
             self.assertTrue(T.in_scope(Path(path)),
                             f"{path} must still be scanned for CJK")
+
+    def test_the_scanner_source_contains_no_cjk_of_its_own(self) -> None:
+        # The ranges are written as escapes precisely so that this holds: a
+        # scanner whose source carried the alphabet it looks for would report
+        # itself forever, and exempting it would blind the check.
+        source = Path("lab/textaudit.py").read_text(encoding="utf-8")
+        self.assertIsNone(T.CJK_RE.search(source))
 
 
 if __name__ == "__main__":

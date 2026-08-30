@@ -24,9 +24,19 @@ import sys
 from pathlib import Path
 
 # Han, Hiragana, Katakana, CJK punctuation, compatibility and fullwidth forms.
+# Han, Hiragana, Katakana, Bopomofo, CJK punctuation, compatibility and
+# fullwidth forms. Written as ESCAPES, not as literal characters: a scanner
+# whose own source contains the alphabet it looks for reports itself forever.
 CJK_RE = re.compile(
-    r"[⺀-⻿　-〿぀-ヿ㄀-ㄯ"
-    r"㐀-䶿一-鿿豈-﫿︰-﹏＀-￯]")
+    "[\u2e80-\u2eff"      # CJK radicals supplement
+    "\u3000-\u303f"       # CJK symbols and punctuation
+    "\u3040-\u30ff"       # hiragana and katakana
+    "\u3100-\u312f"       # bopomofo
+    "\u3400-\u4dbf"       # CJK extension A
+    "\u4e00-\u9fff"       # CJK unified ideographs
+    "\uf900-\ufaff"       # CJK compatibility ideographs
+    "\ufe30-\ufe4f"       # CJK compatibility forms
+    "\uff00-\uffef]")     # halfwidth and fullwidth forms
 
 SUFFIXES = {".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".json"}
 
@@ -99,9 +109,12 @@ def cjk(paths=None) -> list[str]:
     return scan(CJK_RE, paths)
 
 
-# The two modules that DEFINE the placeholder patterns necessarily contain them.
-# Exempt from the PLACEHOLDER check only -- both stay in scope for CJK.
-PATTERN_DEFINING = ("lab/textaudit.py", "lab/audit.py")
+# Files that DEFINE or EXERCISE the placeholder patterns necessarily contain
+# them: the scanner's own pattern list, the audit that names them, and the test
+# that proves the scanner fires. Exempt from the PLACEHOLDER check only -- all
+# three stay in scope for CJK, and none of them is exempt from anything else.
+PATTERN_DEFINING = ("lab/textaudit.py", "lab/audit.py",
+                    "tests/test_textaudit.py")
 
 
 def placeholders(paths=None) -> list[str]:
