@@ -18,14 +18,14 @@ described as such throughout.
 | HR@10 | 0.995 |
 | MRR | 0.852556 |
 | MTTC | 2.06 turns |
-| cold start | 11.526 s |
-| warm turn | 24.366 ms p50 · 26.908 ms p95 |
-| full 200-session evaluation | 30.47 s |
-| peak RSS | 701.4 MB |
+| cold start | 11.62 s |
+| warm turn | 25.571 ms p50 · 30.445 ms p95 |
+| full 200-session evaluation | 30.79 s |
+| peak RSS | 710.3 MB |
 | tokens / network calls / API cost | **0 / 0 / 0** |
 
 This one performance set comes from the detached clean-checkout verification of
-commit `443f6039657278a4afe45a2a50ed2dadba7637d0` on Python 3.14.6 / Darwin arm64
+commit `6b3cd8b77bcc26f7aec7ef9598d38d3acc90d564` on Python 3.14.6 / Darwin arm64
 — see [`docs/FINAL_VERIFICATION.md`](docs/FINAL_VERIFICATION.md). The separate
 [Linux portability run](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426)
 succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore

@@ -29,12 +29,12 @@ decide how deep to retrieve**.
 |---|---|
 | **TechnicalScore** | **0.932067** (weak baseline 0.10671 — **8.7×**) |
 | HR@10 · MRR · MTTC | 0.995 · 0.852556 · 2.06 turns |
-| cold start · warm turn | 11.526 s · 24.366 ms p50 / 26.908 ms p95 |
+| cold start · warm turn | 11.62 s · 25.571 ms p50 / 30.445 ms p95 |
 | **tokens · network · API cost** | **0 · 0 · $0** |
 
 All headline quality, latency and memory figures below are one consistent set:
 the detached clean-checkout verification of commit
-`443f6039657278a4afe45a2a50ed2dadba7637d0` on Python 3.14.6 / Darwin arm64.
+`6b3cd8b77bcc26f7aec7ef9598d38d3acc90d564` on Python 3.14.6 / Darwin arm64.
 The separate [GitHub Actions portability run
 33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426)
 succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
@@ -195,10 +195,10 @@ copy, and it is what makes 0.932067 a number rather than a claim.
 | dependencies (scored path) | **none** — `requirements.txt` is empty and says why |
 | network at runtime | **none** |
 | GPU | **none** |
-| cold start | 11.526 s (FTS5 index over 50,000 products) |
-| warm turn | 24.366 ms p50 · 26.908 ms p95 |
-| full 200-session evaluation | 30.47 s |
-| peak RSS | 701.4 MB |
+| cold start | 11.62 s (FTS5 index over 50,000 products) |
+| warm turn | 25.571 ms p50 · 30.445 ms p95 |
+| full 200-session evaluation | 30.79 s |
+| peak RSS | 710.3 MB |
 | verified on | performance set: Python 3.14.6 / Darwin arm64; score/test/dependency gates also pass on Linux Python 3.10/3.11 |
 | optional semantic | measured on Darwin arm64 only; the ONNX file is arm64-quantized |
 
@@ -322,10 +322,10 @@ Measured from a clean checkout, Python 3.14.6 on Darwin arm64
 
 | | `score_default` |
 |---|---|
-| cold start (process start to first response) | 11.526 s |
-| warm turn | 24.366 ms p50 / 26.908 ms p95 |
-| full 200-session evaluation | 30.47 s |
-| peak RSS | 701.4 MB |
+| cold start (process start to first response) | 11.62 s |
+| warm turn | 25.571 ms p50 / 30.445 ms p95 |
+| full 200-session evaluation | 30.79 s |
+| peak RSS | 710.3 MB |
 | tokens | **0** |
 | network calls | **0** |
 | API cost | **$0** |

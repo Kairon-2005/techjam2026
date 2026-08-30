@@ -15,7 +15,7 @@ Track 4 was chosen **because** of the solo, no-GPU constraint rather than
 despite it: the track's rules cap compute (no base-model fine-tuning, no heavy
 vector database, in-memory only) and ship a deterministic local evaluator, which
 flattens the resource gap. The authoritative clean-checkout run evaluates all
-200 simulated sessions in **30.47 s** on the development host.
+200 simulated sessions in **30.79 s** on the development host.
 
 ## What was built
 
@@ -48,7 +48,7 @@ The contribution is the measured combination, not an unverified feature count:
   sessions), MRR **0.852556** and MTTC **2.06**.
 
 That performance set comes from commit
-`443f6039657278a4afe45a2a50ed2dadba7637d0`, Python 3.14.6 / Darwin arm64.
+`6b3cd8b77bcc26f7aec7ef9598d38d3acc90d564`, Python 3.14.6 / Darwin arm64.
 Published portability CI independently succeeded on Ubuntu for Python 3.10 and
 3.11 and reproduced 0.932067 exactly: [GitHub Actions run
 33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426).

@@ -31,10 +31,10 @@ verification environments above were committed trees, so both report 0 skipped;
 "Python 3.10 or later is recommended".
 
 The headline performance set is still the detached clean-checkout run at commit
-`443f6039657278a4afe45a2a50ed2dadba7637d0` on Python 3.14.6 / Darwin arm64:
+`6b3cd8b77bcc26f7aec7ef9598d38d3acc90d564` on Python 3.14.6 / Darwin arm64:
 TechnicalScore 0.932067, HR@10 0.995, MRR 0.852556, MTTC 2.06, cold start
-11.526 s, warm-turn p50/p95 24.366/26.908 ms, full evaluation 30.47 s and peak
-RSS 701.4 MB. The Linux CI is an independent portability result on published
+11.62 s, warm-turn p50/p95 25.571/30.445 ms, full evaluation 30.79 s and peak
+RSS 710.3 MB. The Linux CI is an independent portability result on published
 commit `ff25c6ff46219ce059afd729cc125cbf846a9714`; it confirms the exact score
 and dependency/test gates, not Darwin latency or memory.
 

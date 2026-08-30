@@ -11,7 +11,7 @@ completeness and scored-path isolation.
 
 | | |
 |---|---|
-| commit | `443f6039657278a4afe45a2a50ed2dadba7637d0` |
+| commit | `6b3cd8b77bcc26f7aec7ef9598d38d3acc90d564` |
 | origin tree clean at verification | PASS |
 | Python | **3.14.6** |
 | platform | darwin / arm64 |
@@ -75,13 +75,13 @@ No problems found.
 
 | | |
 |---|---|
-| evaluator catalog index | 0.577 s |
-| agent construction (FTS5 index build) | 10.672 s |
-| cold start (process start → first response) | **11.526 s** |
-| warm turn p50 | **24.366 ms** |
-| warm turn p95 | **26.908 ms** |
-| full 200-session evaluation | **30.47 s** |
-| peak RSS | **701.4 MB** |
+| evaluator catalog index | 0.569 s |
+| agent construction (FTS5 index build) | 10.729 s |
+| cold start (process start → first response) | **11.62 s** |
+| warm turn p50 | **25.571 ms** |
+| warm turn p95 | **30.445 ms** |
+| full 200-session evaluation | **30.79 s** |
+| peak RSS | **710.3 MB** |
 | network calls | **0** |
 | API cost | **0** |
 | tokens | **0** |
@@ -99,6 +99,6 @@ accident. The semantic showcase imports them **inside `Scorer.load`**, which
 ## 6. Test suite, in the clean worktree
 
 ```
-Ran 828 tests in 90.897s
+Ran 828 tests in 91.776s
 OK
 ```
