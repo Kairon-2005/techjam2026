@@ -237,6 +237,14 @@ def rotation_diagnostic(outcomes, sessions, snapshots) -> dict:
     }
 
 
+def _relative(path: Path) -> str:
+    """`path` relative to the repository root, or absolute if it is outside it."""
+    try:
+        return str(Path(path).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        return str(path)
+
+
 def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
     """Write the cache, run the replay gate, and assemble the manifest."""
     sessions = built["sessions"]
@@ -276,7 +284,11 @@ def gate(built, split: SPLIT.Split, cache_path: Path) -> dict:
         "evaluator_agrees": evaluator_agrees,
         "rotation_diagnostic": rotation,
         "cache_sha256": written["sha256"],
-        "cache_path": str(cache_path),
+        # Relative where possible: an absolute developer path in a committed
+        # manifest names the machine that produced it and is unrunnable
+        # anywhere else. Existing manifests keep the absolute path they were
+        # written with -- records are not rewritten.
+        "cache_path": _relative(cache_path),
         "cache_sessions": written["sessions"],
         "cache_turns": written["turns"],
         "split": "sup-train",
