@@ -36,7 +36,7 @@ flowchart TD
     GEN["candidate generation<br/>BM25 over SQLite FTS5"] --> DENSE{"dense source<br/><b>OFF</b>"}
     DENSE -->|showcase_dense| RRF["RRF fusion"]
     DENSE -->|score_default| FUNNEL
-    RRF --> FUNNEL["deterministic funnel<br/>category/facet expansion, rescue, exclusion"]
+    RRF --> FUNNEL["deterministic funnel<br/>safe positive narrowing + relaxation<br/>standing rescue lane"]
 
     FUNNEL --> RERANK["feature rerank - 9 weighted signals<br/>bm25, phrase, idf, cat, pop<br/>exact, field, soft-slot, negative"]
     RERANK --> ROT["rotate<br/>pinned head, refreshed tail on 'show me more'"]
@@ -60,7 +60,8 @@ flowchart TD
 the question controller, the context snapshot and the profile window all read
 it, so the optional cascade cannot leak into any decision but the visible
 ordering. Second, every dashed or `OFF` edge is a capability that exists, was
-measured, and is disabled; the solid path is what produces 0.932067.
+measured, and is disabled; the solid path produced 0.932067 in the detached
+clean-checkout verification at commit `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6`.
 
 ## Pillar I — intent routing and the hybrid pipeline
 
@@ -79,9 +80,14 @@ candidates with *no lexical overlap at all* — 281 dense-only against 19
 overlapping in the demo — and they are off because they cost Boundary MRR
 1.000 to 0.870 and fail the contradiction guard.
 
-**The deterministic funnel** expands by category node and facet, rescues
-candidates that filters would have dropped, and excludes on hard evidence. It is
-deterministic: same state, same pool, every time.
+**The deterministic funnel** can narrow its primary Buying pool with positive
+requirements only after six safety gates: positive polarity, active and not
+abandoned or contested, typed hard, near-certain, supported by the catalog, and
+backed by a sufficiently covered facet. It relaxes eligible filters rather than
+letting the pool starve, and a standing rescue quota keeps outside candidates
+reachable. Negative exclusions never enter this filter path; they remain
+confidence-scaled penalties in reranking. This is deterministic, scored safe
+relaxation — not strict hard-constraint enforcement.
 
 **Reranking** is nine hand-configured weighted features over the pooled
 candidates — scalar configuration set by measurement, not learned parameters.
@@ -101,7 +107,9 @@ SlotValue(attribute, value, polarity, hardness, confidence,
 
 * **polarity** separates "I want silk" from "not silk"; negatives never enter the
   query and penalise candidates that match them.
-* **hardness** separates a requirement from a preference.
+* **hardness** separates a requirement from a preference and helps decide
+  whether positive evidence is eligible to narrow the primary pool. It is not
+  an enforcement guarantee.
 * **confidence** discounts open-world extraction against stated facts — and the
   denominator is the phrase *count*, not the confidence sum, so a lone
   low-confidence guess cannot score like a stated fact.
@@ -111,10 +119,11 @@ SlotValue(attribute, value, polarity, hardness, confidence,
 * **`source_turn` and `provenance`** make erasure *targeted* — the terms a phrase
   contributed can be withdrawn with it.
 
-**Override handling ships as `keep`**, and that is measured: this pipeline
-*scores* rather than *filters*, so a stale constraint adds a little wrong credit
-while forgetting destroys evidence. keep 0.9233, slot 0.9140, erase 0.8458.
-Targeted erasure is implemented and one config key away.
+**Override handling ships as `keep`**, and that is measured: the final ranker
+scores evidence, while the positive filter path is relaxed and rescue-aware, so
+a stale constraint can add some wrong credit while wholesale forgetting destroys
+evidence. keep 0.9233, slot 0.9140, erase 0.8458. Targeted erasure is implemented
+and one config key away.
 
 **Request-more** pins the confident head and refreshes the tail with unseen
 candidates — repeating an identical Top-10 burns a turn, rotating everything
@@ -170,6 +179,12 @@ Recorded per run: HR@10, MRR, MTTC, TechnicalScore, the four official scenario
 slices, five robustness scenarios over five seeds, latency percentiles, cold
 load, RSS, commit and dirty state, lease verdict, and the reason any row is not
 citable.
+
+For the submitted configuration, the authoritative clean-checkout result is
+TechnicalScore 0.932067, HR@10 0.995, MRR 0.852556 and MTTC 2.06 on 200
+simulated sessions. The same score was reproduced on Linux Python 3.10 and 3.11
+in successful [GitHub Actions run
+33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
 
 ## The A2-10 cascade, and why it is safe by construction
 

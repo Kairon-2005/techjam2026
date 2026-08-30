@@ -1,9 +1,10 @@
 # Conversational Shopping Copilot — TechJam Track 4
 
-A multi-turn shopping agent that finds a customer's hidden target product in the
-Top-10 within at most 10 turns, by **tracking typed evidence across turns**,
-**asking the question that actually splits the candidate pool**, and **letting
-runtime context decide how deep to retrieve**.
+A multi-turn shopping agent that aims to place a simulated shopper's hidden
+target product in the Top-10 within at most 10 turns. On the official public
+simulator it did so in **199 of 200 sessions**, by **tracking typed evidence
+across turns**, **asking a question that splits the candidate pool**, and
+**letting runtime context decide how deep to retrieve**.
 
 **`score_default` -- the submitted, scored configuration -- runs on the Python
 standard library alone. No LLM, no API key, no network, no GPU, no learned or
@@ -17,23 +18,30 @@ described as such throughout.
 | HR@10 | 0.995 |
 | MRR | 0.852556 |
 | MTTC | 2.06 turns |
-| cold start | 11.4 s |
-| warm turn | 25.7 ms p50 · 39.3 ms p95 |
-| full 200-session evaluation | 30.3 s |
-| peak RSS | 703 MB |
+| cold start | 6.134 s |
+| warm turn | 13.401 ms p50 · 14.176 ms p95 |
+| full 200-session evaluation | 15.59 s |
+| peak RSS | 575.7 MB |
 | tokens / network calls / API cost | **0 / 0 / 0** |
 
-Reproduced from a clean checkout on Python 3.14.6 — see
-[`docs/FINAL_VERIFICATION.md`](docs/FINAL_VERIFICATION.md).
+This one performance set comes from the detached clean-checkout verification of
+commit `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6` on Python 3.14.6 / Darwin arm64
+— see [`docs/FINAL_VERIFICATION.md`](docs/FINAL_VERIFICATION.md). The separate
+[Linux portability run](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542)
+succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
+0.932067 exactly on both.
 
 **Demo video:** _(link placeholder)_
 
 ## The short version
 
-The system contains multiple adaptive retrieval and ranking capabilities, but
-**enables only those supported by evidence**. Runtime context controls retrieval
-depth and when to ask for clarification; unsupported profile, dense-retrieval and
-semantic interventions **safely fall back to the deterministic local core**.
+The measurable advantages are a dual-route intent pipeline that retargets as a
+session becomes specific, starvation-aware widening, pool-aware clarification,
+and explicit retrieval and question controllers. They run locally on CPU at
+zero API cost. Every experiment is fingerprinted, append-only and citable; that
+same evidence discipline keeps dense retrieval, TinyBERT reranking and profile
+ranking out of `score_default` after their gates failed or showed no target
+alignment.
 
 Three of our four biggest engineering efforts are shipped **off**, each with the
 measurement that says why. That is the point, not an apology: the same
@@ -95,7 +103,7 @@ agent = Agent("data/catalog.jsonl")  # no config argument == score_default
 python3 -m demo
 ```
 
-Four real public sessions with the official customer simulator, showing route,
+Four public sessions replayed by the official customer simulator, showing route,
 retrieval decision, typed evidence, why each question was asked, Top-3 and
 latency per turn. See [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
 
@@ -142,7 +150,8 @@ customer message
       │       decides depth and mode        standard │ widened │ deep-funnel   ← Pillar III, ON
       │
       ├─ candidate generation               BM25 over FTS5  (+ dense + RRF — OFF)
-      ├─ deterministic funnel               category/facet expansion, rescue, exclusion
+      ├─ deterministic funnel               safe positive narrowing + rescue lane
+      │                                     negatives remain scored penalties
       ├─ feature rerank                     9 weighted signals            ← the A0 core
       ├─ rotate                             pinned head, refreshed tail on "show me more"
       │                                     (+ semantic Top-10 permutation — OFF)
@@ -160,6 +169,11 @@ customer message
 | **`score_default`** | the submitted, scored configuration | **0.932067 on the public 200** |
 | `showcase_semantic` | A2-10 cross-encoder cascade, λ=1.0 | architecture demonstration + supplementary evidence. **No public number.** |
 | `showcase_dense` | dense/RRF Browsing candidate source | architecture demonstration. **No public number.** |
+
+Profile normalization and credibility classification are also optional
+components: `score_default` keeps `profile_context_mode="off"` and
+`w_profile=0.0`. None of the dense, TinyBERT or profile components contributes
+to the submitted score.
 
 **There is no combined configuration**, and a test enforces it: no
 dense+semantic+personalization profile exists, because none was ever measured
@@ -245,6 +259,13 @@ stayed A0.
   identity, so none is invented. The long-term profile is treated as one
   external prior, judged against current-session evidence, and given zero
   ranking weight.
+* **Typed hardness is not an enforcement guarantee.** An active, positive,
+  high-confidence requirement backed by a sufficiently covered catalog facet
+  may narrow the primary Buying pool. The funnel relaxes those filters before
+  starvation and always carries a bounded rescue lane of excluded candidates.
+  Explicit negative exclusions never filter in `score_default`; they stay out
+  of the query and penalise matching candidates in the ranker. This is scored
+  safe relaxation, not strict hard-constraint enforcement.
 * **A2-10 has no public number** and cannot be given one — the pre-registration
   allows exactly one public confirmation, and A1 spent it.
 * **Portability is reported separately for the two paths** — full table in
@@ -252,9 +273,10 @@ stayed A0.
   * `score_default`: **verified on Python 3.14.6 and 3.13.7, Darwin arm64**
     (0.932067 exactly on both, zero third-party imports). **Minimum supported
     version is Python 3.10**, established by a concrete failure on 3.9.6 rather
-    than by inspection. **Linux is not yet verified**: no Linux machine or
-    container runtime was available here, so a GitHub Actions job for Python
-    3.10/3.11 is written and **pending publication**. No result is claimed for it.
+    than by inspection. **Linux Python 3.10 and 3.11 are verified** by successful
+    [GitHub Actions run 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542):
+    the full suite, exact 0.932067 evaluator check and zero-third-party-import
+    check passed in both jobs.
   * `showcase_semantic`: measured on **Darwin arm64 only**, using an
     `arm64`-quantized ONNX file. **No cross-platform semantic performance is
     claimed**; the artifact's own name says which architecture it targets.
@@ -287,6 +309,14 @@ The optional semantic showcase bundles
 **4.5 MB ONNX file** inside a **5.46 MB complete bundle** — with its license,
 revision and per-file SHA-256 recorded. See
 [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md).
+
+## License
+
+The project code and documentation are released under the root [MIT
+License](LICENSE), copyright 2026 Kairon. The bundled TinyBERT model artifact is
+third-party material and remains under its own **Apache-2.0** license at
+`lab/r0/artifacts/ms-marco-TinyBERT-L2-v2/LICENSE`; the project MIT license does
+not replace or modify that license.
 
 ## Team
 

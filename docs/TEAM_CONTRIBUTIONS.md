@@ -14,7 +14,8 @@
 Track 4 was chosen **because** of the solo, no-GPU constraint rather than
 despite it: the track's rules cap compute (no base-model fine-tuning, no heavy
 vector database, in-memory only) and ship a deterministic local evaluator, which
-flattens the resource gap and makes ~25-second iteration possible.
+flattens the resource gap. The authoritative clean-checkout run evaluates all
+200 simulated sessions in **15.59 s** on the development host.
 
 ## What was built
 
@@ -28,6 +29,30 @@ flattens the resource gap and makes ~25-second iteration possible.
 | **Tests** | 813, all executed on a committed tree, including exact public-score locks, the configuration lock, and negative tests for every guard |
 | **Packaging** | clean-checkout verification, model card, demo, this documentation |
 
+## Why the work is award-relevant
+
+The contribution is the measured combination, not an unverified feature count:
+
+* **Dual-route intent handling** gives Buying and Browsing different retrieval
+  topologies and retargets a session as soon as stated evidence becomes usable.
+* **Starvation-aware widening** and **pool-aware clarification** respond to the
+  live candidate state, under explicit retrieval and question controllers with
+  per-turn reason codes.
+* **Append-only, fingerprinted, citable evaluation** makes feature adoption and
+  rejection auditable. Dense/RRF retrieval, TinyBERT reranking and profile
+  ranking were implemented and measured, then kept out of `score_default` when
+  their evidence did not clear the gates.
+* The shipped path runs locally on CPU with **zero model tokens, zero network
+  calls and zero API cost**. In the authoritative detached clean-checkout run it
+  scored TechnicalScore **0.932067**, HR@10 **0.995** (199/200 simulated
+  sessions), MRR **0.852556** and MTTC **2.06**.
+
+That performance set comes from commit
+`96efae3f6ed0da9e0a7c95236fae17295d8ef7d6`, Python 3.14.6 / Darwin arm64.
+Published portability CI independently succeeded on Ubuntu for Python 3.10 and
+3.11 and reproduced 0.932067 exactly: [GitHub Actions run
+33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
+
 ## What was not done, and is not claimed
 
 * No fine-tuning of any model.
@@ -35,10 +60,18 @@ flattens the resource gap and makes ~25-second iteration possible.
 * No use of the sealed holdout for any configuration decision.
 * No second team member; there is no division of labour to report.
 
+## License
+
+Project code and documentation: **MIT**, copyright 2026 Kairon. Bundled
+`cross-encoder/ms-marco-TinyBERT-L2-v2` model files: **Apache-2.0**, with their
+unchanged license stored beside the artifact. The two licensing scopes are
+deliberately separate.
+
 ## Provenance of the numbers
 
-Every figure quoted in the README, the Devpost draft and the notes traces to a
-row in an append-only ledger under `lab/`, produced by a verified lease, and
-passes `lab/provenance.py`'s single citability predicate. Rows that do not pass
-are kept and marked, not deleted — `lab/invalidations.jsonl` records four of
-them, including two superseded cache builds this submission does not rely on.
+Submitted quality and cost figures trace to `docs/FINAL_VERIFICATION.md(.json)`;
+experiment figures trace to rows in append-only ledgers under `lab/`, produced
+by verified leases and checked by `lab/provenance.py`'s single citability
+predicate. Rows that do not pass are kept and marked, not deleted —
+`lab/invalidations.jsonl` records four of them, including two superseded cache
+builds this submission does not rely on.

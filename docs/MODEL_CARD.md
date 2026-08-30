@@ -11,6 +11,14 @@ it is installed.
 Everything below describes **`showcase_semantic`**, the optional A2-10 cascade,
 which is **off by default** and has **no public result**.
 
+## Licensing boundary
+
+The project code and documentation are licensed under the root **MIT License**,
+copyright 2026 Kairon. The bundled TinyBERT artifact is third-party material
+licensed separately under **Apache-2.0**. Its license remains alongside the
+artifact at `lab/r0/artifacts/ms-marco-TinyBERT-L2-v2/LICENSE`; the root MIT
+license does not replace, relicense or modify it.
+
 ## 1. What the model is
 
 | | |
@@ -114,9 +122,10 @@ targets arm64.
   protocol forbids asking afterwards.
 * **+0.008248 `sup-val` MRR is real and small**, and it is measured on a
   synthetic, generator-grounded corpus. It is not a claim about real users.
-* **Negative constraints are excluded from the query on purpose.** This MS MARCO
-  relevance model has not been validated to enforce hard negative constraints;
-  those stay with A0's structured logic.
+* **Negative constraints are excluded from the semantic query on purpose.** This
+  MS MARCO relevance model has not been validated to enforce them. In A0/
+  `score_default`, explicit negatives stay out of retrieval and apply a
+  confidence-scaled ranking penalty; they are not hard filters.
 * **Eligibility is product logic and was never searched.** Buying,
   high-precision, contradiction-sensitive and post-override traffic stays on A0.
 

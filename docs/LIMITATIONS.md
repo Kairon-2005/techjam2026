@@ -64,10 +64,16 @@ demonstrated target alignment).
 We do **not** claim: persisted real user history, cross-session learning,
 self-modifying code, or any public gain from profile weighting.
 
-## 5. One host, one Python, one category
+## 5. Portability evidence is path-specific
 
-* Verified on **Python 3.14.6, darwin/arm64**, and nowhere else. Latency and RSS
-  on other hosts are unmeasured.
+* The quality, latency and memory set quoted in the submission comes from the
+  detached clean-checkout run at commit `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6`
+  on **Python 3.14.6 / Darwin arm64**. Latency and RSS on other hosts are
+  unmeasured.
+* `score_default` also passed the full suite, reproduced TechnicalScore
+  **0.932067** exactly and imported no third-party packages on Ubuntu with
+  Python 3.10 and 3.11 in successful [GitHub Actions run
+  33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
 * Thread sensitivity **was** measured for the semantic showcase (1/2/4/default
   cores), and every setting cleared its 25 ms cap — that is the one portability
   risk we retired with data.
@@ -85,14 +91,28 @@ sessions, implemented by us. They caught real defects — paraphrase sensitivity
 dropped an early agent to 0.671 — but they are **our model of adversity**, not
 observed user behaviour.
 
-## 7. The pipeline scores, it does not filter
+## 7. Typed hardness enables safe narrowing, not strict enforcement
 
-A stated constraint raises a candidate's score; it never removes candidates.
-That is why keeping obsolete evidence beats erasing it (0.9233 vs 0.8458) — a
-stale constraint adds a little wrong credit, while forgetting destroys evidence.
-It also means the system **cannot enforce a hard constraint**: asking for
-"nothing above $50" biases the ranking and does not guarantee the result. For a
-real deployment that is a gap, not a subtlety.
+The implementation distinguishes two cases that must not be collapsed into
+"hard filtering":
+
+* An **active positive requirement** can narrow the primary Buying pool only if
+  it is near-certain, uncontested, catalog-supported, and backed by a facet with
+  enough coverage for missing metadata to be safe. The funnel relaxes eligible
+  filters until at least 60 candidates survive and carries a standing bounded
+  rescue lane of candidates outside that pool.
+* An **explicit negative exclusion** never filters in `score_default`. It is
+  omitted from the retrieval query and matching candidates receive a
+  confidence-scaled ranking penalty.
+
+The final order therefore still **scores rather than strictly enforces** either
+kind of constraint. `hardness="hard"` is typed evidence and a filter-eligibility
+signal, not a guarantee. A request such as "nothing above $50" can bias and,
+when safely indexed, narrow the primary pool, but rescue and relaxation mean the
+returned Top-10 is not guaranteed to obey it. For a real deployment that is a
+gap, not a subtlety. The same scored behavior explains why retaining stale
+evidence could beat wholesale erasure in the measured override experiment
+(0.9233 vs 0.8458).
 
 ## 8. What would change our mind
 

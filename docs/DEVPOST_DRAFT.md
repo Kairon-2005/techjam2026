@@ -1,15 +1,17 @@
 # Devpost draft
 
-Organized by the judging weights. Every number here is reproducible from a clean
-checkout and traceable to a ledger row.
+Organized by the judging weights. Submitted quality and cost figures are
+reproducible from the authoritative clean-checkout report; experiment figures
+are traceable to citable ledger rows.
 
 ---
 
 ## Inspiration
 
 A shopping assistant that asks a good question is worth more than one that
-returns a longer list. The weak starter scores **0.107** — not because it cannot
-find products, but because it never learns what the customer actually wants.
+returns a longer list. The weak starter scores **0.107** — its target is often
+already in a deep candidate pool, but it does not accumulate enough evidence to
+rank that target early or ask a discriminating question.
 On the public development set, recall@200 turned out to be **1.000** from the
 very beginning: the target was already in the pool. **On that corpus the problem
 was never retrieval. It was knowing what to keep, what to ask, and how deep to
@@ -17,17 +19,37 @@ look.**
 
 ## What it does
 
-A multi-turn shopping copilot that finds the customer's hidden target in the
-Top-10 within 10 turns, by tracking **typed evidence** across turns, asking the
-question that **actually splits the live candidate pool**, and letting **runtime
-context decide how deep to retrieve**.
+A multi-turn shopping copilot that aims to place a simulated shopper's hidden
+target in the Top-10 within 10 turns. On the official public simulator it did so
+for **199 of 200 sessions**, by tracking **typed evidence** across turns, asking
+a question that **splits the live candidate pool**, and letting **runtime context
+decide how deep to retrieve**.
 
 | | |
 |---|---|
 | **TechnicalScore** | **0.932067** (weak baseline 0.10671 — **8.7×**) |
 | HR@10 · MRR · MTTC | 0.995 · 0.852556 · 2.06 turns |
-| cold start · warm turn | 11.4 s · 25.7 ms p50 |
+| cold start · warm turn | 6.134 s · 13.401 ms p50 / 14.176 ms p95 |
 | **tokens · network · API cost** | **0 · 0 · $0** |
+
+All headline quality, latency and memory figures below are one consistent set:
+the detached clean-checkout verification of commit
+`96efae3f6ed0da9e0a7c95236fae17295d8ef7d6` on Python 3.14.6 / Darwin arm64.
+The separate [GitHub Actions portability run
+33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542)
+succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
+0.932067 exactly in both jobs.
+
+### Why this is more than a score
+
+The measurable product advantage is the combination of **dual-route intent
+handling**, **starvation-aware widening**, **pool-aware clarification**, and
+explicit context controllers that explain each retrieval and question decision.
+The engineering advantage is equally concrete: evaluation inputs are
+fingerprinted, results are append-only and citable, and costly-looking ideas are
+allowed to stay off. Dense/RRF retrieval, TinyBERT reranking and profile ranking
+are optional measured components; none contributes to `score_default`, which
+runs locally on CPU with zero API cost.
 
 ---
 
@@ -62,6 +84,13 @@ provenance, active, soft_ok, catalog_support, contradiction)`. Negation is a
 first-class polarity, not a keyword. Contradiction and abandonment set
 `soft_ok=False` — evidence stops being usable **without being deleted**, which is
 what makes override handling recoverable.
+
+`hardness="hard"` is typed evidence, not a promise of strict enforcement. Only
+active positive, near-certain, uncontested, catalog-supported requirements on a
+sufficiently covered facet may narrow the primary Buying pool; the funnel
+relaxes before starvation and carries a bounded rescue lane. Explicit negative
+exclusions never filter in `score_default`: they stay out of the query and apply
+a confidence-scaled ranking penalty.
 
 ### Starvation-aware orchestration
 
@@ -141,8 +170,9 @@ for every visitor, not just for a premium tier — and it runs where the network
 does not: the shipped path makes **zero network calls** and needs **zero
 credentials**.
 
-**MTTC 2.06** means customers reach their product in about two turns — the
-metric that actually maps to abandonment.
+**MTTC 2.06** means the official simulated sessions that hit the target do so in
+about two turns on average. It is useful task evidence, not a measurement of
+real customer abandonment.
 
 **The optional semantic reranker degrades honestly, and that claim is scoped.**
 With `showcase_semantic` enabled, a missing model directory, a load failure, an
@@ -165,11 +195,11 @@ copy, and it is what makes 0.932067 a number rather than a claim.
 | dependencies (scored path) | **none** — `requirements.txt` is empty and says why |
 | network at runtime | **none** |
 | GPU | **none** |
-| cold start | 11.4 s (FTS5 index over 50,000 products) |
-| warm turn | 25.7 ms p50 · 39.3 ms p95 |
-| full 200-session evaluation | 30.3 s |
-| peak RSS | 703 MB |
-| verified on | `score_default`: Python 3.14.6, darwin/arm64 — and only there, stated as such |
+| cold start | 6.134 s (FTS5 index over 50,000 products) |
+| warm turn | 13.401 ms p50 · 14.176 ms p95 |
+| full 200-session evaluation | 15.59 s |
+| peak RSS | 575.7 MB |
+| verified on | performance set: Python 3.14.6 / Darwin arm64; score/test/dependency gates also pass on Linux Python 3.10/3.11 |
 | optional semantic | measured on Darwin arm64 only; the ONNX file is arm64-quantized |
 
 **One command reproduces the score:**
@@ -186,6 +216,11 @@ The optional semantic showcase pins three versions and bundles its Apache-2.0
 model with per-file SHA-256 — and `score_default` does not require the artifact
 to exist.
 
+Project code and documentation are **MIT licensed**, copyright 2026 Kairon.
+The bundled TinyBERT artifact remains separately licensed under **Apache-2.0**;
+its unchanged license ships beside the model and is not replaced by the root
+project license.
+
 ---
 
 ## 10% — Presentation
@@ -194,7 +229,7 @@ to exist.
 python3 -m demo
 ```
 
-Four real public sessions driven by the **official customer simulator**, showing
+Four public sessions replayed by the **official customer simulator**, showing
 route, retrieval decision **and its reason code**, typed evidence with polarity
 and source turn, **why** each question was asked, Top-3 and per-turn latency.
 The agent never sees the target; the harness reveals it once, at the end, under a
@@ -215,7 +250,8 @@ what **not** to say.
 
 | tool | use |
 |---|---|
-| Python 3.14.6 (CPython) | the only interpreter this was measured on; the code targets 3.10+ |
+| Python 3.14.6 (CPython) | authoritative quality/latency/memory run on Darwin arm64 |
+| GitHub Actions, Ubuntu, Python 3.10/3.11 | successful portability matrix for the full suite, exact score and zero-third-party-import gates |
 | `sqlite3` with FTS5 (standard library) | the retrieval index |
 | `unittest` (standard library) | the 813-test suite |
 | `git` (worktrees, tags, append-only ledgers) | isolation for every measurement, and the provenance chain |
@@ -262,6 +298,9 @@ and a shipped ONNX Runtime component needs neither.
 
 No other model, no fine-tuning, no training of any kind.
 
+The repository's own code and documentation use the root **MIT License**. That
+project license and the model's Apache-2.0 license cover different material.
+
 ### Architecture and the four pillars
 
 Full walkthrough with a Mermaid flow: **`docs/ARCHITECTURE.md`**.
@@ -283,10 +322,10 @@ Measured from a clean checkout, Python 3.14.6 on Darwin arm64
 
 | | `score_default` |
 |---|---|
-| cold start (process start to first response) | 11.4 s |
-| warm turn | 25.7 ms p50 / 39.3 ms p95 |
-| full 200-session evaluation | 30.3 s |
-| peak RSS | 703 MB |
+| cold start (process start to first response) | 6.134 s |
+| warm turn | 13.401 ms p50 / 14.176 ms p95 |
+| full 200-session evaluation | 15.59 s |
+| peak RSS | 575.7 MB |
 | tokens | **0** |
 | network calls | **0** |
 | API cost | **$0** |
@@ -308,17 +347,18 @@ Full version: **`docs/LIMITATIONS.md`**. In short:
   allows exactly one public confirmation, and A1 spent it.
 * **No cross-session memory:** the evaluation API provides no stable user
   identity, so none was invented.
-* The pipeline **scores rather than filters**, so it cannot *enforce* a hard
-  constraint such as "nothing above $50".
+* Typed positive requirements can safely narrow a primary facet pool, but
+  relaxation and the rescue lane mean they are not strictly enforced. Explicit
+  negative exclusions are scored penalties, never filters.
 * Evaluated on **English-language sessions**, one catalog category, 50,000
   products. Other languages and verticals were not tested.
-* `score_default` measured on **Python 3.14.6 / Darwin arm64**; the optional
-  semantic path on **Darwin arm64** only.
+* The `score_default` performance set was measured on **Python 3.14.6 / Darwin
+  arm64**; Linux Python 3.10/3.11 CI also passed the exact score, full suite and
+  dependency gates. The optional semantic path remains **Darwin arm64** only.
 
 **Future work:** a public-like corpus without 5-core popularity bias; hard
-constraint enforcement; a second confirmation budget so A2-10 can be measured
-rather than eliminated; and portability verification on Linux with Python
-3.10/3.11.
+constraint enforcement; and a second confirmation budget so A2-10 can be
+measured rather than eliminated.
 
 ### Team contributions
 
@@ -359,8 +399,9 @@ path, not a test artefact. The cache key now carries the capability.
 
 * A public-like corpus **without** 5-core popularity bias — the one experiment
   that would tell us whether the shipped weights or A1's are closer to right.
-* Hard-constraint enforcement: the pipeline currently **scores** rather than
-  **filters**, so "nothing above $50" biases the ranking without guaranteeing it.
+* Strict hard-constraint enforcement: positive stated requirements currently
+  get gated narrowing plus safe relaxation and rescue, while negative exclusions
+  are scored penalties. Neither is a Top-10 guarantee.
 * A second confirmation budget would let A2-10 be measured rather than
   eliminated.
 
@@ -368,6 +409,6 @@ path, not a test artefact. The cache key now carries the capability.
 
 `python` · `sqlite3` (FTS5) · `onnxruntime` (optional showcase) ·
 `cross-encoder/ms-marco-TinyBERT-L2-v2` (Apache-2.0, optional, off) ·
-Amazon Reviews 2023 (McAuley Lab, UCSD)
+Amazon Reviews 2023 (McAuley Lab, UCSD) · project code and docs (MIT)
 
 **Demo video:** _(link placeholder)_
