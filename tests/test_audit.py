@@ -2,12 +2,209 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from lab import audit as A
+
+
+class PostHoldoutInfluenceManifestTest(unittest.TestCase):
+    BASE_AGENT = '''\
+        """Agent with ambient configuration."""
+        import json
+        import os
+
+        DEFAULTS = {"weight": 1}
+
+        def _load_config(config=None):
+            resolved = dict(DEFAULTS)
+            raw = os.environ.get("TJ_CONFIG")
+            if raw:
+                resolved.update(json.loads(raw))
+            if config:
+                resolved.update(config)
+            return resolved
+
+        class Agent:
+            def rank(self, value):
+                return value * DEFAULTS["weight"]
+        '''
+    HARDENED_AGENT = '''\
+        """Agent with explicit configuration."""
+
+        DEFAULTS = {"weight": 1}
+
+        def _load_config(config=None):
+            resolved = dict(DEFAULTS)
+            if config:
+                resolved.update(config)
+            return resolved
+
+        class Agent:
+            def rank(self, value):
+                return value * DEFAULTS["weight"]
+        '''
+    DOCSTRING_AGENT = HARDENED_AGENT.replace(
+        "Agent with explicit configuration.",
+        "Agent with explicit configuration and no learned weights.",
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self._git("init", "-q")
+        self._git("config", "user.name", "Audit Test")
+        self._git("config", "user.email", "audit@example.invalid")
+        self._write("starter/agent.py", self.BASE_AGENT)
+        self._commit("Consume the synthetic holdout once")
+        self.holdout = self._git("rev-parse", "HEAD").strip()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _git(self, *args: str, binary: bool = False):
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            check=True,
+            capture_output=True,
+            text=not binary,
+        ).stdout
+
+    def _write(self, name: str, content: str) -> None:
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(content), encoding="utf-8")
+
+    def _commit(self, subject: str) -> str:
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", subject)
+        return self._git("rev-parse", "HEAD").strip()
+
+    def _entry(self, commit: str, classification: str, rationale: str) -> dict:
+        parent = self._git("rev-parse", f"{commit}^").strip()
+        files = self._git(
+            "diff-tree", "--no-commit-id", "--name-only", "-r", commit
+        ).splitlines()
+        patch = self._git(
+            "diff", "--no-ext-diff", "--full-index", "--binary",
+            parent, commit, binary=True,
+        )
+        starter_patch = self._git(
+            "diff", "--no-ext-diff", "--full-index", "--binary",
+            parent, commit, "--", "starter/", binary=True,
+        )
+        return {
+            "commit": commit,
+            "parent": parent,
+            "subject": self._git("show", "-s", "--format=%s", commit).strip(),
+            "classification": classification,
+            "rationale": rationale,
+            "holdout_result_used": False,
+            "ranking_changed": False,
+            "files": files,
+            "starter_files": [name for name in files if name.startswith("starter/")],
+            "patch_sha256": hashlib.sha256(patch).hexdigest(),
+            "starter_patch_sha256": hashlib.sha256(starter_patch).hexdigest(),
+        }
+
+    def _make_history(self) -> list[dict]:
+        self._write("starter/agent.py", self.HARDENED_AGENT)
+        self._write(
+            "tests/test_agent.py",
+            "def test_environment_cannot_change_bare_agent():\n    pass\n",
+        )
+        hardened = self._commit("Freeze bare agent config against environment")
+        self._write("starter/agent.py", self.DOCSTRING_AGENT)
+        wording = self._commit("Clarify model weight claim")
+        return [
+            self._entry(
+                hardened,
+                "environment_hardening",
+                "Independent release review removed ambient configuration input.",
+            ),
+            self._entry(
+                wording,
+                "docstring_only",
+                "Independent release review corrected module documentation.",
+            ),
+        ]
+
+    def _commit_manifest(self, entries: list[dict]) -> tuple[Path, str]:
+        manifest = {
+            "schema_version": 1,
+            "holdout_commit": self.holdout,
+            "entries": entries,
+        }
+        path = self.root / "lab/post_holdout_starter_changes.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(manifest, indent=2) + "\n"
+        path.write_text(payload, encoding="utf-8")
+        self._commit("Declare post-holdout starter changes")
+        return path, hashlib.sha256(payload.encode()).hexdigest()
+
+    def test_exact_declared_non_ranking_history_passes(self) -> None:
+        path, digest = self._commit_manifest(self._make_history())
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertTrue(got["ok"], got["evidence"])
+        self.assertIn("2 declared", got["evidence"])
+        self.assertIn("DEFAULTS and Agent unchanged", got["evidence"])
+
+    def test_an_undeclared_starter_commit_fails(self) -> None:
+        path, digest = self._commit_manifest(self._make_history())
+        self._write("starter/extra.py", "VALUE = 1\n")
+        commit = self._commit("Undeclared starter change")
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn(commit[:7], got["evidence"])
+        self.assertIn("unlisted", got["evidence"])
+
+    def test_a_tampered_manifest_fails_even_when_the_worktree_copy_is_valid_json(self) -> None:
+        path, digest = self._commit_manifest(self._make_history())
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["entries"][0]["rationale"] = "Rewritten after review."
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("manifest bytes", got["evidence"])
+
+    def test_a_committed_false_patch_identity_fails(self) -> None:
+        entries = self._make_history()
+        entries[0]["starter_patch_sha256"] = "0" * 64
+        path, digest = self._commit_manifest(entries)
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("starter patch sha256", got["evidence"])
+
+    def test_docstring_classification_cannot_hide_a_ranking_change(self) -> None:
+        entries = self._make_history()
+        self._write("starter/agent.py", self.DOCSTRING_AGENT.replace(
+            "return value * DEFAULTS", "return value + DEFAULTS"
+        ))
+        commit = self._commit("Call ranking change a docstring edit")
+        entries.append(self._entry(
+            commit,
+            "docstring_only",
+            "This declaration must not override the semantic check.",
+        ))
+        path, digest = self._commit_manifest(entries)
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("not docstring-only", got["evidence"])
 
 
 class ExternalStatusManifestTest(unittest.TestCase):

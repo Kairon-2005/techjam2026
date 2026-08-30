@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "holdout_commit": "a6c5e44205ee6b484147dc0a2d45a509f31dc30e",
+  "entries": [
+    {
+      "commit": "28b40ad8ad5f62931596053a1fdb521b07c4be02",
+      "parent": "427558d94389fec7460f1612801c2b3dd348bd3e",
+      "subject": "Freeze bare agent config against environment",
+      "classification": "environment_hardening",
+      "rationale": "Independent release review found that bare Agent construction could read ambient TJ_CONFIG. Removing that input closes a judging-host configuration injection path; the sealed holdout was not rerun or consulted and did not motivate this change.",
+      "holdout_result_used": false,
+      "ranking_changed": false,
+      "files": [
+        "starter/agent.py",
+        "tests/test_agent.py"
+      ],
+      "starter_files": [
+        "starter/agent.py"
+      ],
+      "patch_sha256": "c99a04554e90da6c068cdaf48a12e953bd0e4e1d89e1e3ed28f1a11633b5e338",
+      "starter_patch_sha256": "c562dd9657433ef674036864f0bbeb23d472f999801652fe72f2e9790eea0836"
+    },
+    {
+      "commit": "032364ef4d843ec8c77201a86dd3b90218fbb6cb",
+      "parent": "164892234e040152e359443d3a52d8870714667b",
+      "subject": "Clarify model weight claim",
+      "classification": "docstring_only",
+      "rationale": "Independent release review corrected the module docstring from an overbroad claim of no model weights to the precise claim of no learned or neural model weights. The sealed holdout was not rerun or consulted and did not motivate this wording change.",
+      "holdout_result_used": false,
+      "ranking_changed": false,
+      "files": [
+        "starter/agent.py"
+      ],
+      "starter_files": [
+        "starter/agent.py"
+      ],
+      "patch_sha256": "75a78740899b38ef5e31e2e9453a0c7a83e5eb09dbe20131f6164a6c469c7d4a",
+      "starter_patch_sha256": "75a78740899b38ef5e31e2e9453a0c7a83e5eb09dbe20131f6164a6c469c7d4a"
+    }
+  ]
+}

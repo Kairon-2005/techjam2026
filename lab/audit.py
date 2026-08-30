@@ -8,6 +8,8 @@ it. Nothing here is authored by hand.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -17,6 +19,13 @@ from urllib.parse import urlsplit
 
 OUT = Path("docs/SUBMISSION_CHECKLIST.md")
 EXTERNAL_STATUS = Path("lab/external_status.json")
+POST_HOLDOUT_MANIFEST = Path("lab/post_holdout_starter_changes.json")
+# This pins the review record itself. The manifest separately pins each commit
+# and patch; changing either side therefore fails closed rather than silently
+# redefining which post-holdout changes are acceptable.
+POST_HOLDOUT_MANIFEST_SHA256 = (
+    "a1ca95688fe9c9ccbdf5a564a9e15be994abc8b19d463ab5a7fad5a90f9a9efd"
+)
 # Two patterns rather than one: an inline (?i) is only legal at the START of an
 # expression, and the literal key shapes must stay case-SENSITIVE or `AKIA`
 # would match ordinary prose.
@@ -309,21 +318,270 @@ def check_public_once(paths) -> dict:
                         f"and one finalist, no second challenger"}
 
 
-def check_no_sealed_influence(paths) -> dict:
-    # Nothing may have changed after the holdout ran.
-    after = _sh("git", "log", "--format=%H %s", "-20").splitlines()
-    holdout_commit = None
-    for line in after:
-        if "synthetic holdout" in line.lower():
-            holdout_commit = line.split()[0]
-            break
-    if holdout_commit is None:
-        return {"ok": True, "evidence": "holdout not yet committed"}
-    changed = _sh("git", "diff", "--name-only", holdout_commit, "HEAD", "--",
-                  "starter/").strip()
-    return {"ok": not changed,
-            "evidence": changed.splitlines()[:5] or
-            "starter/ unchanged since the holdout was consumed"}
+def _git_at(repo: Path, *args: str, binary: bool = False):
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=not binary,
+    )
+    if proc.returncode:
+        stderr = (proc.stderr.decode() if binary else proc.stderr).strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {stderr}")
+    return proc.stdout
+
+
+def _post_holdout_fail(evidence: str) -> dict:
+    return {"ok": False, "evidence": evidence}
+
+
+def _patch_sha256(repo: Path, parent: str, commit: str,
+                  pathspec: tuple[str, ...] = ()) -> str:
+    args = ["diff", "--no-ext-diff", "--full-index", "--binary",
+            parent, commit]
+    if pathspec:
+        args += ["--", *pathspec]
+    patch = _git_at(repo, *args, binary=True)
+    return hashlib.sha256(patch).hexdigest()
+
+
+class _WithoutDocstrings(ast.NodeTransformer):
+    """Remove docstrings while preserving every executable AST node."""
+
+    def generic_visit(self, node):
+        node = super().generic_visit(node)
+        body = getattr(node, "body", None)
+        if (isinstance(body, list) and body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:]
+        return node
+
+
+def _tree_without_docstrings(source: str) -> str:
+    tree = _WithoutDocstrings().visit(ast.parse(source))
+    return ast.dump(tree, include_attributes=False)
+
+
+def _top_level_named(tree: ast.Module, kind, name: str):
+    for node in tree.body:
+        if isinstance(node, kind) and getattr(node, "name", None) == name:
+            return node
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if (kind is ast.Assign
+                    and any(isinstance(target, ast.Name) and target.id == name
+                            for target in targets)):
+                return node
+    return None
+
+
+def _import_keys(tree: ast.Module) -> set[tuple]:
+    found = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            found.update(("import", alias.name, alias.asname) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            found.update(("from", node.module, node.level, alias.name, alias.asname)
+                         for alias in node.names)
+    return found
+
+
+def _environment_hardening_is_limited(before: str, after: str) -> str | None:
+    old = ast.parse(before)
+    new = ast.parse(after)
+    for kind, name, label in (
+        (ast.Assign, "DEFAULTS", "DEFAULTS"),
+        (ast.ClassDef, "Agent", "Agent class"),
+    ):
+        old_node = _top_level_named(old, kind, name)
+        new_node = _top_level_named(new, kind, name)
+        if old_node is None or new_node is None:
+            return f"environment hardening cannot locate {label}"
+        if ast.dump(old_node, include_attributes=False) != ast.dump(
+                new_node, include_attributes=False):
+            return f"environment hardening changed protected {label}"
+
+    removed = _import_keys(old) - _import_keys(new)
+    added = _import_keys(new) - _import_keys(old)
+    expected_removed = {("import", "json", None), ("import", "os", None)}
+    if removed != expected_removed or added:
+        return "environment hardening changed imports beyond removing json and os"
+
+    def unaffected(tree: ast.Module) -> str:
+        kept = []
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if (isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                continue
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name == "_load_config":
+                continue
+            kept.append(node)
+        return ast.dump(ast.Module(body=kept, type_ignores=[]),
+                        include_attributes=False)
+
+    if unaffected(old) != unaffected(new):
+        return "environment hardening changed code outside _load_config"
+    loader = _top_level_named(new, ast.FunctionDef, "_load_config")
+    if loader is None:
+        return "environment hardening removed _load_config"
+    loader_dump = ast.dump(loader, include_attributes=False)
+    if any(marker in loader_dump for marker in ("TJ_CONFIG", "environ", "json", "os")):
+        return "environment hardening left ambient environment loading in _load_config"
+    return None
+
+
+def verify_post_holdout_influence(repo: Path, manifest_path: Path,
+                                  expected_manifest_sha256: str) -> dict:
+    """Verify declared post-holdout starter changes against Git and semantics."""
+    repo = repo.resolve()
+    manifest_path = manifest_path.resolve()
+    try:
+        relative_manifest = manifest_path.relative_to(repo).as_posix()
+        payload = manifest_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        return _post_holdout_fail(f"cannot read post-holdout manifest: {exc}")
+
+    if hashlib.sha256(payload).hexdigest() != expected_manifest_sha256:
+        return _post_holdout_fail("post-holdout manifest bytes do not match pinned sha256")
+    try:
+        committed = _git_at(repo, "show", f"HEAD:{relative_manifest}", binary=True)
+    except RuntimeError as exc:
+        return _post_holdout_fail(f"post-holdout manifest is not committed at HEAD: {exc}")
+    if payload != committed:
+        return _post_holdout_fail("post-holdout manifest bytes differ from committed HEAD")
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _post_holdout_fail(f"post-holdout manifest is invalid JSON: {exc}")
+
+    if type(manifest) is not dict or set(manifest) != {
+            "schema_version", "holdout_commit", "entries"}:
+        return _post_holdout_fail("post-holdout manifest keys do not match schema")
+    holdout = manifest["holdout_commit"]
+    entries = manifest["entries"]
+    if manifest["schema_version"] != 1:
+        return _post_holdout_fail("post-holdout manifest schema_version must be 1")
+    if not isinstance(holdout, str) or not re.fullmatch(r"[0-9a-f]{40}", holdout):
+        return _post_holdout_fail("holdout_commit must be a full lowercase commit id")
+    if type(entries) is not list:
+        return _post_holdout_fail("post-holdout manifest entries must be a list")
+    try:
+        _git_at(repo, "merge-base", "--is-ancestor", holdout, "HEAD")
+        actual_commits = _git_at(
+            repo, "rev-list", "--reverse", f"{holdout}..HEAD", "--", "starter/"
+        ).splitlines()
+    except RuntimeError as exc:
+        return _post_holdout_fail(f"cannot verify holdout ancestry: {exc}")
+
+    entry_keys = {
+        "commit", "parent", "subject", "classification", "rationale",
+        "holdout_result_used", "ranking_changed", "files", "starter_files",
+        "patch_sha256", "starter_patch_sha256",
+    }
+    declared_commits = []
+    for index, entry in enumerate(entries):
+        prefix = f"entry {index + 1}"
+        if type(entry) is not dict or set(entry) != entry_keys:
+            return _post_holdout_fail(f"{prefix} keys do not match schema")
+        commit = entry["commit"]
+        parent = entry["parent"]
+        if (not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit)
+                or not isinstance(parent, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", parent)):
+            return _post_holdout_fail(f"{prefix} commit and parent must be full ids")
+        declared_commits.append(commit)
+        if entry["classification"] not in {"environment_hardening", "docstring_only"}:
+            return _post_holdout_fail(f"{prefix} has an unsupported classification")
+        if not isinstance(entry["rationale"], str) or not entry["rationale"].strip():
+            return _post_holdout_fail(f"{prefix} rationale must be non-empty")
+        if entry["holdout_result_used"] is not False:
+            return _post_holdout_fail(f"{prefix} must declare holdout_result_used false")
+        if entry["ranking_changed"] is not False:
+            return _post_holdout_fail(f"{prefix} must declare ranking_changed false")
+        if (type(entry["files"]) is not list
+                or not all(isinstance(name, str) for name in entry["files"])
+                or type(entry["starter_files"]) is not list
+                or not all(isinstance(name, str) for name in entry["starter_files"])):
+            return _post_holdout_fail(f"{prefix} file identities must be string lists")
+        if not all(isinstance(entry[name], str)
+                   and re.fullmatch(r"[0-9a-f]{64}", entry[name])
+                   for name in ("patch_sha256", "starter_patch_sha256")):
+            return _post_holdout_fail(f"{prefix} patch identities must be sha256 values")
+        try:
+            parents = _git_at(repo, "show", "-s", "--format=%P", commit).split()
+            subject = _git_at(repo, "show", "-s", "--format=%s", commit).strip()
+            files = _git_at(repo, "diff-tree", "--no-commit-id", "--name-only",
+                            "-r", commit).splitlines()
+        except RuntimeError as exc:
+            return _post_holdout_fail(f"{prefix} cannot resolve commit: {exc}")
+        if parents != [parent]:
+            return _post_holdout_fail(f"{prefix} parent identity does not match Git")
+        if subject != entry["subject"]:
+            return _post_holdout_fail(f"{prefix} subject identity does not match Git")
+        if files != entry["files"]:
+            return _post_holdout_fail(f"{prefix} file identity does not match Git")
+        starter_files = [name for name in files if name.startswith("starter/")]
+        if starter_files != entry["starter_files"]:
+            return _post_holdout_fail(f"{prefix} starter file identity does not match Git")
+        if _patch_sha256(repo, parent, commit) != entry["patch_sha256"]:
+            return _post_holdout_fail(f"{prefix} patch sha256 does not match Git")
+        if _patch_sha256(repo, parent, commit, ("starter/",)) \
+                != entry["starter_patch_sha256"]:
+            return _post_holdout_fail(f"{prefix} starter patch sha256 does not match Git")
+
+        try:
+            if entry["classification"] == "docstring_only":
+                for name in starter_files:
+                    if not name.endswith(".py"):
+                        return _post_holdout_fail(
+                            f"{prefix} docstring-only change includes non-Python {name}")
+                    before = _git_at(repo, "show", f"{parent}:{name}")
+                    after = _git_at(repo, "show", f"{commit}:{name}")
+                    if _tree_without_docstrings(before) != _tree_without_docstrings(after):
+                        return _post_holdout_fail(
+                            f"{prefix} {commit[:7]} is not docstring-only")
+            else:
+                if starter_files != ["starter/agent.py"]:
+                    return _post_holdout_fail(
+                        f"{prefix} environment hardening changed unexpected starter files")
+                before = _git_at(repo, "show", f"{parent}:starter/agent.py")
+                after = _git_at(repo, "show", f"{commit}:starter/agent.py")
+                problem = _environment_hardening_is_limited(before, after)
+                if problem:
+                    return _post_holdout_fail(f"{prefix} {problem}")
+        except (RuntimeError, SyntaxError) as exc:
+            return _post_holdout_fail(f"{prefix} semantic validation failed: {exc}")
+
+    if declared_commits != actual_commits:
+        unlisted = [commit for commit in actual_commits if commit not in declared_commits]
+        if unlisted:
+            return _post_holdout_fail(
+                "unlisted post-holdout starter commit(s): "
+                + ", ".join(commit[:7] for commit in unlisted))
+        extra = [commit for commit in declared_commits if commit not in actual_commits]
+        if extra:
+            return _post_holdout_fail(
+                "manifest lists non-starter or unreachable commit(s): "
+                + ", ".join(commit[:7] for commit in extra))
+        return _post_holdout_fail("declared starter commits are out of Git history order")
+
+    return {
+        "ok": True,
+        "evidence": (
+            f"{len(entries)} declared post-holdout starter commits; exact commits, "
+            "files and patches verified; DEFAULTS and Agent unchanged"
+        ),
+    }
+
+
+def check_post_holdout_influence(paths) -> dict:
+    return verify_post_holdout_influence(
+        Path("."), POST_HOLDOUT_MANIFEST, POST_HOLDOUT_MANIFEST_SHA256)
 
 
 def load_external_status(path: Path | None = None) -> dict:
@@ -441,7 +699,8 @@ CHECKS = [
     ("Full test suite passes", check_tests),
     ("Public 200 used once, for one finalist", check_public_once),
     ("Synthetic holdout consumed exactly once", check_holdout_once),
-    ("No agent change after the holdout ran", check_no_sealed_influence),
+    ("Post-holdout starter changes have declared non-ranking provenance",
+     check_post_holdout_influence),
     ("No CJK text in submission-facing files", check_no_cjk),
     ("No leftover placeholders", check_no_placeholders),
     ("No participant email address published", check_no_emails),

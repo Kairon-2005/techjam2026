@@ -1,6 +1,6 @@
 # Synthetic holdout — consumed 2026-08-30T10:21:52
 
-**One run. `score_default` only. Nothing was changed afterwards.**
+**One run. `score_default` only. No result-driven ranking change afterwards.**
 
 `data/supplementary_holdout.jsonl` is 1,000 sessions generated alongside
 `supplementary_dev` and sealed before Phase 5. No phase read it: no Scenario was
@@ -53,13 +53,37 @@ as one.
 
 ## What it did not do
 
-* It **did not change anything.** Phase 7 is closed (`notes/46`): no weight, no
-  λ, no gate and no default moved after this ran, and none may.
+* It **did not motivate a ranking or configuration decision.** Phase 7 is
+  closed (`notes/46`): no weight, λ, ranking gate, controller logic or default
+  moved in response to this result, and none may.
 * It **was not used to choose** between arms — there were no challengers in this
   run. `score_default` was the only configuration executed.
 * It **cannot be re-run.** `lab/holdout.py` refuses once a row exists. A second
   run would turn a sealed corpus into a tuning set, which is the one thing
   sealing it prevented.
+
+## Post-holdout release-review changes
+
+Independent release review later produced two commits that touch
+`starter/agent.py`. Neither review used the holdout result, and the holdout was
+not rerun. They are declared in
+`lab/post_holdout_starter_changes.json` with their full commit, parent, file
+list, full-patch SHA-256 and starter-only patch SHA-256:
+
+| commit | classification | scope and rationale |
+|---|---|---|
+| `28b40ad8ad5f62931596053a1fdb521b07c4be02` | environment hardening | Removes ambient `TJ_CONFIG` influence from bare `Agent` construction after release review identified a judging-host configuration injection path; adds its regression test. |
+| `032364ef4d843ec8c77201a86dd3b90218fbb6cb` | docstring only | Corrects “no model weights” to “no learned or neural model weights”; executable Python AST is unchanged. |
+
+The repository audit verifies the manifest bytes against a pinned SHA-256,
+requires the working copy to match the committed manifest, compares the exact
+ordered list of every post-holdout `starter/` commit, and recomputes every file
+list and patch identity from Git. It also parses the affected Python versions:
+the wording commit must be docstring-only, while the hardening commit may only
+remove the `json`/`os` imports and alter `_load_config`; `DEFAULTS`, the entire
+`Agent` class (including ranking and controller call sites), and all other
+starter logic must remain AST-identical. Any unlisted starter commit or
+manifest tampering therefore fails the audit.
 
 ## Provenance — and why this row is NOT citable
 
