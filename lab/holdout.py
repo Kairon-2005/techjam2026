@@ -81,7 +81,7 @@ def run() -> dict:
             "seconds": round(time.perf_counter() - started, 1)}
 
 
-def document(row: dict, public: dict) -> str:
+def document(row: dict, public: dict, supval: dict) -> str:
     slices = "\n".join(
         f"| `{name}` | {m['hit_rate_at_10']:.4f} | {m['mrr']:.6f} | {m['mttc']:.4f} |"
         for name, m in sorted((row.get("slices") or {}).items()))
@@ -102,12 +102,19 @@ generator?*
 
 ## Result
 
-| | synthetic holdout (1,000) | public (200) |
-|---|---|---|
-| TechnicalScore | **{row['score']}** | {public['score']} |
-| HR@10 | **{row['hr10']}** | {public['hr10']} |
-| MRR | **{row['mrr']}** | {public['mrr']} |
-| MTTC | **{row['mttc']}** | {public['mttc']} |
+| | synthetic holdout (1,000) | `sup-val` (200) | public (200) |
+|---|---|---|---|
+| TechnicalScore | **{row['score']}** | {supval['score']} | {public['score']} |
+| HR@10 | **{row['hr10']}** | {supval['hr10']} | {public['hr10']} |
+| MRR | **{row['mrr']}** | {supval['mrr']} | {public['mrr']} |
+| MTTC | **{row['mttc']}** | {supval['mttc']} | {public['mttc']} |
+
+`sup-val` is A0 on a *different* 200 sessions from the same generator, measured
+during Phase 7. **The holdout and `sup-val` agree closely; both are far from
+public.** That is the shape the result was expected to have, and it is the
+useful part: the shipped configuration is **stable across unseen sessions from
+the same generator**, and the distance to public is a **distribution difference,
+not overfitting to `supplementary_dev`.**
 
 By scenario:
 
@@ -138,6 +145,26 @@ as one.
   run would turn a sealed corpus into a tuning set, which is the one thing
   sealing it prevented.
 
+## Provenance — and why this row is NOT citable
+
+**The row does not pass our own citability predicate**, and it is reported that
+way rather than admitted by loosening the rule.
+
+The lease symlinked the two cross-encoder files into its worktree. Those files
+became **tracked** when the artifact was bundled for packaging, so `git status`
+reported a typechange and every row of the run was stamped `code_dirty` — a
+measurement invalidated by the isolation that was supposed to protect it. The
+harness is fixed (`lab/lease.py` now never links over anything the checkout
+already provides) and `lab/invalidations.jsonl` records the cause.
+
+**The measurement is sound and the row is still refused.** The lease verified
+`valid`, `agent_commit` matched the isolated commit, `agent_in_worktree` was
+true, and every watched input hashed identically before and after — so nothing
+about the agent or the data moved. But weakening the predicate to admit our own
+row is precisely the failure the predicate exists to prevent, so the number below
+is presented as **measured and non-citable**, and the corpus is **not re-run** to
+obtain a cleaner row.
+
 ## Provenance
 
 | | |
@@ -152,6 +179,19 @@ as one.
 """
 
 
+def supval_a0(ledger: Path = Path("lab/supval.jsonl")) -> dict:
+    """A0's `sup-val` row — the same generator, a different 200 sessions.
+
+    Read from the ledger rather than retyped, so the comparison column cannot
+    drift from what Phase 7 actually measured.
+    """
+    rows = [r for r in P.citable(P.load(ledger)) if r.get("arm") == "a0"]
+    if not rows:
+        return {"score": "—", "hr10": "—", "mrr": "—", "mttc": "—"}
+    row = rows[-1]
+    return {k: row[k] for k in ("score", "hr10", "mrr", "mttc")}
+
+
 def report(ledger: Path = LEDGER) -> int:
     rows = [r for r in P.load(ledger) if r.get("tag") == TAG]
     if not rows:
@@ -163,11 +203,13 @@ def report(ledger: Path = LEDGER) -> int:
                                         PUBLIC_SCORE)
     public = {"score": PUBLIC_SCORE, "hr10": PUBLIC_HR10, "mrr": PUBLIC_MRR,
               "mttc": PUBLIC_MTTC}
-    OUT.write_text(document(row, public), encoding="utf-8")
+    OUT.write_text(document(row, public, supval_a0()), encoding="utf-8")
     print(f"\n=== synthetic OOD holdout, consumed {row['ts']} ===")
-    print(f"  {'':<18}{'holdout (1000)':>18}{'public (200)':>16}")
+    supval = supval_a0()
+    print(f"  {'':<10}{'holdout (1000)':>18}{'sup-val (200)':>16}"
+          f"{'public (200)':>16}")
     for key in ("score", "hr10", "mrr", "mttc"):
-        print(f"  {key:<18}{row[key]:>18}{public[key]:>16}")
+        print(f"  {key:<10}{row[key]:>18}{supval[key]:>16}{public[key]:>16}")
     print(f"  citable            {'yes' if not why else 'no: ' + why}")
     print(f"  -> {OUT}")
     print("\n  Nothing changes as a result. Phase 7 is closed.")

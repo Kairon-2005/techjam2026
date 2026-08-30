@@ -95,9 +95,13 @@ WATCHED = (
     MODEL_DIR + "/tokenizer.json",
 )
 
-# Gitignored inputs the checkout has no copy of. Linked rather than copied --
-# the runs only read them, and the link targets are fingerprinted above, so a
-# repoint mid-flight is caught.
+# Inputs the checkout may have no copy of, linked rather than copied -- the runs
+# only read them, and the link targets are fingerprinted above so a repoint
+# mid-flight is caught. An entry here is a MAY, not a MUST: anything the
+# checkout already provides is left exactly as checked out. The two model files
+# are listed because they were gitignored when the semantic work was done and
+# are bundled now; keeping them here costs nothing and covers a checkout that
+# does not carry them.
 LINKED_INPUTS = ("data/catalog.jsonl", "lab/a1cache.jsonl",
                  MODEL_DIR + "/onnx/model_qint8_arm64.onnx",
                  MODEL_DIR + "/tokenizer.json")
@@ -228,12 +232,19 @@ def _worktree(commit: str, origin: Path):
         # cannot pass unnoticed.
         for relative in LINKED_INPUTS:
             source = origin / relative
+            target = tree / relative
+            # NEVER replace what the checkout already provides. Linking over a
+            # TRACKED file turns it into a symlink, `git status` reports a
+            # typechange, and every row the run produces is stamped code_dirty
+            # and refused by lab/provenance.py -- a measurement invalidated by
+            # the isolation that was supposed to protect it. That is exactly
+            # what happened when the cross-encoder artifact was committed while
+            # still listed here.
+            if target.exists() or target.is_symlink():
+                continue
             if not source.exists():
                 continue
-            target = tree / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists() or target.is_symlink():
-                target.unlink()
             target.symlink_to(source)
         yield tree
     finally:

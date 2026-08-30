@@ -67,6 +67,16 @@ class FingerprintTest(unittest.TestCase):
         for module in ("lab/split.py", "lab/a1search.py", "lab/a1cache.py"):
             self.assertIn(module, L.WATCHED)
 
+    def test_a_tracked_input_is_never_replaced_by_a_link(self) -> None:
+        # Linking over a TRACKED file makes git report a typechange, stamps
+        # every row code_dirty, and gets the run refused by provenance -- a
+        # measurement invalidated by its own isolation. The loop must skip
+        # anything the checkout already provides.
+        source = L._sh("sed", "-n", "/for relative in LINKED_INPUTS:/,/symlink_to/p",
+                       "lab/lease.py")
+        self.assertIn("if target.exists() or target.is_symlink():", source)
+        self.assertIn("continue", source.split("target.exists()", 1)[1])
+
     def test_every_linked_input_is_also_watched(self) -> None:
         # A linked input that is not fingerprinted is the worst of both: it
         # reaches the run through a path the run cannot check, and a repoint
