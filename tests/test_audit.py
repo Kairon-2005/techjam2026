@@ -437,6 +437,7 @@ class ExternalStatusManifestTest(unittest.TestCase):
                 "carry public evidence URLs and pending rows carry null URLs.",
                 generated,
             )
+            self.assertFalse(generated.endswith("\n\n"))
 
 
 if __name__ == "__main__":

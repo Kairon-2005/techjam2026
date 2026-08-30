@@ -778,7 +778,7 @@ def main(argv=None) -> int:
     if pending:
         lines += ["## Remaining PENDING items (external)", ""]
         lines += [f"* **{l}**" for l in pending] + [""]
-    OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    OUT.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
     print(f"\n  repository:  {len(repo) - len(repo_failed)}/{len(repo)} PASS")
     print(f"  external:    {len(external) - len(pending)}/{len(external)} "
