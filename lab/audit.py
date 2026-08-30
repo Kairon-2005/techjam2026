@@ -232,7 +232,7 @@ def check_verification_current(paths) -> dict:
     if not report.get("ok"):
         return {"ok": False, "evidence": f"the recorded run FAILED at {at[:7]}"}
     if at == head:
-        return {"ok": True, "evidence": f"PASS at HEAD {head[:7]}"}
+        return {"ok": True, "evidence": f"PASS at {at[:7]}, which is HEAD"}
     moved = _sh("git", "diff", "--name-only", at, "HEAD", "--",
                 *VERIFIED_TREES).strip()
     if moved:
@@ -240,9 +240,11 @@ def check_verification_current(paths) -> dict:
                 "evidence": f"verified at {at[:7]}, but code changed since: "
                             + ", ".join(moved.splitlines()[:4])
                             + " — re-run lab.verify_clean"}
+    # The current HEAD hash is NOT quoted: this line is written into a file that
+    # the next commit changes, so naming HEAD would make it wrong on commit.
     return {"ok": True,
-            "evidence": f"PASS at {at[:7]}; only documentation changed since "
-                        f"(HEAD {head[:7]}), so the verified code is unchanged"}
+            "evidence": f"PASS at {at[:7]}; only documentation has changed "
+                        f"since, so the verified code is unchanged"}
 
 
 def check_readme_commands(paths) -> dict:
@@ -267,7 +269,16 @@ def check_tests(paths) -> dict:
                            "-s", "tests", "-t", "."],
                           capture_output=True, text=True)
     line = next((l for l in proc.stderr.splitlines() if l.startswith("Ran ")), "")
-    return {"ok": proc.returncode == 0, "evidence": line or proc.stderr[-200:]}
+    verdict = next((l for l in proc.stderr.splitlines()
+                    if l.startswith(("OK", "FAILED"))), "")
+    # The WALL CLOCK is deliberately dropped. This text is written into a file
+    # that the "git tree clean" check then reads, so a number that changes every
+    # run would make the report dirty every run -- a regenerate-and-commit loop
+    # with no fixed point.
+    count = re.match(r"Ran (\d+) tests", line)
+    return {"ok": proc.returncode == 0,
+            "evidence": (f"{count.group(1)} tests, {verdict}" if count
+                         else proc.stderr[-200:])}
 
 
 def check_holdout_once(paths) -> dict:
@@ -308,15 +319,27 @@ def check_no_sealed_influence(paths) -> dict:
             "starter/ unchanged since the holdout was consumed"}
 
 
+# The release this checklist describes. Named rather than resolved to a hash:
+# a document cannot accurately contain the hash of the commit that contains it,
+# and writing one in produced a line that was stale the moment it was committed.
+RELEASE_TAG = "techjam-2026-final-rc2"
+
+
 def check_public_repo(paths) -> dict:
-    """Has the submission been pushed anywhere public? Not yet, by construction."""
+    """Has the release been pushed to the submission remote?
+
+    Answered about the TAG, not about HEAD. The tag is a stable name that
+    survives the commit which records the answer; a HEAD hash does not.
+    """
     remote = _sh("git", "remote", "get-url", "submission").strip()
-    head = _sh("git", "rev-parse", "HEAD").strip()
-    contains = _sh("git", "branch", "-r", "--contains", head).strip()
+    contains = _sh("git", "branch", "-r", "--contains",
+                   RELEASE_TAG + "^{commit}").strip()
     return {"ok": bool(contains),
-            "evidence": (f"HEAD is on {contains}" if contains else
-                         f"HEAD {head[:7]} is on NO remote branch; target "
-                         f"remote is {remote or 'unset'}")}
+            "evidence": (f"release candidate `{RELEASE_TAG}` is published on "
+                         f"{contains}" if contains else
+                         f"release candidate `{RELEASE_TAG}` has not yet been "
+                         f"published to the submission remote "
+                         f"({remote or 'unset'})")}
 
 
 def check_demo_video(paths) -> dict:

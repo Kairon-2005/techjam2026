@@ -36,9 +36,9 @@ context decide how deep to retrieve**.
 **`score_default`: six modules, ~4,800 lines, Python standard library only.**
 SQLite FTS5 for retrieval and deterministic feature reranking, with **no learned
 or neural model weights** on the scored path -- the nine ranking weights are
-hand-configured scalars, set by measurement and frozen. **813 tests executed
-with 1 environment-dependent skip**, including exact end-to-end score locks and
-a configuration lock that asserts every shipped default by name and value.
+hand-configured scalars, set by measurement and frozen. **813 tests, all executed** on a
+committed tree, including exact end-to-end score locks and a configuration lock
+that asserts every shipped default by name and value.
 
 ### Runtime Context Programming (the core idea)
 

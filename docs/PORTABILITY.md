@@ -12,10 +12,17 @@ CPython's bundled SQLite provides on all mainstream builds.
 
 | environment | status | evidence |
 |---|---|---|
-| **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, 802 tests, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
-| **Python 3.13.7, Darwin arm64** | **VERIFIED** | 813 tests pass (1 skip); the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
+| **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, **813 tests executed, 0 skipped**, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
+| **Python 3.13.7, Darwin arm64** | **VERIFIED** | **813 tests executed, 0 skipped**; the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
 | **Python 3.9.6, Darwin arm64** | **FAILS, and this is the floor** | `starter/context.py` uses `dataclasses.dataclass(slots=True)`, added in 3.10: `TypeError: dataclass() got an unexpected keyword argument 'slots'` |
 | **Linux, Python 3.10 / 3.11** | **PENDING — not yet run** | `.github/workflows/portability.yml` exists and is written, but a GitHub Actions workflow cannot execute until the repository is published. **No result is claimed.** |
+
+**On the test count.** The suite has **813 tests and every one of them
+executes** on a committed tree. One test -- `LeaseIsolationTest`, which needs a
+committed tree in order to isolate a worktree -- skips itself when the working
+copy is dirty, so a run taken mid-edit reports `813 ... OK (skipped=1)`. Both
+verification environments above were committed trees, so both report 0 skipped;
+`docs/FINAL_VERIFICATION.md` records exactly that.
 
 **Minimum supported version: Python 3.10**, established by a concrete failure at
 3.9.6 rather than by inspection. This matches the organizer's own guidance that
