@@ -8,7 +8,7 @@ developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
 
 | | |
 |---|---|
-| commit | `ef9026a30b3bb0d7bb0f11b1370f23a1d69b0a78` |
+| commit | `96efae3f6ed0da9e0a7c95236fae17295d8ef7d6` |
 | origin tree clean at verification | PASS |
 | Python | **3.14.6** |
 | platform | darwin / arm64 |
@@ -73,12 +73,12 @@ No problems found.
 | | |
 |---|---|
 | evaluator catalog index | 0.286 s |
-| agent construction (FTS5 index build) | 5.423 s |
-| cold start (process start → first response) | **5.85 s** |
-| warm turn p50 | **13.357 ms** |
-| warm turn p95 | **14.073 ms** |
-| full 200-session evaluation | **15.34 s** |
-| peak RSS | **706.2 MB** |
+| agent construction (FTS5 index build) | 5.704 s |
+| cold start (process start → first response) | **6.134 s** |
+| warm turn p50 | **13.401 ms** |
+| warm turn p95 | **14.176 ms** |
+| full 200-session evaluation | **15.59 s** |
+| peak RSS | **575.7 MB** |
 | network calls | **0** |
 | API cost | **0** |
 | tokens | **0** |
@@ -96,6 +96,6 @@ accident. The semantic showcase imports them **inside `Scorer.load`**, which
 ## 6. Test suite, in the clean worktree
 
 ```
-Ran 813 tests in 45.443s
+Ran 813 tests in 43.854s
 OK
 ```
