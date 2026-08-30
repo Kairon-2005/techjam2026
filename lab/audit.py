@@ -426,12 +426,33 @@ def _environment_hardening_is_limited(before: str, after: str) -> str | None:
 
     if unaffected(old) != unaffected(new):
         return "environment hardening changed code outside _load_config"
-    loader = _top_level_named(new, ast.FunctionDef, "_load_config")
-    if loader is None:
+    old_loader = _top_level_named(old, ast.FunctionDef, "_load_config")
+    new_loader = _top_level_named(new, ast.FunctionDef, "_load_config")
+    if old_loader is None or new_loader is None:
         return "environment hardening removed _load_config"
-    loader_dump = ast.dump(loader, include_attributes=False)
-    if any(marker in loader_dump for marker in ("TJ_CONFIG", "environ", "json", "os")):
-        return "environment hardening left ambient environment loading in _load_config"
+
+    ambient_indexes = [
+        index
+        for index, statement in enumerate(old_loader.body)
+        if any(
+            (isinstance(node, ast.Name) and node.id in {"json", "os"})
+            or (isinstance(node, ast.Constant) and node.value == "TJ_CONFIG")
+            for node in ast.walk(statement)
+        )
+    ]
+    if (len(ambient_indexes) != 2
+            or ambient_indexes[1] != ambient_indexes[0] + 1
+            or not isinstance(old_loader.body[ambient_indexes[0]], ast.Assign)
+            or not isinstance(old_loader.body[ambient_indexes[1]], ast.If)):
+        return "environment hardening cannot isolate the ambient config block"
+    old_loader.body = [
+        statement
+        for index, statement in enumerate(old_loader.body)
+        if index not in ambient_indexes
+    ]
+    if ast.dump(old_loader, include_attributes=False) != ast.dump(
+            new_loader, include_attributes=False):
+        return "environment hardening changed _load_config beyond removing ambient config"
     return None
 
 

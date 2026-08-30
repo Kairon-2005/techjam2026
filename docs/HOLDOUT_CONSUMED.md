@@ -80,10 +80,11 @@ requires the working copy to match the committed manifest, compares the exact
 ordered list of every post-holdout `starter/` commit, and recomputes every file
 list and patch identity from Git. It also parses the affected Python versions:
 the wording commit must be docstring-only, while the hardening commit may only
-remove the `json`/`os` imports and alter `_load_config`; `DEFAULTS`, the entire
-`Agent` class (including ranking and controller call sites), and all other
-starter logic must remain AST-identical. Any unlisted starter commit or
-manifest tampering therefore fails the audit.
+remove the `json`/`os` imports and the ambient `TJ_CONFIG` parsing block from
+`_load_config`. The remaining loader, `DEFAULTS`, the entire `Agent` class
+(including ranking and controller call sites), and all other starter logic must
+remain AST-identical. Any unlisted starter commit or manifest tampering
+therefore fails the audit.
 
 ## Provenance — and why this row is NOT citable
 

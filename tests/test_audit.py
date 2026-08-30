@@ -223,6 +223,20 @@ class PostHoldoutInfluenceManifestTest(unittest.TestCase):
         self.assertFalse(got["ok"])
         self.assertIn("protected DEFAULTS", got["evidence"])
 
+    def test_environment_hardening_cannot_mutate_resolved_defaults(self) -> None:
+        changed = textwrap.dedent(self.HARDENED_AGENT).replace(
+            "    if config:\n",
+            "    resolved['w_pop'] = 999\n    if config:\n",
+        )
+        path, digest = self._commit_manifest([
+            self._commit_environment_hardening(changed)
+        ])
+
+        got = A.verify_post_holdout_influence(self.root, path, digest)
+
+        self.assertFalse(got["ok"])
+        self.assertIn("changed _load_config", got["evidence"])
+
     def test_environment_hardening_cannot_hide_an_agent_change(self) -> None:
         changed = self.HARDENED_AGENT.replace(
             "return value * DEFAULTS", "return value + DEFAULTS"
