@@ -51,7 +51,7 @@ That performance set comes from commit
 `443f6039657278a4afe45a2a50ed2dadba7637d0`, Python 3.14.6 / Darwin arm64.
 Published portability CI independently succeeded on Ubuntu for Python 3.10 and
 3.11 and reproduced 0.932067 exactly: [GitHub Actions run
-33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
+33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426).
 
 ## What was not done, and is not claimed
 

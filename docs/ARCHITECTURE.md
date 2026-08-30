@@ -184,7 +184,7 @@ For the submitted configuration, the authoritative clean-checkout result is
 TechnicalScore 0.932067, HR@10 0.995, MRR 0.852556 and MTTC 2.06 on 200
 simulated sessions. The same score was reproduced on Linux Python 3.10 and 3.11
 in successful [GitHub Actions run
-33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
+33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426).
 
 ## The A2-10 cascade, and why it is safe by construction
 

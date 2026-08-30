@@ -27,7 +27,7 @@ described as such throughout.
 This one performance set comes from the detached clean-checkout verification of
 commit `443f6039657278a4afe45a2a50ed2dadba7637d0` on Python 3.14.6 / Darwin arm64
 — see [`docs/FINAL_VERIFICATION.md`](docs/FINAL_VERIFICATION.md). The separate
-[Linux portability run](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542)
+[Linux portability run](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426)
 succeeded on Ubuntu with Python 3.10 and 3.11 and reproduced TechnicalScore
 0.932067 exactly on both.
 
@@ -276,7 +276,7 @@ stayed A0.
     (0.932067 exactly on both, zero third-party imports). **Minimum supported
     version is Python 3.10**, established by a concrete failure on 3.9.6 rather
     than by inspection. **Linux Python 3.10 and 3.11 are verified** by successful
-    [GitHub Actions run 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542):
+    [GitHub Actions run 33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426):
     the full suite, exact 0.932067 evaluator check and zero-third-party-import
     check passed in both jobs.
   * `showcase_semantic`: measured on **Darwin arm64 only**, using an

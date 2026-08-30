@@ -73,7 +73,7 @@ self-modifying code, or any public gain from profile weighting.
 * `score_default` also passed the full suite, reproduced TechnicalScore
   **0.932067** exactly and imported no third-party packages on Ubuntu with
   Python 3.10 and 3.11 in successful [GitHub Actions run
-  33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542).
+  33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426).
 * Thread sensitivity **was** measured for the semantic showcase (1/2/4/default
   cores), and every setting cleared its 25 ms cap — that is the one portability
   risk we retired with data.

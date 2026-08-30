@@ -284,7 +284,7 @@ class ExternalStatusManifestTest(unittest.TestCase):
                 {
                     "ok": True,
                     "evidence": (
-                        "release candidate `techjam-2026-final-rc2` is "
+                        "release candidate `techjam-2026-final-rc3` is "
                         "published at https://github.com/Kairon-2005/techjam2026"
                     ),
                 },
@@ -311,8 +311,8 @@ class ExternalStatusManifestTest(unittest.TestCase):
                 {
                     "ok": True,
                     "evidence": (
-                        "[run 33290548542](https://github.com/Kairon-2005/"
-                        "techjam2026/actions/runs/33290548542) succeeded on "
+                        "[run 33294760426](https://github.com/Kairon-2005/"
+                        "techjam2026/actions/runs/33294760426) succeeded on "
                         "Ubuntu for Python 3.10 and 3.11; both jobs ran the "
                         "full suite, reproduced TechnicalScore 0.932067 "
                         "exactly, and confirmed zero third-party imports"

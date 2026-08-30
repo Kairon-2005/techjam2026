@@ -1,12 +1,12 @@
 {
   "public_repository": {
     "complete": true,
-    "release_tag": "techjam-2026-final-rc2",
-    "url": "https://github.com/Kairon-2005/techjam2026/tree/techjam-2026-final-rc2"
+    "release_tag": "techjam-2026-final-rc3",
+    "url": "https://github.com/Kairon-2005/techjam2026/tree/techjam-2026-final-rc3"
   },
   "linux_ci": {
     "complete": true,
-    "url": "https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542"
+    "url": "https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426"
   },
   "demo_video": {
     "complete": false,

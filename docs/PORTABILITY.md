@@ -15,7 +15,7 @@ CPython's bundled SQLite provides on all mainstream builds.
 | **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, **828 tests executed, 0 skipped**, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
 | **Python 3.13.7, Darwin arm64** | **VERIFIED** | **813 tests executed, 0 skipped**; the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
 | **Python 3.9.6, Darwin arm64** | **FAILS, and this is the floor** | `starter/context.py` uses `dataclasses.dataclass(slots=True)`, added in 3.10: `TypeError: dataclass() got an unexpected keyword argument 'slots'` |
-| **Linux (Ubuntu), Python 3.10 / 3.11** | **VERIFIED** | both jobs succeeded in [GitHub Actions run 33290548542](https://github.com/Kairon-2005/techjam2026/actions/runs/33290548542): full suite, exact TechnicalScore 0.932067 reproduction, and zero third-party imports |
+| **Linux (Ubuntu), Python 3.10 / 3.11** | **VERIFIED** | both jobs succeeded in [GitHub Actions run 33294760426](https://github.com/Kairon-2005/techjam2026/actions/runs/33294760426): full suite, exact TechnicalScore 0.932067 reproduction, and zero third-party imports |
 
 **On the current test count.** The release suite has **828 tests and every one
 executes** in the current committed-tree verification. The earlier Python 3.13.7
@@ -35,7 +35,7 @@ The headline performance set is still the detached clean-checkout run at commit
 TechnicalScore 0.932067, HR@10 0.995, MRR 0.852556, MTTC 2.06, cold start
 11.526 s, warm-turn p50/p95 24.366/26.908 ms, full evaluation 30.47 s and peak
 RSS 701.4 MB. The Linux CI is an independent portability result on published
-commit `eb314bb7b06f2c93d49381f4d96734d6aed3b0f1`; it confirms the exact score
+commit `ff25c6ff46219ce059afd729cc125cbf846a9714`; it confirms the exact score
 and dependency/test gates, not Darwin latency or memory.
 
 ## `showcase_semantic` — the optional A2-10 cascade
