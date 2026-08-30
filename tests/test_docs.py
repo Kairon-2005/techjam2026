@@ -134,6 +134,60 @@ class ReadmeHonestyTest(unittest.TestCase):
                         f"README claims {claimed} tests, source defines {actual}")
 
 
+class DevpostAndArchitectureTest(unittest.TestCase):
+    """The two documents judges read alongside the README."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.devpost = flatten(Path("docs/DEVPOST_DRAFT.md").read_text(encoding="utf-8"))
+        cls.arch = Path("docs/ARCHITECTURE.md").read_text(encoding="utf-8")
+
+    def test_the_devpost_covers_every_judging_weight(self) -> None:
+        for weight in ("35%", "20%", "15%", "10%"):
+            self.assertIn(weight, self.devpost, weight)
+        for section in ("Technical Execution", "Innovation", "Impact",
+                        "Feasibility", "Presentation"):
+            self.assertIn(section, self.devpost, section)
+
+    def test_the_devpost_quotes_the_locked_numbers(self) -> None:
+        for value in (PUBLIC_SCORE, PUBLIC_HR10, PUBLIC_MRR, PUBLIC_MTTC):
+            self.assertIn(str(value), self.devpost, str(value))
+
+    def test_the_devpost_carries_the_a1_qualification(self) -> None:
+        for phrase in ("within-generator generalization",
+                       "not claimed as the sole factor",
+                       "failed cross-distribution transfer"):
+            self.assertTrue(" ".join(phrase.split()) in self.devpost, phrase)
+
+    def test_the_devpost_claims_no_public_number_for_the_showcases(self) -> None:
+        self.assertIn("feature-off", self.devpost)
+        self.assertIn("no public claim", self.devpost)
+
+    def test_the_architecture_has_a_mermaid_diagram(self) -> None:
+        self.assertIn("```mermaid", self.arch)
+        self.assertIn("flowchart", self.arch)
+
+    def test_the_architecture_marks_the_off_capabilities_off(self) -> None:
+        diagram = self.arch.split("```mermaid", 1)[1].split("```", 1)[0]
+        for capability in ("dense source", "A2-10 semantic cascade"):
+            self.assertIn(capability, diagram, capability)
+        self.assertGreaterEqual(diagram.count("<b>OFF</b>"), 2,
+                                "the diagram does not mark both optional "
+                                "capabilities as off")
+        for controller in ("retrieval controller", "question controller"):
+            self.assertIn(controller, diagram, controller)
+        self.assertGreaterEqual(diagram.count("Pillar III - ON"), 2)
+
+    def test_the_architecture_covers_all_four_pillars(self) -> None:
+        for pillar in ("Pillar I", "Pillar II", "Pillar III", "Pillar IV"):
+            self.assertIn(pillar, self.arch, pillar)
+
+    def test_the_architecture_states_the_profile_limit_verbatim(self) -> None:
+        flat = flatten(self.arch)
+        self.assertIn("does not invent cross-session memory", flat)
+        self.assertIn("no stable user identity", flat)
+
+
 class CommandTest(unittest.TestCase):
     """Every command in the README has to be one a judge can actually run."""
 
