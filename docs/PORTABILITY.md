@@ -13,7 +13,7 @@ CPython's bundled SQLite provides on all mainstream builds.
 | environment | status | evidence |
 |---|---|---|
 | **Python 3.14.6, Darwin arm64** | **VERIFIED** | full clean-checkout verification: 0.932067 / 0.995 / 0.852556 / 2.06, 802 tests, zero third-party imports — `docs/FINAL_VERIFICATION.md` |
-| **Python 3.13.7, Darwin arm64** | **VERIFIED** | 812 tests pass (1 skip); the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
+| **Python 3.13.7, Darwin arm64** | **VERIFIED** | 813 tests pass (1 skip); the official evaluator returns 0.932067 / 0.995 / 0.852556 / 2.06 exactly; third-party packages loaded: none |
 | **Python 3.9.6, Darwin arm64** | **FAILS, and this is the floor** | `starter/context.py` uses `dataclasses.dataclass(slots=True)`, added in 3.10: `TypeError: dataclass() got an unexpected keyword argument 'slots'` |
 | **Linux, Python 3.10 / 3.11** | **PENDING — not yet run** | `.github/workflows/portability.yml` exists and is written, but a GitHub Actions workflow cannot execute until the repository is published. **No result is claimed.** |
 

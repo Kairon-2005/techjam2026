@@ -25,7 +25,7 @@ flattens the resource gap and makes ~25-second iteration possible.
 | **Optional capabilities** | dense random-indexing retriever + RRF fusion; TinyBERT ONNX cross-encoder cascade — both implemented, measured, shipped off |
 | **Experiment harness** | exclusive leases in isolated worktrees, append-only ledgers, one citability predicate, invalidation records, scenario library, benchmark harness — `lab/` |
 | **Evidence discipline** | 8 phases of pre-registration and results notes — `notes/`, 46 documents |
-| **Tests** | 812 executed with 1 environment-dependent skip, including exact public-score locks, the configuration lock, and negative tests for every guard |
+| **Tests** | 813 executed with 1 environment-dependent skip, including exact public-score locks, the configuration lock, and negative tests for every guard |
 | **Packaging** | clean-checkout verification, model card, demo, this documentation |
 
 ## What was not done, and is not claimed

@@ -36,7 +36,7 @@ context decide how deep to retrieve**.
 **`score_default`: six modules, ~4,800 lines, Python standard library only.**
 SQLite FTS5 for retrieval and deterministic feature reranking, with **no learned
 or neural model weights** on the scored path -- the nine ranking weights are
-hand-configured scalars, set by measurement and frozen. **812 tests executed
+hand-configured scalars, set by measurement and frozen. **813 tests executed
 with 1 environment-dependent skip**, including exact end-to-end score locks and
 a configuration lock that asserts every shipped default by name and value.
 
@@ -217,7 +217,7 @@ what **not** to say.
 |---|---|
 | Python 3.14.6 (CPython) | the only interpreter this was measured on; the code targets 3.10+ |
 | `sqlite3` with FTS5 (standard library) | the retrieval index |
-| `unittest` (standard library) | the 812-test suite |
+| `unittest` (standard library) | the 813-test suite |
 | `git` (worktrees, tags, append-only ledgers) | isolation for every measurement, and the provenance chain |
 | `venv` + `pip` | **only** for the optional semantic showcase |
 | macOS on Apple silicon (Darwin arm64) | the measurement host |

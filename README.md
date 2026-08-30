@@ -271,7 +271,7 @@ demo/               python3 -m demo
 lab/                experiment harness: leases, ledgers, provenance, scenarios, benchmarks
 notes/              46 numbered design, pre-registration and results documents
 docs/               verification, model card, architecture, limitations, submission checklist
-tests/              812 tests executed (1 environment-dependent skip), including
+tests/              813 tests executed (1 environment-dependent skip), including
                     exact score locks and the configuration lock
 ```
 
