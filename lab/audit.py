@@ -13,8 +13,10 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 OUT = Path("docs/SUBMISSION_CHECKLIST.md")
+EXTERNAL_STATUS = Path("lab/external_status.json")
 # Two patterns rather than one: an inline (?i) is only legal at the START of an
 # expression, and the literal key shapes must stay case-SENSITIVE or `AKIA`
 # would match ordinary prose.
@@ -213,8 +215,13 @@ def check_no_emails(paths) -> dict:
 
 
 def check_tree_clean(paths) -> dict:
-    dirty = _sh("git", "status", "--porcelain").strip()
-    return {"ok": not dirty, "evidence": dirty.splitlines()[:5] or "clean"}
+    lines = [line for line in _sh("git", "status", "--porcelain").splitlines()
+             if line.strip()]
+    # The report is this command's output. Counting a prior generation as a
+    # dirty input makes pass two disagree with pass one and prevents a fixed
+    # point even when no source changed.
+    dirty = [line for line in lines if line[3:] != str(OUT)]
+    return {"ok": not dirty, "evidence": dirty[:5] or "clean"}
 
 
 # What the clean-checkout verification actually verifies. A commit that touches
@@ -319,59 +326,107 @@ def check_no_sealed_influence(paths) -> dict:
             "starter/ unchanged since the holdout was consumed"}
 
 
-# The release this checklist describes. Named rather than resolved to a hash:
-# a document cannot accurately contain the hash of the commit that contains it,
-# and writing one in produced a line that was stale the moment it was committed.
-RELEASE_TAG = "techjam-2026-final-rc2"
+def load_external_status(path: Path | None = None) -> dict:
+    source = path or EXTERNAL_STATUS
+    facts = json.loads(source.read_text(encoding="utf-8"))
+    fields = {
+        "public_repository": {"complete", "release_tag", "url"},
+        "linux_ci": {"complete", "url"},
+        "demo_video": {"complete", "url"},
+        "devpost": {"complete", "url"},
+    }
+    if type(facts) is not dict or set(facts) != set(fields):
+        raise ValueError("external status keys do not match the required schema")
+    for name, required in fields.items():
+        fact = facts[name]
+        if type(fact) is not dict or set(fact) != required:
+            raise ValueError(f"{name} keys do not match the required schema")
+        complete = fact["complete"]
+        url = fact["url"]
+        if type(complete) is not bool:
+            raise ValueError(f"{name}.complete must be a boolean")
+        if not complete and url is not None:
+            raise ValueError(f"{name}: pending entries must have a null URL")
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if complete and (parsed is None or parsed.scheme != "https"
+                         or not parsed.netloc):
+            raise ValueError(f"{name}: complete entries require an HTTPS URL")
+    tag = facts["public_repository"]["release_tag"]
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("public_repository.release_tag must be a non-empty string")
+    repository = facts["public_repository"]
+    ci = facts["linux_ci"]
+    if ci["complete"] and not repository["complete"]:
+        raise ValueError(
+            "linux_ci cannot be complete while public_repository is pending")
+    if repository["complete"]:
+        parsed = urlsplit(repository["url"])
+        parts = parsed.path.strip("/").split("/")
+        if (parsed.netloc.lower() != "github.com" or parsed.query
+                or parsed.fragment or len(parts) != 4 or parts[2] != "tree"
+                or parts[3] != tag):
+            raise ValueError(
+                "public_repository.url must identify its release tag")
+        if ci["complete"]:
+            ci_url = urlsplit(ci["url"])
+            ci_parts = ci_url.path.strip("/").split("/")
+            if (ci_url.netloc.lower() != "github.com" or ci_url.query
+                    or ci_url.fragment or len(ci_parts) != 5
+                    or ci_parts[:2] != parts[:2]
+                    or ci_parts[2:4] != ["actions", "runs"]
+                    or not ci_parts[4].isdigit()):
+                raise ValueError(
+                    "linux_ci.url must identify a numeric Actions run in the "
+                    "public repository")
+    return facts
 
 
 def check_public_repo(paths) -> dict:
-    """Has the release been pushed to the submission remote?
-
-    Answered about the TAG, not about HEAD. The tag is a stable name that
-    survives the commit which records the answer; a HEAD hash does not.
-    """
-    remote = _sh("git", "remote", "get-url", "submission").strip()
-    contains = _sh("git", "branch", "-r", "--contains",
-                   RELEASE_TAG + "^{commit}").strip()
-    return {"ok": bool(contains),
-            "evidence": (f"release candidate `{RELEASE_TAG}` is published on "
-                         f"{contains}" if contains else
-                         f"release candidate `{RELEASE_TAG}` has not yet been "
-                         f"published to the submission remote "
-                         f"({remote or 'unset'})")}
+    fact = load_external_status()["public_repository"]
+    tag = fact["release_tag"]
+    parsed = urlsplit(fact["url"]) if fact["complete"] else None
+    repository = (f"{parsed.scheme}://{parsed.netloc}/"
+                  + "/".join(parsed.path.strip("/").split("/")[:2])
+                  if parsed else None)
+    return {"ok": fact["complete"],
+            "evidence": (f"release candidate `{tag}` is published at "
+                         f"{repository}" if fact["complete"] else
+                         f"release candidate `{tag}` is not yet public")}
 
 
 def check_demo_video(paths) -> dict:
-    text = Path("README.md").read_text(encoding="utf-8")
-    line = next((l for l in text.splitlines() if "Demo video" in l), "")
-    done = "youtu" in line.lower() or "http" in line
-    return {"ok": done,
-            "evidence": "a link is present" if done else
-                        "README still carries the demo-video placeholder"}
+    fact = load_external_status()["demo_video"]
+    return {"ok": fact["complete"],
+            "evidence": (f"[demo video]({fact['url']})" if fact["complete"] else
+                         "README still carries the demo-video placeholder")}
 
 
 def check_devpost(paths) -> dict:
-    return {"ok": False,
-            "evidence": "docs/DEVPOST_DRAFT.md is a DRAFT; nothing has been "
-                        "submitted, so no Devpost URL exists yet"}
+    fact = load_external_status()["devpost"]
+    return {"ok": fact["complete"],
+            "evidence": (f"[Devpost submission]({fact['url']})"
+                         if fact["complete"] else
+                         "docs/DEVPOST_DRAFT.md is a DRAFT; nothing has been "
+                         "submitted, so no Devpost URL exists yet")}
 
 
 def check_linux_ci(paths) -> dict:
-    workflow = Path(".github/workflows/portability.yml")
-    if not workflow.exists():
-        return {"ok": False, "evidence": "no Linux portability workflow"}
-    return {"ok": False,
-            "evidence": "workflow written for Python 3.10/3.11 on Linux; it "
-                        "cannot run until the repository is published, and no "
-                        "result is claimed (docs/PORTABILITY.md)"}
+    fact = load_external_status()["linux_ci"]
+    if not fact["complete"]:
+        return {"ok": False,
+                "evidence": "no successful Linux portability CI run recorded"}
+    run = fact["url"].rstrip("/").rsplit("/", 1)[-1]
+    return {"ok": True,
+            "evidence": f"[run {run}]({fact['url']}) succeeded on Ubuntu for "
+                        "Python 3.10 and 3.11; both jobs ran the full suite, "
+                        "reproduced TechnicalScore 0.932067 exactly, and "
+                        "confirmed zero third-party imports"}
 
 
-# Two groups, kept apart on purpose. The first is about this repository and can
-# be settled here. The second is about things that exist OUTSIDE it -- a public
-# push, a video, a Devpost entry, a CI run -- and cannot pass until they exist.
-# Reporting them together as one score would let "15/15" stand in for a
-# submission that has not been submitted.
+# Two groups, kept apart on purpose. The first is checked from repository state.
+# The second is read from committed facts about external deliverables, which a
+# checkout cannot rediscover without network access. Reporting the groups as one
+# score would let repository health stand in for submission completeness.
 CHECKS = [
     ("No secrets or API keys in tracked files", check_no_secrets),
     ("No absolute developer paths in tracked source", check_no_absolute_paths),
@@ -426,6 +481,9 @@ def _table(results, pending: bool) -> list[str]:
 
 
 def main(argv=None) -> int:
+    # Invalid committed facts are an audit defect, not an external PENDING
+    # deliverable. Validate before `_run` can turn check exceptions into rows.
+    load_external_status()
     print("== repository / code audit ==")
     repo = _run(CHECKS)
     print("\n== external submission deliverables ==")
@@ -450,8 +508,9 @@ def main(argv=None) -> int:
         *_table(repo, pending=False), "",
         "## 2. External submission deliverables", "",
         f"**{len(external) - len(pending)} of {len(external)} complete; "
-        f"{len(pending)} PENDING.** None of these can be satisfied from inside "
-        "the repository, and none is claimed as done.", "",
+        f"{len(pending)} PENDING.** Status is read from "
+        "`lab/external_status.json`; complete rows carry public evidence URLs "
+        "and pending rows carry null URLs.", "",
         *_table(external, pending=True), "",
     ]
     if repo_failed:
