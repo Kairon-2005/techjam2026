@@ -52,9 +52,19 @@ class ReadmeNumbersTest(unittest.TestCase):
         self.assertIn(str(baseline["technical_score"]), self.text)
 
     def test_the_cost_claims_come_from_the_verification_run(self) -> None:
+        # The MEASUREMENTS, deliberately not the report's `ok` flag. `ok` folds
+        # in tests_pass, and this test runs inside that suite -- asserting it
+        # here makes the verification self-referential: one failing report
+        # fails this test, which fails the suite, which makes the next report
+        # fail. `ok` is checked by lab/audit.py, which runs outside the suite.
         report = json.loads(VERIFICATION_JSON.read_text(encoding="utf-8"))
         self.assertEqual(report["result"]["score"], PUBLIC_SCORE)
-        self.assertTrue(report["ok"], "the committed verification run did not pass")
+        self.assertEqual(report["result"]["hr10"], PUBLIC_HR10)
+        self.assertEqual(report["result"]["mrr"], PUBLIC_MRR)
+        self.assertEqual(report["result"]["mttc"], PUBLIC_MTTC)
+        self.assertTrue(report["matches_expected"])
+        self.assertTrue(report["standard_library_only"])
+        self.assertTrue(report["schema"]["ok"])
         self.assertEqual(report["third_party_loaded"], [])
         self.assertIn(report["python"], VERIFICATION.read_text(encoding="utf-8"))
 

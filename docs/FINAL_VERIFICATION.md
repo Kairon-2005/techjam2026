@@ -8,8 +8,8 @@ developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
 
 | | |
 |---|---|
-| commit | `13d5ce9be0ccab8c1a4ddd8cb7a794c2abdf89d5` |
-| origin tree clean at verification | **FAIL** |
+| commit | `3db7e3c37260a5509e0dacffb7e63706906c6d10` |
+| origin tree clean at verification | PASS |
 | Python | **3.14.6** |
 | platform | darwin / arm64 |
 | overall | **FAIL** |
@@ -72,13 +72,13 @@ No problems found.
 
 | | |
 |---|---|
-| evaluator catalog index | 0.277 s |
-| agent construction (FTS5 index build) | 5.302 s |
-| cold start (process start → first response) | **5.716 s** |
-| warm turn p50 | **12.351 ms** |
-| warm turn p95 | **13.582 ms** |
-| full 200-session evaluation | **15.05 s** |
-| peak RSS | **704.5 MB** |
+| evaluator catalog index | 0.301 s |
+| agent construction (FTS5 index build) | 5.547 s |
+| cold start (process start → first response) | **5.983 s** |
+| warm turn p50 | **13.306 ms** |
+| warm turn p95 | **13.958 ms** |
+| full 200-session evaluation | **16.26 s** |
+| peak RSS | **711.4 MB** |
 | network calls | **0** |
 | API cost | **0** |
 | tokens | **0** |
@@ -96,6 +96,6 @@ accident. The semantic showcase imports them **inside `Scorer.load`**, which
 ## 6. Test suite, in the clean worktree
 
 ```
-Ran 802 tests in 48.054s
-OK
+Ran 802 tests in 44.145s
+FAILED (failures=1)
 ```
