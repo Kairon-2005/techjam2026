@@ -31,8 +31,14 @@ from pathlib import Path
 OUT = Path("docs/FINAL_VERIFICATION.md")
 FORBIDDEN_PACKAGES = ("numpy", "onnxruntime", "tokenizers", "torch",
                       "transformers", "scipy", "sklearn", "faiss", "pandas")
-FORBIDDEN_PATHS = (".venv", "lab/a1cache.jsonl", "lab/a2cache.jsonl",
-                   "lab/r0/artifacts/ms-marco-TinyBERT-L2-v2")
+# Must be ABSENT from a clean checkout: developer-local state that could make
+# a verification pass for the wrong reason.
+FORBIDDEN_PATHS = (".venv", "lab/a1cache.jsonl", "lab/a2cache.jsonl")
+# Must be PRESENT and byte-correct: the bundled showcase artifact. It is
+# Apache-2.0 and ships with the repository, so the question is no longer
+# "is it absent" but "does score_default touch it" -- answered below by
+# semantic_model_dir being empty and by no third-party package loading.
+BUNDLED_ARTIFACT = "lab/r0/artifacts/ms-marco-TinyBERT-L2-v2"
 EXPECTED = {"score": 0.932067, "hr10": 0.995, "mrr": 0.852556, "mttc": 2.06}
 
 
@@ -42,6 +48,7 @@ from pathlib import Path
 
 FORBIDDEN_PACKAGES = %(packages)r
 FORBIDDEN_PATHS = %(paths)r
+BUNDLED_ARTIFACT = %(artifact)r
 EXPECTED = %(expected)r
 report = {"python": sys.version.split()[0], "executable": sys.executable,
           "cwd": os.getcwd(), "platform": sys.platform,
@@ -54,6 +61,23 @@ def rss_mb():
 # ---- 1. the tree is actually clean -------------------------------------
 report["absent"] = {p: not Path(p).exists() for p in FORBIDDEN_PATHS}
 report["tree_is_clean"] = all(report["absent"].values())
+
+# ---- 1b. the bundled artifact is present, complete and unread ----------
+import hashlib
+root = Path(BUNDLED_ARTIFACT)
+digests = json.loads(Path("lab/r0/artifacts/digests.json").read_text())
+pinned = digests["cross-encoder/ms-marco-TinyBERT-L2-v2"]["sha256"]
+bundle = {}
+for name, expected_sha in sorted(pinned.items()):
+    path = root / name
+    if not path.exists():
+        bundle[name] = "MISSING"
+        continue
+    got = hashlib.sha256(path.read_bytes()).hexdigest()
+    bundle[name] = "ok" if got == expected_sha else "sha256 %%s" %% got
+bundle["LICENSE"] = "ok" if (root / "LICENSE").exists() else "MISSING"
+report["bundled_artifact"] = bundle
+report["artifact_intact"] = all(v == "ok" for v in bundle.values())
 
 # ---- 2. the scored path imports nothing third-party --------------------
 t_process = time.perf_counter()
@@ -143,8 +167,15 @@ loaded = sorted(p for p in FORBIDDEN_PACKAGES if p in sys.modules)
 report["third_party_loaded"] = loaded
 report["standard_library_only"] = not loaded
 
+# The scored default must not even NAME the artifact, let alone load it.
+report["semantic_model_dir_is_empty"] = A.DEFAULTS["semantic_model_dir"] == ""
+report["semantic_mode_is_off"] = A.DEFAULTS["semantic_rerank_mode"] == "off"
+
 report["ok"] = bool(report["tree_is_clean"] and report["matches_expected"]
-                    and report["schema"]["ok"] and report["standard_library_only"])
+                    and report["schema"]["ok"] and report["standard_library_only"]
+                    and report["artifact_intact"]
+                    and report["semantic_model_dir_is_empty"]
+                    and report["semantic_mode_is_off"])
 print("VERIFY_JSON " + json.dumps(report))
 '''
 
@@ -186,6 +217,7 @@ def run(python: str = sys.executable) -> dict:
         print("  running the official evaluator ...", flush=True)
         script = CHILD % {"packages": FORBIDDEN_PACKAGES,
                           "paths": FORBIDDEN_PATHS, "expected": EXPECTED,
+                          "artifact": BUNDLED_ARTIFACT,
                           "machine": platform.machine()}
         child = subprocess.run([python, "-c", script], cwd=str(tree),
                                env={**env, "PYTHONPATH": str(tree)},
@@ -217,8 +249,12 @@ def run(python: str = sys.executable) -> dict:
 def document(report: dict) -> str:
     r, s = report["result"], report["schema"]
     mark = lambda ok: "PASS" if ok else "**FAIL**"
+    model_dir_empty = mark(report["semantic_model_dir_is_empty"])
+    mode_off = mark(report["semantic_mode_is_off"])
     absent = "\n".join(f"| `{p}` | {mark(ok)} |"
                        for p, ok in sorted(report["absent"].items()))
+    bundle = "\n".join(f"| `{n}` | {mark(v == 'ok')} |"
+                       for n, v in sorted(report["bundled_artifact"].items()))
     return f"""# Final verification — clean checkout
 
 Produced by `python3 -m lab.verify_clean`, which creates a **detached worktree
@@ -242,6 +278,18 @@ Only the Python version above was exercised. No claim is made about any other.
 | path | absent |
 |---|---|
 {absent}
+
+The bundled Apache-2.0 showcase artifact IS present, and every file matches the
+sha256 recorded in `lab/r0/artifacts/digests.json` when it was fetched at its
+pinned revision:
+
+| file | |
+|---|---|
+{bundle}
+
+**`score_default` never reads it.** `semantic_model_dir` resolves to the empty
+string ({model_dir_empty}) and `semantic_rerank_mode` to `off`
+({mode_off}), so the scored path cannot reach the artifact even if it is there.
 
 ## 2. The official evaluator reproduces the frozen numbers
 

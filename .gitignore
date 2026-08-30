@@ -15,6 +15,10 @@ lab/a2cache.jsonl
 # lab/r0/artifacts/digests.json.
 .venv/
 lab/r0/artifacts/*/
+# ...except the ONE pinned artifact the semantic showcase needs, which is
+# Apache-2.0 and is bundled so the showcase runs offline from a clean
+# checkout. score_default never reads it.
+!lab/r0/artifacts/ms-marco-TinyBERT-L2-v2/
 data/releases/
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/

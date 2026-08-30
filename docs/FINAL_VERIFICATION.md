@@ -8,11 +8,11 @@ developer's `.venv`, the cross-encoder artifact and the A1 feature cache are
 
 | | |
 |---|---|
-| commit | `9de5271b2862376f918f51ec4db4e439e78819db` |
-| origin tree clean at verification | PASS |
+| commit | `06af0f11446b3156d3f35193960832aabfd810d0` |
+| origin tree clean at verification | **FAIL** |
 | Python | **3.14.6** |
 | platform | darwin / arm64 |
-| overall | PASS |
+| overall | **FAIL** |
 
 Only the Python version above was exercised. No claim is made about any other.
 
@@ -23,7 +23,24 @@ Only the Python version above was exercised. No claim is made about any other.
 | `.venv` | PASS |
 | `lab/a1cache.jsonl` | PASS |
 | `lab/a2cache.jsonl` | PASS |
-| `lab/r0/artifacts/ms-marco-TinyBERT-L2-v2` | PASS |
+
+The bundled Apache-2.0 showcase artifact IS present, and every file matches the
+sha256 recorded in `lab/r0/artifacts/digests.json` when it was fetched at its
+pinned revision:
+
+| file | |
+|---|---|
+| `LICENSE` | **FAIL** |
+| `config.json` | **FAIL** |
+| `onnx/model_qint8_arm64.onnx` | **FAIL** |
+| `special_tokens_map.json` | **FAIL** |
+| `tokenizer.json` | **FAIL** |
+| `tokenizer_config.json` | **FAIL** |
+| `vocab.txt` | **FAIL** |
+
+**`score_default` never reads it.** `semantic_model_dir` resolves to the empty
+string (PASS) and `semantic_rerank_mode` to `off`
+(PASS), so the scored path cannot reach the artifact even if it is there.
 
 ## 2. The official evaluator reproduces the frozen numbers
 
@@ -55,13 +72,13 @@ No problems found.
 
 | | |
 |---|---|
-| evaluator catalog index | 0.551 s |
-| agent construction (FTS5 index build) | 10.593 s |
-| cold start (process start → first response) | **11.423 s** |
-| warm turn p50 | **25.723 ms** |
-| warm turn p95 | **39.317 ms** |
-| full 200-session evaluation | **30.25 s** |
-| peak RSS | **702.7 MB** |
+| evaluator catalog index | 0.565 s |
+| agent construction (FTS5 index build) | 10.52 s |
+| cold start (process start → first response) | **11.364 s** |
+| warm turn p50 | **26.155 ms** |
+| warm turn p95 | **29.528 ms** |
+| full 200-session evaluation | **31.09 s** |
+| peak RSS | **720.4 MB** |
 | network calls | **0** |
 | API cost | **0** |
 | tokens | **0** |
@@ -79,6 +96,6 @@ accident. The semantic showcase imports them **inside `Scorer.load`**, which
 ## 6. Test suite, in the clean worktree
 
 ```
-Ran 741 tests in 85.796s
+Ran 741 tests in 87.510s
 OK
 ```

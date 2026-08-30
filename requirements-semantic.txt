@@ -1,0 +1,21 @@
+# OPTIONAL -- the A2-10 semantic showcase only. NOT needed to reproduce the
+# submitted score, and never imported by score_default.
+#
+#   python3 -m venv .venv
+#   ./.venv/bin/pip install -r requirements-semantic.txt
+#   ./.venv/bin/python -m demo --profile showcase_semantic
+#
+# Versions are pinned to the ones every Phase 7A measurement was taken under
+# (lab/r01/r01-requirements.txt, notes/43, notes/45). onnxruntime is the CPU
+# build; torch and transformers are deliberately absent -- Phase 7A-R0 measured
+# 53.2 MB of RSS for numpy+onnxruntime+tokenizers against 346.1 MB once
+# transformers pulled torch in, and a shipped ONNX Runtime component needs
+# neither. `tokenizers` IS the native tokenizer that transformers wraps.
+onnxruntime==1.24.1
+numpy==2.5.2
+tokenizers==0.22.2
+
+# The model artifact is BUNDLED at lab/r0/artifacts/ms-marco-TinyBERT-L2-v2
+# (Apache-2.0, see docs/MODEL_CARD.md), so the showcase runs offline after this
+# install. To re-fetch and re-verify it from the pinned revision instead:
+#   python3 -m lab.r1_artifact
